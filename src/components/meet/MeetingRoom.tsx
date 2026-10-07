@@ -54,6 +54,8 @@ import { YouTubeConnectModal } from "../youtube/YouTubeConnectModal";
 import {
   startYouTubeLiveStreaming,
   stopYouTubeLiveStreaming,
+  updateYouTubeLiveAudioSources,
+  StreamStats,
 } from "../../services/youtubeService";
 import { toast } from "sonner";
 
@@ -187,9 +189,36 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // YouTube Live State
   const [isYouTubeLive, setIsYouTubeLive] = useState(false);
+  const [isLiveConnecting, setIsLiveConnecting] = useState(false);
+  const [streamStats, setStreamStats] = useState<StreamStats | null>(null);
   const [youtubeLiveSeconds, setYoutubeLiveSeconds] = useState(0);
   const [youtubeLiveUrl, setYoutubeLiveUrl] = useState("");
   const [showYouTubeConnectModal, setShowYouTubeConnectModal] = useState(false);
+
+  // B6: Dynamically update audio mix when local mic or remote tracks change while streaming
+  useEffect(() => {
+    if (isYouTubeLive) {
+      updateYouTubeLiveAudioSources(
+        localAudioTrack,
+        remoteParticipants.map((p) => p.audioTrack).filter(Boolean) as MediaStreamTrack[]
+      );
+    }
+  }, [isYouTubeLive, localAudioTrack, remoteParticipants]);
+
+  // B7: Clean up live stream on pagehide / beforeunload / unmount
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (isYouTubeLive) {
+        stopYouTubeLiveStreaming(false);
+      }
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+    };
+  }, [isYouTubeLive]);
 
   useEffect(() => {
     const handleUrlUpdate = (e: any) => {
@@ -544,14 +573,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     }
   };
 
-  // YouTube Live Handlers
-  const handleStartYouTubeLive = async (mode: "mathsy" | "personal" = "personal") => {
+  // YouTube Live Handlers (B3, B4, B7)
+  const handleStartYouTubeLive = async () => {
     try {
+      setIsLiveConnecting(true);
       const session = await startYouTubeLiveStreaming({
         meetingCode,
-        title: `${initialOptions.displayName || "Tutor"}'s Live Class - ${meetingCode}`,
-        description: `Live Interactive Classroom on Mathsy Meet | Room ${meetingCode}`,
-        broadcastMode: mode,
+        title: `${myName}'s Mathsy Live Class - ${meetingCode}`,
         localAudioTrack,
         remoteAudioTracks: remoteParticipants
           .map((p) => p.audioTrack)
@@ -559,27 +587,46 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         emitSignal: (event, payload) => engineRef.current?.emitSignal(event, payload),
         onSignal: (event, cb) => engineRef.current?.onSignal(event, cb),
         onStatusChange: (status) => {
-          if (status === "live") {
+          if (status === "connecting") {
+            setIsLiveConnecting(true);
+          } else if (status === "live") {
+            setIsLiveConnecting(false);
             setIsYouTubeLive(true);
-          } else if (status === "ended") {
+          } else if (status === "ended" || status === "idle") {
+            setIsLiveConnecting(false);
             setIsYouTubeLive(false);
+            setStreamStats(null);
+          } else if (status === "error") {
+            setIsLiveConnecting(false);
+            setIsYouTubeLive(false);
+            setStreamStats(null);
           }
+        },
+        onStatsUpdate: (stats) => {
+          setStreamStats(stats);
+        },
+        onError: () => {
+          setIsLiveConnecting(false);
+          setIsYouTubeLive(false);
+          setStreamStats(null);
         },
       });
 
       if (session) {
-        setIsYouTubeLive(true);
         setYoutubeLiveUrl(session.youtubeUrl);
       }
     } catch (err: any) {
       console.error("[YouTubeLive] Failed to start:", err);
+      setIsLiveConnecting(false);
       toast.error("Failed to start YouTube Live Stream");
     }
   };
 
-  const handleStopYouTubeLive = () => {
-    stopYouTubeLiveStreaming();
+  const handleStopYouTubeLive = async () => {
+    await stopYouTubeLiveStreaming(true);
     setIsYouTubeLive(false);
+    setIsLiveConnecting(false);
+    setStreamStats(null);
   };
 
   useEffect(() => {
@@ -769,46 +816,50 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </Button>
           )}
 
-          {/* Recording & Live Stream trigger */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setIsRecordingModalOpen(true)}
-            className={`h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
-              isYouTubeLive
-                ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
-                : isRecordingActive
-                ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
-                : "bg-zinc-900 border-white/10 text-zinc-300 hover:bg-zinc-800"
-            }`}
-          >
-            {isYouTubeLive ? (
-              <>
-                <Radio className="w-3.5 h-3.5 text-white animate-spin" />
-                <span className="hidden sm:inline">LIVE {formatDuration(youtubeLiveSeconds)}</span>
-              </>
-            ) : (
-              <>
-                <Disc className={`w-3.5 h-3.5 ${isRecordingActive ? "text-red-400" : "text-zinc-400"}`} />
-                <span className="hidden sm:inline">
-                  {isRecordingActive ? `REC ${formatDuration(recordingSeconds)}` : "Record / Live"}
-                </span>
-              </>
-            )}
-          </Button>
+          {/* Recording & Live Stream trigger (Tutors only - B9) */}
+          {isHost && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsRecordingModalOpen(true)}
+                className={`h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
+                  isYouTubeLive
+                    ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
+                    : isRecordingActive
+                    ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
+                    : "bg-zinc-900 border-white/10 text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                {isYouTubeLive ? (
+                  <>
+                    <Radio className="w-3.5 h-3.5 text-white animate-spin" />
+                    <span className="hidden sm:inline">LIVE {formatDuration(youtubeLiveSeconds)}</span>
+                  </>
+                ) : (
+                  <>
+                    <Disc className={`w-3.5 h-3.5 ${isRecordingActive ? "text-red-400" : "text-zinc-400"}`} />
+                    <span className="hidden sm:inline">
+                      {isRecordingActive ? `REC ${formatDuration(recordingSeconds)}` : "Record / Live"}
+                    </span>
+                  </>
+                )}
+              </Button>
 
-          {/* Active Live Watch Link */}
-          {isYouTubeLive && youtubeLiveUrl && (
-            <a
-              href={youtubeLiveUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="h-8 px-2.5 rounded-xl bg-red-600/20 border border-red-500/40 text-red-300 hover:text-white text-xs font-semibold flex items-center gap-1 transition"
-              title="Open YouTube Live Stream in new tab"
-            >
-              <span className="hidden sm:inline">Watch</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+              {/* Active Live Watch Link */}
+              {isYouTubeLive && youtubeLiveUrl && (
+                <a
+                  href={youtubeLiveUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-8 px-2.5 rounded-xl bg-red-600/20 border border-red-500/40 text-red-300 hover:text-white text-xs font-semibold flex items-center gap-1 transition"
+                  title="Open YouTube Live Stream in new tab"
+                >
+                  <span className="hidden sm:inline">Watch</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )}
+            </>
           )}
 
           {/* Fullscreen toggle */}
@@ -1296,8 +1347,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           toast.info("Recording saved");
         }}
         isLiveStreaming={isYouTubeLive}
+        isLiveConnecting={isLiveConnecting}
         liveStreamSeconds={youtubeLiveSeconds}
         liveStreamUrl={youtubeLiveUrl}
+        streamStats={streamStats}
+        onSessionWatchUrlChange={(url) => setYoutubeLiveUrl(url)}
         onStartYouTubeLive={handleStartYouTubeLive}
         onStopYouTubeLive={handleStopYouTubeLive}
       />

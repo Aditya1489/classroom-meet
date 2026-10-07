@@ -12,7 +12,6 @@ import {
   Youtube,
   Radio,
   CheckCircle2,
-  ExternalLink,
   Eye,
   EyeOff,
   Trash2,
@@ -23,12 +22,9 @@ import {
   getConnectedYouTubeChannel,
   saveConnectedYouTubeChannel,
   disconnectYouTubeChannel,
-  normalizeYouTubeUrl,
   normalizeYouTubeChannelLiveUrl,
   ConnectedChannelInfo,
-  DEFAULT_MATHSY_CHANNEL_LIVE_URL,
 } from "../../utils/youtubeUtils";
-import { resolveChannelLiveVideoUrl } from "../../services/youtubeService";
 import { toast } from "sonner";
 
 interface YouTubeConnectModalProps {
@@ -46,7 +42,6 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
   const [channelHandle, setChannelHandle] = useState("");
   const [channelTitle, setChannelTitle] = useState("");
   const [streamKey, setStreamKey] = useState("");
-  const [videoUrl, setVideoUrl] = useState("");
   const [defaultVisibility, setDefaultVisibility] = useState<"public" | "unlisted">("public");
   const [showKey, setShowKey] = useState(false);
   const [showInstructions, setShowInstructions] = useState(true);
@@ -60,18 +55,16 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
         setChannelTitle(existing.channelTitle);
         setStreamKey(existing.streamKey);
         setDefaultVisibility(existing.defaultVisibility);
-        setVideoUrl(existing.videoUrl || (existing.liveUrl?.includes("/watch?v=") ? existing.liveUrl : ""));
       } else {
         setChannelHandle("");
         setChannelTitle("");
         setStreamKey("");
-        setVideoUrl("");
         setDefaultVisibility("public");
       }
     }
   }, [open]);
 
-  const handleSave = async () => {
+  const handleSave = () => {
     if (!streamKey.trim()) {
       toast.error("Please enter your YouTube RTMP Stream Key");
       return;
@@ -82,29 +75,8 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
       const match = cleanHandle.match(/@([a-zA-Z0-9_.-]+)/);
       if (match) cleanHandle = `@${match[1]}`;
     }
-    const cleanVideoUrl = videoUrl.trim();
 
-    let liveUrl = "";
-    let detectedVideoUrl = cleanVideoUrl ? normalizeYouTubeUrl(cleanVideoUrl) : undefined;
-
-    if (detectedVideoUrl) {
-      liveUrl = detectedVideoUrl;
-    } else if (cleanHandle && cleanHandle !== "@Mathsy") {
-      try {
-        const autoResolved = await resolveChannelLiveVideoUrl(cleanHandle);
-        if (autoResolved) {
-          detectedVideoUrl = autoResolved;
-          liveUrl = autoResolved;
-        }
-      } catch (e) {
-        console.warn("[YouTubeConnectModal] Auto-resolve error:", e);
-      }
-      if (!liveUrl) {
-        liveUrl = normalizeYouTubeChannelLiveUrl(cleanHandle);
-      }
-    } else {
-      liveUrl = "https://studio.youtube.com/channel/live";
-    }
+    const liveUrl = normalizeYouTubeChannelLiveUrl(cleanHandle) || "https://studio.youtube.com/channel/live";
 
     const updated: ConnectedChannelInfo = {
       channelHandle: cleanHandle || "@MyChannel",
@@ -112,14 +84,12 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
       streamKey: streamKey.trim(),
       defaultVisibility,
       liveUrl,
-      videoUrl: detectedVideoUrl,
       connectedAt: Date.now(),
     };
 
     saveConnectedYouTubeChannel(updated);
     setChannel(updated);
     onChannelUpdated?.(updated);
-    window.dispatchEvent(new CustomEvent("mathsy-update-live-url", { detail: liveUrl }));
     toast.success("YouTube Channel successfully connected! 🔴");
     onOpenChange(false);
   };
@@ -145,7 +115,7 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
                 Connect YouTube Channel
               </DialogTitle>
               <DialogDescription className="text-[#a39e94] text-xs">
-                Broadcast classroom sessions directly to your YouTube channel in 1 click.
+                Broadcast classroom sessions directly to your YouTube channel.
               </DialogDescription>
             </div>
           </div>
@@ -156,12 +126,12 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
           <div className="bg-[#0e0d0b] border border-[#10b981]/30 rounded-xl p-3.5 flex items-center justify-between my-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center text-white font-bold text-xs shrink-0">
-                <Radio className="w-4 h-4 animate-pulse" />
+                <Radio className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="font-semibold text-xs text-[#f3eee6] truncate">
-                    {channel.channelTitle && channel.channelTitle !== "Mathsy Official Channel" ? channel.channelTitle : (channel.channelHandle || "Personal YouTube Channel")}
+                    {channel.channelTitle || channel.channelHandle || "Personal YouTube Channel"}
                   </span>
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 </div>
@@ -218,26 +188,6 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
             />
           </div>
 
-          {/* Direct Live Video Watch URL */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[11px] font-mono font-semibold text-[#a39e94] uppercase tracking-wider">
-                Direct Live Video Link / Video ID
-              </label>
-              <span className="text-[10px] text-[#f59e0b] font-mono font-semibold">Recommended 🎯</span>
-            </div>
-            <input
-              type="text"
-              value={videoUrl}
-              onChange={(e) => setVideoUrl(e.target.value)}
-              placeholder="e.g. https://youtu.be/your_live_stream_id (from YouTube Studio Share)"
-              className="w-full bg-[#0e0d0b] border border-[#f3eee6]/15 rounded-lg px-3 py-2 text-xs text-[#f3eee6] focus:outline-none focus:border-[#f59e0b] font-mono"
-            />
-            <p className="text-[10px] text-[#a39e94] mt-1">
-              Copy this from YouTube Studio (Top-right <strong>Share</strong> button) so students land directly on the <strong>live video player</strong> instead of the channel page!
-            </p>
-          </div>
-
           {/* RTMP Stream Key */}
           <div>
             <div className="flex items-center justify-between mb-1">
@@ -256,7 +206,7 @@ export const YouTubeConnectModal: React.FC<YouTubeConnectModalProps> = ({
 
             {showInstructions && (
               <div className="p-3 bg-[#0e0d0b] border border-[#f3eee6]/10 rounded-lg text-[11px] text-[#a39e94] space-y-1.5 mb-2">
-                <p className="font-semibold text-[#f3eee6]">Steps to stream to your channel:</p>
+                <p className="font-semibold text-[#f3eee6]">Steps to get your Stream Key:</p>
                 <p>1. Open <a href="https://studio.youtube.com/channel/live" target="_blank" rel="noopener noreferrer" className="text-[#f59e0b] underline font-semibold">YouTube Studio Live Dashboard ↗</a></p>
                 <p>2. Copy your <strong>Stream Key</strong> and paste it below.</p>
                 <p>3. 💡 <em className="text-[#f3eee6]">Pro Tip:</em> In Stream Settings, toggle <strong className="text-[#f59e0b]">Enable Auto-start</strong> to ON so YouTube publishes your stream automatically when you go live in Mathsy Meet!</p>

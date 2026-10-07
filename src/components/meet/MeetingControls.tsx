@@ -34,6 +34,7 @@ interface MeetingControlsProps {
   onOpenRecording: () => void;
   isRecording: boolean;
   isYouTubeLive?: boolean;
+  isHost?: boolean;
   onLeaveCall: () => void;
 
   // Drawer states
@@ -59,6 +60,7 @@ export const MeetingControls: React.FC<MeetingControlsProps> = ({
   onOpenRecording,
   isRecording,
   isYouTubeLive = false,
+  isHost = false,
   onLeaveCall,
   activeDrawer,
   onToggleDrawer,
@@ -199,20 +201,22 @@ export const MeetingControls: React.FC<MeetingControlsProps> = ({
           <Hand className="w-4 h-4" />
         </button>
 
-        {/* Recording & YouTube Live Modal Button */}
-        <button
-          onClick={onOpenRecording}
-          className={`p-3 md:p-3.5 rounded-xl transition ${
-            isYouTubeLive
-              ? "bg-red-600/20 text-red-500 border border-red-500/40 animate-pulse shadow-lg shadow-red-500/10"
-              : isRecording
-              ? "bg-red-500/20 text-red-400 border border-red-500/40"
-              : "bg-[#221f1a] hover:bg-[#28251f] text-[#f3eee6] border border-[#f3eee6]/10"
-          }`}
-          title={isYouTubeLive ? "Live on YouTube (Manage/Stop)" : "Recording & YouTube Live"}
-        >
-          <Disc className={`w-4 h-4 ${isRecording || isYouTubeLive ? "animate-spin text-red-500" : ""}`} />
-        </button>
+        {/* Recording & YouTube Live Modal Button (Tutors only - B9) */}
+        {isHost && (
+          <button
+            onClick={onOpenRecording}
+            className={`p-3 md:p-3.5 rounded-xl transition ${
+              isYouTubeLive
+                ? "bg-red-600/20 text-red-500 border border-red-500/40 animate-pulse shadow-lg shadow-red-500/10"
+                : isRecording
+                ? "bg-red-500/20 text-red-400 border border-red-500/40"
+                : "bg-[#221f1a] hover:bg-[#28251f] text-[#f3eee6] border border-[#f3eee6]/10"
+            }`}
+            title={isYouTubeLive ? "Live on YouTube (Manage/Stop)" : "Recording & YouTube Live"}
+          >
+            <Disc className={`w-4 h-4 ${isRecording || isYouTubeLive ? "animate-spin text-red-500" : ""}`} />
+          </button>
+        )}
 
         {/* End / Leave call */}
         <button

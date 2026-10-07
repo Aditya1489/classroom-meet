@@ -1,10 +1,7 @@
 import {
-  normalizeYouTubeUrl,
   normalizeYouTubeChannelLiveUrl,
   getConnectedYouTubeChannel,
-  saveConnectedYouTubeChannel,
   ConnectedChannelInfo,
-  DEFAULT_MATHSY_CHANNEL_LIVE_URL,
 } from "../utils/youtubeUtils";
 import { toast } from "sonner";
 
@@ -12,334 +9,325 @@ export interface LiveStreamSession {
   broadcastId: string;
   youtubeUrl: string;
   liveStudioUrl: string;
-  rtmpUrl: string;
   startTime: number;
 }
 
-// Active stream references
+export interface StreamStats {
+  fps: number;
+  speed: number;
+  bitrateKbps: number;
+}
+
+// ── B6. Dynamic Audio Mixer that survives track muting and dynamic changes ──
+export class LiveAudioMixer {
+  private ctx: AudioContext | null = null;
+  private dest: MediaStreamAudioDestinationNode | null = null;
+  private sources: Map<MediaStreamTrack, { source: MediaStreamAudioSourceNode; gain: GainNode }> = new Map();
+
+  constructor() {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioCtx) {
+      try {
+        this.ctx = new AudioCtx();
+        this.dest = this.ctx.createMediaStreamDestination();
+      } catch (e) {
+        console.warn("[LiveAudioMixer] Failed to initialize AudioContext:", e);
+      }
+    }
+  }
+
+  async resume(): Promise<void> {
+    if (this.ctx && this.ctx.state === "suspended") {
+      try {
+        await this.ctx.resume();
+      } catch {}
+    }
+  }
+
+  updateSources(localTrack: MediaStreamTrack | null, remoteTracks: MediaStreamTrack[] = []): MediaStreamTrack | null {
+    if (!this.ctx || !this.dest) return localTrack;
+
+    const currentTracks = new Set<MediaStreamTrack>();
+    if (localTrack && localTrack.readyState === "live") currentTracks.add(localTrack);
+    for (const t of remoteTracks) {
+      if (t && t.readyState === "live") currentTracks.add(t);
+    }
+
+    // Disconnect stale or ended tracks
+    for (const [track, node] of this.sources.entries()) {
+      if (!currentTracks.has(track) || track.readyState !== "live") {
+        try {
+          node.gain.disconnect();
+          node.source.disconnect();
+        } catch {}
+        this.sources.delete(track);
+      }
+    }
+
+    // Connect new tracks
+    for (const track of currentTracks) {
+      if (!this.sources.has(track)) {
+        try {
+          const stream = new MediaStream([track]);
+          const source = this.ctx.createMediaStreamSource(stream);
+          const gain = this.ctx.createGain();
+          gain.gain.value = 1.0;
+          source.connect(gain);
+          gain.connect(this.dest);
+          this.sources.set(track, { source, gain });
+        } catch (err) {
+          console.warn("[LiveAudioMixer] Failed to connect track to mixer:", err);
+        }
+      }
+    }
+
+    const mixed = this.dest.stream.getAudioTracks();
+    return mixed[0] || localTrack;
+  }
+
+  getTrack(): MediaStreamTrack | null {
+    return this.dest ? this.dest.stream.getAudioTracks()[0] || null : null;
+  }
+
+  close(): void {
+    for (const [, node] of this.sources.entries()) {
+      try {
+        node.gain.disconnect();
+        node.source.disconnect();
+      } catch {}
+    }
+    this.sources.clear();
+    if (this.ctx) {
+      try {
+        this.ctx.close();
+      } catch {}
+      this.ctx = null;
+      this.dest = null;
+    }
+  }
+}
+
+// ── Active Singleton Session State ──
 let activeRecorder: MediaRecorder | null = null;
 let activeDisplayStream: MediaStream | null = null;
-let activeAudioCtx: AudioContext | null = null;
+let activeMixer: LiveAudioMixer | null = null;
 let activeSession: LiveStreamSession | null = null;
+let activeMeetingCode = "";
 let activeEmitSignal: ((event: string, payload: any) => void) | null = null;
-let activeClassId: string = "";
-let activePoller: any = null;
+let unsubscribeStatusSignal: (() => void) | null = null;
+let hasReachedActiveState = false;
+let isStopping = false;
+
+// Auto-recovery attempt tracking (B5: max 3 attempts within 2 minutes)
+const recoveryAttempts: number[] = [];
+
+// Chunk transmission queue (B2)
+const chunkQueue: Uint8Array[] = [];
+let isTransmitting = false;
+let finalChunkDrainResolve: (() => void) | null = null;
 
 function getHttpServerUrl(wsUrl: string): string {
   if (!wsUrl) return "https://rtc.mathsy.in";
   return wsUrl.replace(/^ws(s)?:\/\//i, "http$1://");
 }
 
-/**
- * Get Google OAuth access token using configured backend credentials.
- */
-export async function getGoogleAccessToken(): Promise<string | null> {
-  try {
-    const refreshToken =
-      (import.meta as any).env?.VITE_YOUTUBE_REFRESH_TOKEN ||
-      "1//04EUIyzDUSRUsCgYIARAAGAQSNwF-L9Ir5XnQUPv7DlEP53XXSZcdPr2soYrt695pbfbaKBAJnLrMnn1hlevfCG5VaD4TjHv7_Dw";
-    const clientId =
-      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_ID ||
-      "65166613028-i5bb5pai6ob6qjploqtr7r47m2bmha46.apps.googleusercontent.com";
-    const clientSecret =
-      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_SECRET ||
-      "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";
-
-    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
-    });
-
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.warn("[YouTubeService] Token refresh failed:", tokenData);
-      return null;
-    }
-    return tokenData.access_token;
-  } catch (err) {
-    console.warn("[YouTubeService] Token refresh error:", err);
-    return null;
-  }
-}
-
-/**
- * Automatically resolves the direct YouTube video watch URL (https://www.youtube.com/watch?v=...)
- * for any given YouTube channel handle or URL.
- */
-export async function resolveChannelLiveVideoUrl(channelHandleOrUrl: string): Promise<string | null> {
-  if (!channelHandleOrUrl) return null;
-  const cleanHandle = channelHandleOrUrl
-    .replace(/https?:\/\/(www\.)?youtube\.com\//i, "")
-    .replace(/^@/, "")
-    .replace(/\/live.*$/i, "")
-    .split("/")[0]
-    .split("?")[0]
-    .trim();
-
-  if (!cleanHandle) return null;
-
-  try {
-    const accessToken = await getGoogleAccessToken();
-    if (!accessToken) return null;
-
-    // 1. Fetch channel by handle
-    const chanRes = await fetch(
-      `https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&forHandle=${encodeURIComponent(cleanHandle)}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!chanRes.ok) return null;
-    const chanData = await chanRes.json();
-    const item = chanData.items?.[0];
-    if (!item?.id) return null;
-
-    // 2. Query YouTube search specifically for CURRENTLY LIVE videos (eventType=live)
-    const searchRes = await fetch(
-      `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${item.id}&eventType=live&type=video`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (searchRes.ok) {
-      const searchData = await searchRes.json();
-      const liveItem = searchData.items?.[0];
-      const videoId = liveItem?.id?.videoId;
-      if (videoId) {
-        // Verify with liveStreamingDetails that the stream has NOT ended
-        const vRes = await fetch(
-          `https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${videoId}`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        if (vRes.ok) {
-          const vData = await vRes.json();
-          const details = vData.items?.[0]?.liveStreamingDetails;
-          // If actualEndTime exists, the stream has already ended and is recorded VOD. Do not use!
-          if (details && !details.actualEndTime) {
-            console.log(`[YouTubeService] Found active live stream for @${cleanHandle}: ${videoId}`);
-            return `https://www.youtube.com/watch?v=${videoId}`;
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("[YouTubeService] Auto-resolve live video failed:", err);
-  }
-  return null;
-}
-
-/**
- * Creates a YouTube Live Broadcast directly using the YouTube Data API v3.
- */
-export async function createYouTubeBroadcastDirectly(
-  title: string,
-  description: string,
-  visibility: "public" | "unlisted"
-): Promise<{ broadcastId: string; rtmpUrl: string; youtubeUrl: string; liveStudioUrl: string } | null> {
-  try {
-    const accessToken = await getGoogleAccessToken();
-    if (!accessToken) return null;
-
-    // 1. Create Broadcast
-    const broadcastRes = await fetch(
-      "https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet,status,contentDetails",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          snippet: {
-            title: title || "Mathsy Live Class",
-            description: description || "Live Streamed from Mathsy Meet",
-            scheduledStartTime: new Date().toISOString(),
-          },
-          status: {
-            privacyStatus: visibility === "public" ? "public" : "unlisted",
-            selfDeclaredMadeForKids: false,
-          },
-          contentDetails: {
-            enableAutoStart: true,
-            enableAutoStop: false,
-          },
-        }),
-      }
-    );
-
-    const broadcastData = await broadcastRes.json();
-    if (!broadcastData.id) {
-      console.warn("[YouTubeService] Broadcast creation failed:", broadcastData);
-      return null;
-    }
-    const broadcastId = broadcastData.id;
-
-    // 2. Create Stream
-    const streamRes = await fetch(
-      "https://www.googleapis.com/youtube/v3/liveStreams?part=snippet,cdn",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          snippet: { title: `Stream for ${broadcastId}` },
-          cdn: {
-            frameRate: "variable",
-            ingestionType: "rtmp",
-            resolution: "variable",
-          },
-        }),
-      }
-    );
-
-    const streamData = await streamRes.json();
-    if (!streamData.cdn?.ingestionInfo) {
-      console.warn("[YouTubeService] Stream creation failed:", streamData);
-      return null;
-    }
-
-    const ingestionInfo = streamData.cdn.ingestionInfo;
-    const rtmpUrl = `${ingestionInfo.ingestionAddress}/${ingestionInfo.streamName}`;
-
-    // 3. Bind Broadcast to Stream
-    await fetch(
-      `https://www.googleapis.com/youtube/v3/liveBroadcasts/bind?id=${broadcastId}&part=id,contentDetails&streamId=${streamData.id}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    return {
-      broadcastId,
-      rtmpUrl,
-      youtubeUrl: `https://www.youtube.com/watch?v=${broadcastId}`,
-      liveStudioUrl: `https://studio.youtube.com/video/${broadcastId}/livestreaming`,
-    };
-  } catch (err) {
-    console.error("[YouTubeService] Direct YouTube API stream creation error:", err);
-    return null;
-  }
-}
-
-/**
- * Automatically transitions a YouTube Live Broadcast to "live" status
- * so viewers can watch the broadcast immediately without needing to open YouTube Studio.
- */
-export async function transitionYouTubeBroadcastToLive(broadcastId: string): Promise<boolean> {
-  if (!broadcastId || broadcastId.startsWith("personal_")) return false;
-  try {
-    const accessToken = await getGoogleAccessToken();
-    if (!accessToken) return false;
-
-    console.log(`[YouTubeService] Transitioning broadcast ${broadcastId} to live...`);
-    const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=live&id=${broadcastId}&part=id,status`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
-    const data = await res.json();
-    console.log("[YouTubeService] transition-live direct result:", data);
-    return res.ok;
-  } catch (err) {
-    console.warn("[YouTubeService] transition-live direct failed:", err);
-    return false;
-  }
-}
-
-/**
- * Completes a YouTube Live Broadcast when the tutor ends the stream,
- * converting it to a saved YouTube replay video.
- */
-export async function completeYouTubeLiveBroadcast(broadcastId: string): Promise<boolean> {
-  if (!broadcastId || broadcastId.startsWith("personal_")) return false;
-  try {
-    const accessToken = await getGoogleAccessToken();
-    if (!accessToken) return false;
-
-    console.log(`[YouTubeService] Completing broadcast ${broadcastId}...`);
-    const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=complete&id=${broadcastId}&part=id,status`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
-    const data = await res.json();
-    console.log("[YouTubeService] complete-live direct result:", data);
-    return res.ok;
-  } catch (err) {
-    console.warn("[YouTubeService] complete-live direct failed:", err);
-    return false;
-  }
-}
-
-/**
- * Mixes local audio track and remote participant audio tracks into a single stream.
- */
-async function setupAudioMixer(
-  localAudioTrack: MediaStreamTrack | null,
-  remoteAudioTracks: MediaStreamTrack[] = []
-): Promise<MediaStreamTrack | null> {
-  try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return localAudioTrack;
-
-    const audioCtx = new AudioContextClass();
-    activeAudioCtx = audioCtx;
-
-    if (audioCtx.state === "suspended") {
-      await audioCtx.resume();
-    }
-
-    const dest = audioCtx.createMediaStreamDestination();
-
-    // Connect local microphone
-    if (localAudioTrack) {
-      const localStream = new MediaStream([localAudioTrack]);
-      const localSource = audioCtx.createMediaStreamSource(localStream);
-      localSource.connect(dest);
-    }
-
-    // Connect remote participant audios
-    for (const rTrack of remoteAudioTracks) {
-      if (rTrack && rTrack.readyState === "live") {
-        const rStream = new MediaStream([rTrack]);
-        const rSource = audioCtx.createMediaStreamSource(rStream);
-        rSource.connect(dest);
-      }
-    }
-
-    const mixedTracks = dest.stream.getAudioTracks();
-    return mixedTracks[0] || localAudioTrack;
-  } catch (err) {
-    console.warn("[YouTubeService] Audio mixer fallback to local track:", err);
-    return localAudioTrack;
-  }
-}
-
-/**
- * Initiates the live broadcast and starts streaming screen + mixed audio to YouTube RTMP.
- */
 export interface StartYouTubeLiveOptions {
   meetingCode: string;
   title: string;
-  description?: string;
-  visibility?: "public" | "unlisted";
-  broadcastMode?: "mathsy" | "personal";
   localAudioTrack: MediaStreamTrack | null;
   remoteAudioTracks?: MediaStreamTrack[];
   emitSignal?: (event: string, payload: any) => void;
   onSignal?: (event: string, callback: (payload: any) => void) => () => void;
-  onStatusChange?: (status: "connecting" | "live" | "ended" | "error") => void;
+  onStatusChange?: (status: "idle" | "connecting" | "live" | "ended" | "error") => void;
+  onStatsUpdate?: (stats: StreamStats) => void;
+  onError?: (message: string) => void;
+}
+
+// Active options reference for auto-recovery
+let currentOptions: StartYouTubeLiveOptions | null = null;
+
+/**
+ * Transmits queued chunks sequentially with backoff retries (B2).
+ */
+async function processChunkQueue(): Promise<void> {
+  if (isTransmitting) return;
+  isTransmitting = true;
+
+  const rtmpServerUrl = getHttpServerUrl(
+    (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in"
+  );
+
+  try {
+    while (chunkQueue.length > 0 && !isStopping) {
+      const chunk = chunkQueue[0];
+      const chunkPayload =
+        chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
+          ? chunk
+          : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+
+      let success = false;
+      let attempt = 0;
+      let isNoSession = false;
+
+      while (attempt < 3 && !success && !isStopping) {
+        attempt++;
+        try {
+          // B2: HTTP POST /rtmp-chunk ONLY, no x-class-id header
+          const res = await fetch(`${rtmpServerUrl}/rtmp-chunk?classId=${encodeURIComponent(activeMeetingCode)}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/octet-stream",
+            },
+            body: chunkPayload as BodyInit,
+          });
+
+          if (res.ok) {
+            success = true;
+          } else if (res.status === 409) {
+            // A4/B5: NO_SESSION 409 response
+            isNoSession = true;
+            break;
+          } else {
+            console.warn(`[YouTubeService] Chunk send returned HTTP ${res.status}. Attempt ${attempt}/3`);
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 500));
+          }
+        } catch (netErr) {
+          console.warn(`[YouTubeService] Network error sending chunk. Attempt ${attempt}/3:`, netErr);
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+
+      if (isNoSession) {
+        console.warn("[YouTubeService] Received 409 NO_SESSION from server. Triggering auto-recovery (B5)...");
+        triggerAutoRecovery();
+        return;
+      }
+
+      if (success) {
+        chunkQueue.shift();
+      } else {
+        console.error("[YouTubeService] Failed to send chunk after 3 attempts. Stopping stream to prevent corruption.");
+        handleFatalError("Network transmission error: Failed to send media chunk to server after 3 attempts.");
+        return;
+      }
+    }
+  } finally {
+    isTransmitting = false;
+    if (chunkQueue.length === 0 && finalChunkDrainResolve) {
+      finalChunkDrainResolve();
+      finalChunkDrainResolve = null;
+    }
+  }
+}
+
+/**
+ * Triggers stream auto-recovery (B5).
+ */
+async function triggerAutoRecovery(): Promise<void> {
+  const now = Date.now();
+  // Filter attempts in last 2 minutes
+  while (recoveryAttempts.length > 0 && now - recoveryAttempts[0] > 120_000) {
+    recoveryAttempts.shift();
+  }
+
+  if (recoveryAttempts.length >= 3) {
+    console.error("[YouTubeService] Exceeded 3 recovery attempts within 2 minutes. Aborting.");
+    handleFatalError("Live stream connection lost. Auto-recovery failed after 3 attempts.");
+    return;
+  }
+
+  recoveryAttempts.push(now);
+  toast.loading("Reconnecting live stream to YouTube…", { id: "yt-stream-reconnect" });
+
+  try {
+    // 1. Stop current MediaRecorder
+    if (activeRecorder && activeRecorder.state !== "inactive") {
+      try { activeRecorder.stop(); } catch {}
+      activeRecorder = null;
+    }
+
+    // 2. Clear pending queue
+    chunkQueue.length = 0;
+
+    // 3. Re-emit startRtmpStream
+    const connected = getConnectedYouTubeChannel();
+    if (!connected?.streamKey || !activeEmitSignal) {
+      handleFatalError("Channel credentials unavailable during stream recovery.");
+      return;
+    }
+
+    let key = connected.streamKey.trim();
+    if (key.startsWith("rtmp://a.rtmp.youtube.com/live2/")) key = key.replace("rtmp://a.rtmp.youtube.com/live2/", "");
+    if (key.startsWith("rtmps://a.rtmp.youtube.com:443/live2/")) key = key.replace("rtmps://a.rtmp.youtube.com:443/live2/", "");
+    const rtmpUrl = key.startsWith("rtmp://") || key.startsWith("rtmps://") ? key : `rtmps://a.rtmp.youtube.com:443/live2/${key}`;
+
+    activeEmitSignal("startRtmpStream", { classId: activeMeetingCode, rtmpUrl });
+
+    // 4. Wait for "ready" signal (up to 15s)
+    let readyReceived = false;
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timeout waiting for server encoder ready")), 15000);
+      const unsub = currentOptions?.onSignal?.("rtmpStatus", (p: any) => {
+        if (p?.status === "ready" || p?.status === "active") {
+          readyReceived = true;
+          clearTimeout(timeout);
+          unsub?.();
+          resolve();
+        }
+      });
+    });
+
+    await readyPromise;
+
+    // 5. Start a NEW MediaRecorder with fresh WebM header
+    if (!activeDisplayStream) {
+      handleFatalError("Screen capture track lost during reconnection.");
+      return;
+    }
+
+    const videoTrack = activeDisplayStream.getVideoTracks()[0];
+    const audioTrack = activeMixer?.getTrack() || null;
+    const tracks: MediaStreamTrack[] = [videoTrack];
+    if (audioTrack) tracks.push(audioTrack);
+    const stream = new MediaStream(tracks);
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: "video/webm;codecs=vp8,opus",
+      videoBitsPerSecond: 2_500_000,
+      audioBitsPerSecond: 128_000,
+    });
+
+    recorder.ondataavailable = async (e: BlobEvent) => {
+      if (e.data && e.data.size > 0 && !isStopping) {
+        try {
+          const buf = await e.data.arrayBuffer();
+          chunkQueue.push(new Uint8Array(buf));
+          processChunkQueue();
+        } catch (err) {
+          console.error("[YouTubeService] Recorder chunk error:", err);
+        }
+      }
+    };
+
+    activeRecorder = recorder;
+    recorder.start(1000);
+
+    toast.dismiss("yt-stream-reconnect");
+    toast.success("Stream reconnected successfully! 🔴");
+  } catch (err: any) {
+    toast.dismiss("yt-stream-reconnect");
+    handleFatalError(`Stream reconnection failed: ${err.message}`);
+  }
+}
+
+/**
+ * Handles fatal error and stops stream cleanly (B4).
+ */
+function handleFatalError(message: string): void {
+  toast.error(message);
+  currentOptions?.onError?.(message);
+  currentOptions?.onStatusChange?.("error");
+  stopYouTubeLiveStreaming(false);
 }
 
 /**
@@ -348,327 +336,276 @@ export interface StartYouTubeLiveOptions {
 export async function startYouTubeLiveStreaming(
   options: StartYouTubeLiveOptions
 ): Promise<LiveStreamSession | null> {
+  currentOptions = options;
   const {
     meetingCode,
-    title,
-    description = "Live Classroom via Mathsy Meet",
-    visibility = "public",
-    broadcastMode = "mathsy",
     localAudioTrack,
     remoteAudioTracks = [],
     emitSignal,
     onSignal,
     onStatusChange,
+    onStatsUpdate,
+    onError,
   } = options;
 
-  // Clean up any stale streaming session first before launching a new stream
+  // B3: Preflight MediaRecorder VP8/Opus support check
+  if (!MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")) {
+    toast.error("Live streaming needs desktop Chrome or Edge (VP8/Opus MediaRecorder support required).");
+    onStatusChange?.("idle");
+    return null;
+  }
+
+  // Clean up any existing stream first
   if (activeSession || activeRecorder || activeDisplayStream) {
-    stopYouTubeLiveStreaming();
+    await stopYouTubeLiveStreaming(false);
     await new Promise((r) => setTimeout(r, 400));
   }
 
-  // 1. Capture Display Screen / Classroom Canvas FIRST
+  const connectedChannel = getConnectedYouTubeChannel();
+  if (!connectedChannel?.streamKey || !connectedChannel.streamKey.trim()) {
+    toast.error("Please connect your YouTube channel with your RTMP Stream Key first!");
+    onStatusChange?.("idle");
+    return null;
+  }
+
+  // B3: Constrain getDisplayMedia video capture
   let displayStream: MediaStream;
   try {
     displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: "browser" },
+      video: {
+        width: { ideal: 1280, max: 1920 },
+        height: { ideal: 720, max: 1080 },
+        frameRate: { ideal: 30, max: 30 },
+        displaySurface: "browser",
+      },
       audio: true,
       preferCurrentTab: true,
       selfBrowserSurface: "include",
     } as any);
     activeDisplayStream = displayStream;
   } catch (err: any) {
-    toast.dismiss("yt-stream-init");
-    toast.error("Screen selection cancelled");
-    onStatusChange?.("ended");
+    onStatusChange?.("idle");
+    toast.info("Screen selection cancelled");
     return null;
   }
 
-  // Handle when tutor stops sharing screen via browser UI
-  displayStream.getVideoTracks()[0].onended = () => {
-    stopYouTubeLiveStreaming();
+  isStopping = false;
+  hasReachedActiveState = false;
+  activeMeetingCode = meetingCode;
+  activeEmitSignal = emitSignal || null;
+  chunkQueue.length = 0;
+
+  // Handle when tutor clicks browser native "Stop sharing" bar (B7)
+  const displayVideoTrack = displayStream.getVideoTracks()[0];
+  displayVideoTrack.onended = () => {
     toast.info("Screen capture ended. Live stream stopped.");
+    stopYouTubeLiveStreaming(true);
   };
 
   onStatusChange?.("connecting");
-  toast.info("Connecting to YouTube Live... 🔴", { id: "yt-stream-init" });
+  toast.info("Connecting to YouTube…", { id: "yt-stream-init" });
 
-  activeClassId = meetingCode;
-  activeEmitSignal = emitSignal || null;
-
-  let broadcastId = "";
-  let rtmpUrl = "";
-  let youtubeUrl = "";
-  let liveStudioUrl = "https://studio.youtube.com";
-
-  const connectedChannel = getConnectedYouTubeChannel();
-
-  if (!connectedChannel?.streamKey || !connectedChannel.streamKey.trim()) {
-    toast.dismiss("yt-stream-init");
-    toast.error("Please connect your YouTube channel with your RTMP Stream Key first!");
-    displayStream.getTracks().forEach((t) => t.stop());
-    activeDisplayStream = null;
-    onStatusChange?.("ended");
-    return null;
-  }
-
-  // ── Stream to User's Connected YouTube Channel (100% User Owned) ──
+  // Format RTMP URL securely without logging secret key (B1)
   let key = connectedChannel.streamKey.trim();
-  if (key.startsWith("rtmp://a.rtmp.youtube.com/live2/")) {
-    key = key.replace("rtmp://a.rtmp.youtube.com/live2/", "");
-  } else if (key.startsWith("rtmps://a.rtmp.youtube.com:443/live2/")) {
-    key = key.replace("rtmps://a.rtmp.youtube.com:443/live2/", "");
-  }
-  rtmpUrl = key.startsWith("rtmp://") || key.startsWith("rtmps://")
+  if (key.startsWith("rtmp://a.rtmp.youtube.com/live2/")) key = key.replace("rtmp://a.rtmp.youtube.com/live2/", "");
+  if (key.startsWith("rtmps://a.rtmp.youtube.com:443/live2/")) key = key.replace("rtmps://a.rtmp.youtube.com:443/live2/", "");
+  const rtmpUrl = key.startsWith("rtmp://") || key.startsWith("rtmps://")
     ? key
-    : `rtmp://a.rtmp.youtube.com/live2/${key}`;
+    : `rtmps://a.rtmp.youtube.com:443/live2/${key}`;
 
   const cleanHandle = connectedChannel.channelHandle || "@MyChannel";
-  youtubeUrl = connectedChannel.videoUrl || normalizeYouTubeChannelLiveUrl(cleanHandle);
-  liveStudioUrl = "https://studio.youtube.com/channel/live";
-  broadcastId = `user_${Date.now()}`;
+  const youtubeUrl = normalizeYouTubeChannelLiveUrl(cleanHandle);
+  const liveStudioUrl = "https://studio.youtube.com/channel/live";
+  const broadcastId = `user_${Date.now()}`;
 
-  console.log("[YouTubeService] Streaming exclusively to user's connected channel:", { cleanHandle, youtubeUrl, rtmpUrl });
+  // B6: Initialize dynamic audio mixer
+  const mixer = new LiveAudioMixer();
+  await mixer.resume();
+  activeMixer = mixer;
+  const mixedAudioTrack = mixer.updateSources(localAudioTrack, remoteAudioTracks);
 
-  // Background poller: Detect live video ID so watch link updates to direct video player
-  if (activePoller) clearInterval(activePoller);
-  let pollCount = 0;
-  activePoller = setInterval(async () => {
-    pollCount++;
-    if (pollCount > 20 || !activeSession) {
-      clearInterval(activePoller);
-      activePoller = null;
-      return;
-    }
-    try {
-      const detectedUrl = await resolveChannelLiveVideoUrl(cleanHandle);
-      if (detectedUrl && (!activeSession.youtubeUrl.includes("/watch?v=") || activeSession.youtubeUrl !== detectedUrl)) {
-        console.log("[YouTubeService] Auto-detected live video watch URL for user channel:", detectedUrl);
-        activeSession.youtubeUrl = detectedUrl;
-        window.dispatchEvent(new CustomEvent("mathsy-update-live-url", { detail: detectedUrl }));
-        clearInterval(activePoller);
-        activePoller = null;
-      }
-    } catch (err) {
-      console.warn("[YouTubeService] Auto-detect live poll error:", err);
-    }
-  }, 3000);
-
-  if (!rtmpUrl) {
-    toast.dismiss("yt-stream-init");
-    toast.error("Could not initialize live stream. Please check stream settings.");
-    displayStream.getTracks().forEach((t) => t.stop());
-    activeDisplayStream = null;
-    onStatusChange?.("ended");
-    return null;
-  }
-
-  // Guard flag so transition-live is only called once per stream session
-  let transitionCalled = false;
-  const triggerTransitionToLive = (reason: string) => {
-    if (
-      transitionCalled ||
-      !broadcastId ||
-      broadcastId.startsWith("personal_") ||
-      broadcastId.startsWith("user_")
-    ) {
-      return;
-    }
-    transitionCalled = true;
-    console.log(`[YouTubeService] Triggering transition-live (reason: ${reason}) for broadcast: ${broadcastId}`);
-    transitionYouTubeBroadcastToLive(broadcastId);
-  };
-
-  // Register the rtmpStatus listener BEFORE emitting startRtmpStream
-  if (onSignal) {
-    onSignal("rtmpStatus", (payload: any) => {
-      console.log("[YouTubeService] Server rtmpStatus:", payload);
-      if (payload?.status === "active") {
-        toast.success("YouTube RTMP Encoder active on server! Streaming LIVE 🔴");
-        triggerTransitionToLive("rtmpStatus:active");
-      } else if (payload?.status === "log") {
-        triggerTransitionToLive("rtmpStatus:log");
-      } else if (payload?.status === "error") {
-        toast.error(`YouTube stream error: ${payload.error || "FFmpeg spawn failed"}`);
-      }
-    });
-  }
-
-  // Safety fallback: if rtmpStatus was swallowed or delayed, still transition after 10s
-  if (broadcastId && !broadcastId.startsWith("personal_")) {
-    setTimeout(() => {
-      triggerTransitionToLive("safety-fallback-10s");
-    }, 10000);
-  }
-
-  // Tell SFU media server to spawn FFmpeg process targeting YouTube RTMP endpoint
-  if (emitSignal) {
-    console.log("[YouTubeService] Emitting startRtmpStream:", { classId: meetingCode, rtmpUrl });
-    emitSignal("startRtmpStream", { classId: meetingCode, rtmpUrl });
-  }
-
-  // 5. Combine Video Track and Mixed Audio Track
-  const videoTrack = displayStream.getVideoTracks()[0];
-  const mixedAudioTrack = await setupAudioMixer(localAudioTrack, remoteAudioTracks);
-
-  const combinedTracks: MediaStreamTrack[] = [videoTrack];
+  // Combine display video with mixed audio track
+  const combinedTracks: MediaStreamTrack[] = [displayVideoTrack];
   if (mixedAudioTrack) combinedTracks.push(mixedAudioTrack);
+  const compositeStream = new MediaStream(combinedTracks);
 
-  const streamToStream = new MediaStream(combinedTracks);
-
-  // 6. Start MediaRecorder for live ingestion
-  const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
-    ? "video/webm;codecs=vp8,opus"
-    : "video/webm";
-
-  const recorder = new MediaRecorder(streamToStream, {
-    mimeType,
+  // Initialize MediaRecorder (B2, B3)
+  const recorder = new MediaRecorder(compositeStream, {
+    mimeType: "video/webm;codecs=vp8,opus",
     videoBitsPerSecond: 2_500_000,
     audioBitsPerSecond: 128_000,
   });
   activeRecorder = recorder;
 
-  const rtmpServerUrl = getHttpServerUrl(
-    (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in"
-  );
-
-  const pendingRtmpQueue: Uint8Array[] = [];
-  let isFlushingRtmp = false;
-
-  const flushRtmpQueue = async () => {
-    if (isFlushingRtmp) return;
-    isFlushingRtmp = true;
-
-    try {
-      while (pendingRtmpQueue.length > 0) {
-        const chunk = pendingRtmpQueue[0];
-        let sent = false;
-
-        const chunkPayload =
-          chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
-            ? chunk
-            : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-
-        // 1. Direct HTTP Relay endpoint without illegal CORS headers
-        try {
-          const resp = await fetch(`${rtmpServerUrl}/rtmp-chunk?classId=${encodeURIComponent(meetingCode)}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/octet-stream",
-              "x-class-id": meetingCode,
-            },
-            body: chunkPayload as BodyInit,
-          });
-          if (resp.ok) sent = true;
-        } catch {
-          // Direct HTTP offline or blocked
-        }
-
-        // 2. Fallback to Mediasoup socket relay if HTTP was unacknowledged
-        if (!sent && emitSignal) {
-          try {
-            emitSignal("rtmpChunk", { classId: meetingCode, chunk });
-            sent = true;
-          } catch (sockErr) {
-            console.warn("[YouTubeService] Socket chunk relay failed:", sockErr);
-          }
-        }
-
-        if (sent) {
-          pendingRtmpQueue.shift();
-        } else {
-          console.warn(`[YouTubeService] Buffering chunk locally (${pendingRtmpQueue.length} queued)`);
-          break;
-        }
-      }
-    } finally {
-      isFlushingRtmp = false;
-    }
-  };
-
   recorder.ondataavailable = async (e: BlobEvent) => {
-    if (e.data && e.data.size > 0) {
+    if (e.data && e.data.size > 0 && !isStopping) {
       try {
-        const buffer = await e.data.arrayBuffer();
-        const uint8 = new Uint8Array(buffer);
-        pendingRtmpQueue.push(uint8);
-
-        // Keep max 60 seconds buffer to prevent memory exhaustion
-        if (pendingRtmpQueue.length > 60) {
-          pendingRtmpQueue.shift();
-        }
-
-        await flushRtmpQueue();
+        const buf = await e.data.arrayBuffer();
+        chunkQueue.push(new Uint8Array(buf));
+        processChunkQueue();
       } catch (err) {
-        console.error("[YouTubeService] Error processing recorded chunk:", err);
+        console.error("[YouTubeService] Error processing recorded slice:", err);
       }
     }
   };
 
-  // Allow media server FFmpeg process 1.2 seconds to initialize before streaming slices
-  await new Promise((r) => setTimeout(r, 1200));
+  // Promise waiting for server "ready" signal before starting recorder (B3)
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Server encoder timed out after 15s waiting for ready state"));
+    }, 15000);
 
-  recorder.start(1000); // 1-second timeslices for low-latency live streaming
+    if (onSignal) {
+      unsubscribeStatusSignal = onSignal("rtmpStatus", (payload: any) => {
+        // Honest status handling (B4)
+        if (payload?.status === "ready") {
+          clearTimeout(timeout);
+          resolve();
+        } else if (payload?.status === "active") {
+          clearTimeout(timeout);
+          resolve();
+          if (!hasReachedActiveState) {
+            hasReachedActiveState = true;
+            onStatusChange?.("live");
+            toast.dismiss("yt-stream-init");
+            toast.success("🔴 You are LIVE on YouTube!", {
+              description: "Streaming high-definition video to your YouTube channel.",
+              action: {
+                label: "Watch Live",
+                onClick: () => window.open(youtubeUrl, "_blank"),
+              },
+              duration: 10000,
+            });
+          }
+        } else if (payload?.status === "stats") {
+          onStatsUpdate?.({
+            fps: payload.fps || 0,
+            speed: payload.speed || 0,
+            bitrateKbps: payload.bitrateKbps || 0,
+          });
+        } else if (payload?.status === "error") {
+          if (payload?.code === "NO_SESSION") {
+            triggerAutoRecovery();
+          } else {
+            clearTimeout(timeout);
+            handleFatalError(payload.message || `YouTube Stream Error: ${payload.code || "unknown"}`);
+          }
+        } else if (payload?.status === "ended") {
+          stopYouTubeLiveStreaming(hasReachedActiveState);
+        }
+      });
+    } else {
+      clearTimeout(timeout);
+      resolve();
+    }
+  });
+
+  // Emit startRtmpStream signal to server (B1: redact URL)
+  if (emitSignal) {
+    emitSignal("startRtmpStream", { classId: meetingCode, rtmpUrl });
+  }
+
+  try {
+    // Wait for server ready handshake
+    await readyPromise;
+    // Start recorder producing 1-second timeslices
+    recorder.start(1000);
+  } catch (err: any) {
+    toast.dismiss("yt-stream-init");
+    handleFatalError(`Failed to connect encoder: ${err.message}`);
+    return null;
+  }
 
   const sessionObj: LiveStreamSession = {
     broadcastId,
     youtubeUrl,
     liveStudioUrl,
-    rtmpUrl,
     startTime: Date.now(),
   };
 
   activeSession = sessionObj;
-  onStatusChange?.("live");
-  toast.dismiss("yt-stream-init");
-
-  toast.success("🔴 You are LIVE on YouTube!", {
-    description: "Streaming high-definition video to your YouTube channel.",
-    action: {
-      label: "Watch Live",
-      onClick: () => window.open(youtubeUrl, "_blank"),
-    },
-    duration: 10000,
-  });
-
   return sessionObj;
 }
 
 /**
- * Stops any ongoing YouTube live stream and releases all captured tracks.
+ * Updates dynamic audio sources while live without restarting recorder (B6).
  */
-export function stopYouTubeLiveStreaming(): void {
-  if (activeEmitSignal && activeClassId) {
-    try {
-      activeEmitSignal("stopRtmpStream", { classId: activeClassId });
-    } catch {}
-    activeEmitSignal = null;
-    activeClassId = "";
+export function updateYouTubeLiveAudioSources(
+  localAudioTrack: MediaStreamTrack | null,
+  remoteAudioTracks: MediaStreamTrack[] = []
+): void {
+  if (activeMixer) {
+    activeMixer.updateSources(localAudioTrack, remoteAudioTracks);
   }
+}
 
-  if (activeRecorder && activeRecorder.state === "recording") {
+/**
+ * Stops ongoing live stream following strict sequence (B7).
+ */
+export async function stopYouTubeLiveStreaming(showEndedToast: boolean = true): Promise<void> {
+  if (isStopping) return;
+  isStopping = true;
+
+  const reachedActive = hasReachedActiveState;
+  hasReachedActiveState = false;
+
+  // 1. Stop MediaRecorder
+  if (activeRecorder && activeRecorder.state !== "inactive") {
     try {
       activeRecorder.stop();
     } catch {}
     activeRecorder = null;
   }
 
+  // 2. Wait up to 3s for final chunk POST to complete
+  if (chunkQueue.length > 0) {
+    await new Promise<void>((resolve) => {
+      finalChunkDrainResolve = resolve;
+      processChunkQueue();
+      setTimeout(() => {
+        if (finalChunkDrainResolve) {
+          finalChunkDrainResolve();
+          finalChunkDrainResolve = null;
+        }
+      }, 3000);
+    });
+  }
+  chunkQueue.length = 0;
+
+  // 3. Emit stopRtmpStream signal to server
+  if (activeEmitSignal && activeMeetingCode) {
+    try {
+      activeEmitSignal("stopRtmpStream", { classId: activeMeetingCode });
+    } catch {}
+    activeEmitSignal = null;
+  }
+
+  // 4. Release display tracks, close audio mixer, clear listeners (B7)
   if (activeDisplayStream) {
-    activeDisplayStream.getTracks().forEach((track) => track.stop());
+    activeDisplayStream.getTracks().forEach((t) => t.stop());
     activeDisplayStream = null;
   }
 
-  if (activePoller) {
-    clearInterval(activePoller);
-    activePoller = null;
+  if (activeMixer) {
+    activeMixer.close();
+    activeMixer = null;
   }
 
-  if (activeSession?.broadcastId && !activeSession.broadcastId.startsWith("personal_")) {
-    completeYouTubeLiveBroadcast(activeSession.broadcastId);
+  if (unsubscribeStatusSignal) {
+    unsubscribeStatusSignal();
+    unsubscribeStatusSignal = null;
   }
 
   activeSession = null;
-  toast.info("YouTube Live Stream Ended");
+  activeMeetingCode = "";
+  isStopping = false;
+
+  currentOptions?.onStatusChange?.("ended");
+
+  // B4: Show "Live stream ended" only if the stream had reached active
+  if (showEndedToast && reachedActive) {
+    toast.info("Live stream ended");
+  }
 }
 
 /**
