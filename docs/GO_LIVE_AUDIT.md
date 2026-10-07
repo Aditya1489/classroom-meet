@@ -249,5 +249,222 @@
 
 ---
 
-## 5. Verification Gate & Approval
-Phase 0 discovery and audit is complete. Awaiting user approval before proceeding to Phase 1.
+## 5. Amendments & Technical Discovery (A1 - A7)
+
+### A1. Exact FFmpeg Commands Spawns & Transcoding Verification
+* **Live RTMP Forwarding Command**:
+  [`server/mediasoup-server/src/socket/index.ts:543-577`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/socket/index.ts#L543-L577)
+  ```bash
+  ffmpeg \
+    -loglevel info \
+    -stats \
+    -thread_queue_size 8192 \
+    -fflags +genpts+discardcorrupt \
+    -avoid_negative_ts make_zero \
+    -probesize 512k \
+    -analyzeduration 250k \
+    -f matroska \
+    -i pipe:0 \
+    -vf "scale=1280:720:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black" \
+    -c:v libx264 \
+    -preset ultrafast \
+    -tune zerolatency \
+    -pix_fmt yuv420p \
+    -b:v 1800k \
+    -maxrate 2200k \
+    -bufsize 4400k \
+    -r 30 \
+    -fps_mode cfr \
+    -g 60 \
+    -keyint_min 60 \
+    -sc_threshold 0 \
+    -max_muxing_queue_size 8192 \
+    -af "aresample=async=1000:min_hard_comp=0.010000:first_pts=0" \
+    -c:a aac \
+    -b:a 128k \
+    -ar 44100 \
+    -ac 2 \
+    -f flv \
+    [REDACTED_YOUTUBE_RTMPS_URL]
+  ```
+* **Post-Class Recording Merge Command**:
+  [`server/mediasoup-server/src/recording/merge.ts:110`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/recording/merge.ts#L110)
+  ```bash
+  ffmpeg -y -f concat -safe 0 -i "${listFilePath}" -c copy "${mergedFilePath}"
+  ```
+* **Analysis**:
+  - Live streaming is **NOT** `-c copy`. It performs a full transcode from browser VP8/Opus (Matroska) to H.264 (`libx264`) and AAC (`aac`) in an FLV container sent over RTMPS.
+  - `-c copy` is used strictly for offline post-recording file merging.
+
+---
+
+### A2. stdin Backpressure ('drain'), EPIPE & Process Exit Handling
+* **Location**: [`server/mediasoup-server/src/socket/index.ts:18-46, 596-606`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/socket/index.ts#L18-L46)
+* **stdin Backpressure**: **BUG**. Line 37 executes `entry.stdin.write(buffer)`. The boolean return value of `write()` is completely ignored. There is no listener for the `'drain'` event on `entry.stdin`, and no backpressure signal or pause mechanism exists for either the HTTP relay or the socket chunk receiver.
+* **EPIPE Handling**: **BUG**. `entry.stdin.on('error', ...)` is NOT attached. While line 37 has a synchronous `try / catch`, Node stream writes emit `'error'` events asynchronously. If FFmpeg terminates abruptly while chunks are arriving, writing to closed stdin triggers an unhandled `EPIPE` error event that risks crashing the Node process.
+* **FFmpeg-Exit Handling**: **BUG**. Lines 596-605 attach `ffmpeg.on("close")` and `ffmpeg.on("error")` which delete the entry from `rtmpProcesses` and emit `rtmpStatus: "ended"` or `"error"`. However, because in-flight chunks are not stopped immediately, chunks that arrive between exit initiation and `'close'` emission hit a dying process without graceful drain.
+
+---
+
+### A3. Concurrent Sessions for Same `classId` & Old FFmpeg Process Cleanup
+* **Location**: [`server/mediasoup-server/src/socket/index.ts:622-636`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/socket/index.ts#L622-L636)
+* **Behavior**:
+  - When a new `startRtmpStream` request arrives for an existing `targetId`, the server immediately calls `rtmpProcesses.delete(targetId)` and attempts tiered termination:
+    1. `existing.stdin.end()` immediately.
+    2. `SIGINT` after 500 ms.
+    3. `SIGKILL` after 1500 ms.
+  - It then executes: `setTimeout(() => spawnFfmpeg(rtmpUrl), 3000)`.
+* **Findings**:
+  - Two FFmpeg processes cannot stream simultaneously for the same `classId` once the 3s delay elapses.
+  - **However**, during that 3000 ms delay, `rtmpProcesses.get(targetId)` is empty. All chunks sent by the client during these 3 seconds are **dropped** by `writeRtmpChunk()`.
+  - There is no mutex or lock protecting `startRtmpStream`. If two requests arrive in parallel (such as double-clicking or socket retries), two separate 3s timeout timers are set, causing two conflicting FFmpeg processes to spawn.
+
+---
+
+### A4. CORS Configuration for `/rtmp-chunk`
+* **Location**: [`server/mediasoup-server/src/server.ts:20-27`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/server.ts#L20-L27)
+  ```ts
+  app.use(cors({
+    origin: true,
+    credentials: true,
+    allowedHeaders: ["Content-Type", "x-class-id", "Authorization"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+  }));
+  app.options("*", cors());
+  ```
+* **Findings**:
+  - **Preflight Handling**: Fully configured via `app.options("*", cors())`.
+  - **Origin**: `origin: true` dynamically reflects the `Origin` header of the caller, allowing `mathsy.in`, `localhost`, and Vercel preview URLs.
+  - **Allowed Headers**: Includes `Content-Type`, `x-class-id`, and `Authorization`.
+  - **Credentials**: `true`.
+
+---
+
+### A5. Supabase JWT Authentication in Production & JWKS vs. HS256 Support
+* **Deployment Config Analysis**:
+  - [`server/mediasoup-server/deploy.sh:75`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/deploy.sh#L75) validates that `SUPABASE_JWT_SECRET` is defined in production `.env` before PM2 starts.
+  - [`server/mediasoup-server/src/config/index.ts:16`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/config/index.ts#L16) strictly requires `SUPABASE_JWT_SECRET` if `NODE_ENV === "production"`; missing it causes `process.exit(1)`.
+  - [`server/mediasoup-server/ecosystem.config.js:10`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/ecosystem.config.js#L10) launches `dist/server.js` with PM2, loading variables via `dotenv.config()` in `config/index.ts`.
+* **Signing Algorithm & JWKS vs. HS256**:
+  - The codebase currently verifies tokens using symmetric `HS256` via `config.supabaseJwtSecret` in [`server/mediasoup-server/src/auth/index.ts:36-38`](file:///Users/adityachavhan/Documents/Mathsy/mathsycrm-60886267/server/mediasoup-server/src/auth/index.ts#L36-L38).
+  - Modern Supabase projects also support asymmetric signing keys (ES256/RS256) via the JWKS endpoint (`https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json`).
+  - **Architecture Decision**: The authentication validator will support **dual verification**:
+    1. Symmetric `HS256` verification if `SUPABASE_JWT_SECRET` is configured.
+    2. Asymmetric `JWKS` verification fetching public keys from `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` if tokens are signed with asymmetric algorithms.
+
+---
+
+### A6. Blast Radius & Client Audit Across Repositories
+The Mediasoup server is shared between `mathsycrm-60886267` and `mathsy-meet`. Here is the complete inventory of all connecting clients:
+
+| Client App / Component | File Location | Events Emitted / Listened | Authentication Mechanism | Status & Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| **Mathsy Meet — Room Engine** | `mathsy-meet/src/engine/mediasoupClient.ts` | Connects socket, produces WebRTC media, handles chat, polls, reactions | Synthetic token: `header.payload.mathsySig` | **Must update**: send genuine Supabase session access token or server guest token. |
+| **Mathsy Meet — YouTube Service** | `mathsy-meet/src/services/youtubeService.ts` | `startRtmpStream`, `stopRtmpStream`, `rtmpChunk`, `rtmpStatus`, `/rtmp-chunk` | Relies on Room Engine socket | **Must replace**: Migrate to authenticated `live:*` protocol. |
+| **Mathsy CRM — MediasoupProvider** | `mathsycrm-60886267/src/platform/media/MediasoupProvider.ts` | Connects socket, signaling for room media, chat, whiteboard | LiveKit token (`lk-token` Edge function) passed in query | **Must preserve**: Genuine signed token with role metadata. Server auth must continue supporting it. |
+| **Mathsy CRM — YouTube Recorder** | `mathsycrm-60886267/src/features/live-classes/components/MediasoupYouTubeRecorder.tsx` | Emits `startRtmpStream`, `stopRtmpStream`, `rtmpChunk`; listens to `rtmpStatus`; POSTs to `/rtmp-chunk` | Relies on CRM MediasoupProvider socket | **CRITICAL BACKWARD COMPATIBILITY**: Server MUST keep legacy events intact for CRM callers. |
+| **Mathsy CRM — MediasoupDebug** | `mathsycrm-60886267/src/features/live-classes/pages/MediasoupDebug.tsx` | Diagnostic socket test | Raw socket connection test | Continues working. |
+
+---
+
+### A7. Tracked `.env` Variable Names & Secret Classification
+*(Values are excluded per security rules)*
+
+#### 1. `mathsy-meet/.env`
+* `VITE_APP_NAME` — Public configuration
+* `VITE_SUPABASE_PROJECT_ID` — Public reference
+* `VITE_SUPABASE_URL` — Public endpoint
+* `VITE_SUPABASE_ANON_KEY` — **Client-Safe Key** (browser anon key, public by design)
+* `VITE_MEDIASOUP_SERVER_URL` — Public endpoint
+* `VITE_GOOGLE_CLIENT_ID` — Public OAuth identifier
+* `VITE_TLDRAW_LICENSE_KEY` — **SECRET** (Commercial third-party license key)
+
+#### 2. `mathsycrm-60886267/.env`
+* `VITE_SUPABASE_PROJECT_ID` — Public reference
+* `VITE_SUPABASE_PUBLISHABLE_KEY` — Public key
+* `VITE_SUPABASE_URL` — Public endpoint
+* `VITE_SUPABASE_ANON_KEY` — Public anon key
+* `GEMINI_API_KEY` — **SECRET** (Google AI API Key)
+* `VITE_GOOGLE_DRIVE_API_KEY` — **SECRET** (Google Cloud API Key)
+* `VITE_LIVEKIT_URL` — Public endpoint
+* `LIVEKIT_API_KEY` — **SECRET** (LiveKit API Key)
+* `LIVEKIT_API_SECRET` — **SECRET** (LiveKit API Secret)
+* `VITE_LIVEKIT_API_KEY` — **SECRET** (Leaked in VITE client bundle)
+* `VITE_LIVEKIT_API_SECRET` — **SECRET** (Leaked in VITE client bundle)
+* `VITE_GOOGLE_CLIENT_ID` — Public OAuth identifier
+* `VITE_TLDRAW_LICENSE_KEY` — **SECRET** (Third-party license key)
+* `VITE_MEDIASOUP_SERVER_URL` — Public endpoint
+* `YOUTUBE_CLIENT_ID` — Public OAuth identifier
+* `YOUTUBE_CLIENT_SECRET` — **SECRET** (Google OAuth Client Secret)
+* `YOUTUBE_REFRESH_TOKEN` — **SECRET** (Google OAuth Refresh Token)
+
+#### 3. `mathsycrm-60886267/server/mediasoup-server/.env`
+* `PORT` — Server config
+* `HOST` — Server config
+* `NODE_ENV` — Server config
+* `MEDIASOUP_LISTEN_IP` — Server network config
+* `MEDIASOUP_MIN_PORT` — Port range
+* `MEDIASOUP_MAX_PORT` — Port range
+* `MEDIASOUP_ENABLE_TCP` — Server config
+* `MEDIASOUP_LOG_LEVEL` — Server config
+* `SUPABASE_URL` — Server endpoint
+* `SUPABASE_ANON_KEY` — Public anon key
+* `SUPABASE_SERVICE_ROLE_KEY` — **CRITICAL SECRET** (Bypasses all Supabase RLS)
+* `SUPABASE_JWT_SECRET` — **CRITICAL SECRET** (Signs and verifies all user JWTs)
+* `MEDIASOUP_ANNOUNCED_IP` — Public IP address
+
+#### 4. `mathsycrm-60886267/python_analyzer/.env`
+* `GEMINI_API_KEY` — **SECRET** (Google AI API Key)
+
+---
+
+## 6. Revised Implementation Plan (Incorporating Constraints B1 - B6)
+
+### Git Preparation (Constraint B6)
+Before any code changes, create branch `fix/go-live` in both repositories:
+- `mathsy-meet`
+- `mathsycrm-60886267`
+
+### Phase 1: Security Hotfix & Backward-Compatible Auth
+1. **Frontend (`mathsy-meet`) Cleanup**:
+   - Delete `getGoogleAccessToken()`, `resolveChannelLiveVideoUrl()`, the 3s search poller, direct broadcast creators, and `cNyhzfzQD4E` hardcoding from `src/services/youtubeService.ts` and `src/components/recording/RecordingModal.tsx`.
+   - Remove cleartext logging of stream keys and ingest URLs.
+   - Delete `generateClientJwt` from `src/engine/mediasoupClient.ts`.
+   - Send genuine Supabase access token for authenticated users; implement `POST /api/guest-token` integration for guests (restricted strictly to student role).
+   - Fix `connect_error` in `mediasoupClient.ts` to report connection error rather than masking it.
+   - Hide all live-stream and recording controls from students in `MeetingRoom.tsx`.
+2. **Backend (`server/mediasoup-server`) Auth Rollout**:
+   - Implement dual verification (HS256 secret + JWKS fallback).
+   - Add env flag `AUTH_ENFORCE` (defaults to `false`).
+   - When `AUTH_ENFORCE=false`: If token verification fails or is missing, log a warning with client identifier and user ID, but permit connection (graceful migration period).
+   - Add endpoint `POST /api/guest-token` returning signed guest tokens restricted to `role: "student"`.
+   - Implement server authorization helper `isClassTutor(userId, classId)` against room owner registry or Supabase `live_classes.tutor_id`.
+   - Protect new `live:*` events: require verified tutor status immediately from day one.
+   - **Preserve legacy events** (`startRtmpStream`, `stopRtmpStream`, `rtmpChunk`, `rtmpStatus`, `/rtmp-chunk`) so Mathsy CRM continues functioning without disruption.
+3. **Secrets & Git Hygiene**:
+   - Untrack `.env` files in both repos (`git rm --cached .env`).
+   - Update `.gitignore` and add sanitized `.env.example` templates.
+   - Document secrets requiring rotation in `docs/DEPLOY_LIVE_FIX.md`.
+
+### Phase 2: Reliable Streaming Pipeline
+1. **Protocol & Engine**:
+   - Add acked `live:start`, `live:chunk`, `live:restart`, `live:stop`, and `live:status` events on server.
+   - Remove 3-second spawn delay; buffer early chunks until FFmpeg `stdin` is confirmed writable.
+   - Buffer and enforce sequential chunk delivery via `seq` numbers with deduplication.
+   - Emit `"live"` status only upon receiving real frame output from FFmpeg stderr (`frame=`).
+   - Implement `stdin.write()` backpressure monitoring (`drain` event).
+   - Set `maxHttpBufferSize` to 5 MB on Socket.IO server.
+   - Add 15-second chunk-inactivity watchdog and reduce live-session disconnect grace to 10 seconds.
+   - Kill all FFmpeg child processes on server SIGTERM/SIGINT.
+   - Standardize FFmpeg transcoding parameters (wallclock timestamps, 720p/30fps, `libx264 veryfast`, `aac 48k`).
+2. **Frontend `LiveStreamController`**:
+   - Implement deterministic state machine, preflight recorder checks, 720p/30fps constraints, and dynamic `AudioMixer`.
+
+### Phase 3: Authenticated YouTube OAuth Pipeline
+1. Server-side OAuth token exchange and encrypted storage.
+2. Single persistent ingestion resource per tutor with automated broadcast binding.
+3. 1-click connect/disconnect UI with echo warning on preview embed.
+
+### Documentation & Rollout Runbook
+- Generate `docs/DEPLOY_LIVE_FIX.md` detailing exact deployment order, environment variable configuration, secret rotation steps, and verification commands.
+
