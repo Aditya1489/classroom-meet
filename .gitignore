@@ -25,3 +25,11 @@ dist-ssr
 
 # Testing & MCP artifacts
 .playwright-mcp/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Internal documentation
+docs/internal/
