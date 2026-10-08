@@ -45,27 +45,6 @@ export interface ReactionEvent {
   emoji: string;
 }
 
-function generateClientJwt(userId: string, role: string, name: string): string {
-  try {
-    const b64Url = (obj: any) =>
-      btoa(unescape(encodeURIComponent(JSON.stringify(obj))))
-        .replace(/=/g, "")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_");
-
-    const header = b64Url({ alg: "HS256", typ: "JWT" });
-    const payload = b64Url({
-      sub: userId,
-      role: role === "host" ? "tutor" : role,
-      name: name,
-      exp: Math.floor(Date.now() / 1000) + 86400 * 7,
-    });
-    return `${header}.${payload}.mathsySig`;
-  } catch {
-    return "";
-  }
-}
-
 export class MathsyMediasoupEngine {
   public socket: Socket | null = null;
   public device: Device | null = null;
@@ -94,7 +73,10 @@ export class MathsyMediasoupEngine {
   private signalingUrl: string;
 
   constructor() {
-    this.signalingUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in";
+    this.signalingUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "";
+    if (!this.signalingUrl) {
+      console.error("[MathsyMeet Engine] Critical: VITE_MEDIASOUP_SERVER_URL is not configured.");
+    }
   }
 
   public async connect({
@@ -110,12 +92,34 @@ export class MathsyMediasoupEngine {
     token?: string;
     role?: "host" | "tutor" | "student" | "guest";
   }) {
+    if (!this.signalingUrl) {
+      const errMsg = "Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.";
+      console.error(`[MathsyMeet Engine] ${errMsg}`);
+      this.onConnectionStateChange?.("failed");
+      throw new Error(errMsg);
+    }
+
     this.onConnectionStateChange?.("connecting");
 
-    const effectiveToken =
-      token && token.trim().length > 0
-        ? token
-        : generateClientJwt(userId, role, userName);
+    let effectiveToken = token && token.trim().length > 0 ? token.trim() : "";
+    if (!effectiveToken) {
+      // Guest student: Request genuine short-lived guest token from the SFU server
+      try {
+        const guestRes = await fetch(`${this.signalingUrl.replace(/\/$/, "")}/api/guest-token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: userName, guestId: userId })
+        });
+        if (guestRes.ok) {
+          const guestData = await guestRes.json();
+          effectiveToken = guestData.token;
+        } else {
+          console.error("[MathsyMeet Engine] Failed to obtain guest token:", guestRes.status);
+        }
+      } catch (err: any) {
+        console.error("[MathsyMeet Engine] Network error requesting guest token:", err.message);
+      }
+    }
 
     // Establish WebSocket to Mediasoup signaling server
     this.socket = io(this.signalingUrl, {
@@ -140,9 +144,8 @@ export class MathsyMediasoupEngine {
     });
 
     this.socket.on("connect_error", (err) => {
-      console.warn("[MathsyMeet Engine] Socket connection notice (using peer mesh fallback if needed):", err.message);
-      // Fallback connection mode so meeting works even if public SFU token check differs
-      this.onConnectionStateChange?.("connected");
+      console.error("[MathsyMeet Engine] Socket connection error:", err.message);
+      this.onConnectionStateChange?.("failed");
     });
 
     this.socket.on("disconnect", () => {

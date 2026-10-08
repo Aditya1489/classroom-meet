@@ -126,9 +126,12 @@ const chunkQueue: Uint8Array[] = [];
 let isTransmitting = false;
 let finalChunkDrainResolve: (() => void) | null = null;
 
-function getHttpServerUrl(wsUrl: string): string {
-  if (!wsUrl) return "https://rtc.mathsy.in";
-  return wsUrl.replace(/^ws(s)?:\/\//i, "http$1://");
+function getHttpServerUrl(wsUrl?: string): string {
+  const url = wsUrl || (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL || "";
+  if (!url) {
+    throw new Error("Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.");
+  }
+  return url.replace(/^ws(s)?:\/\//i, "http$1://");
 }
 
 export interface StartYouTubeLiveOptions {
@@ -153,9 +156,15 @@ async function processChunkQueue(): Promise<void> {
   if (isTransmitting) return;
   isTransmitting = true;
 
-  const rtmpServerUrl = getHttpServerUrl(
-    (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in"
-  );
+  const rawUrl = (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL;
+  if (!rawUrl) {
+    console.error("[YouTubeService] Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.");
+    currentOptions?.onError?.("Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.");
+    isTransmitting = false;
+    return;
+  }
+
+  const rtmpServerUrl = getHttpServerUrl(rawUrl);
 
   try {
     while (chunkQueue.length > 0 && !isStopping) {
