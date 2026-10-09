@@ -62,7 +62,11 @@ export class MathsyMediasoupEngine {
   public chatMessages: ChatMessage[] = [];
   public activePolls: Poll[] = [];
 
+  public serverRole: "tutor" | "student" = "student";
+  public isServerOwner: boolean = false;
+
   // Listeners
+  public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean) => void;
   public onParticipantsChange?: (participants: RemoteParticipant[]) => void;
   public onChatMessage?: (message: ChatMessage) => void;
   public onPollsChange?: (polls: Poll[]) => void;
@@ -151,6 +155,16 @@ export class MathsyMediasoupEngine {
     this.socket.on("disconnect", () => {
       console.log("[MathsyMeet Engine] Socket disconnected");
       this.onConnectionStateChange?.("disconnected");
+    });
+
+    // Handle room join confirmation from server
+    this.socket.on("roomJoined", (data: { role?: "tutor" | "student"; isOwner?: boolean }) => {
+      if (data?.role) {
+        this.serverRole = data.role === "tutor" ? "tutor" : "student";
+        this.isServerOwner = Boolean(data.isOwner);
+        console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}`);
+        this.onRoleAssigned?.(this.serverRole, this.isServerOwner);
+      }
     });
 
     // Handle peer lifecycle events

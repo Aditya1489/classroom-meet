@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../auth/authContext";
+import { getRoomRole } from "../../services/roomService";
 
 interface LobbyViewProps {
   meetingCode: string;
@@ -33,9 +34,10 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   onJoinMeeting,
   onBackToHome,
 }) => {
-  const { user, profile, joinAsGuest, signInWithGoogle } = useAuth();
+  const { user, profile, session, joinAsGuest, signInWithGoogle } = useAuth();
   const [displayName, setDisplayName] = useState(profile?.name || "");
-  const [selectedRole, setSelectedRole] = useState<"tutor" | "student">("tutor");
+  const [selectedRole, setSelectedRole] = useState<"tutor" | "student">("student");
+  const [isOwner, setIsOwner] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCamOff, setIsCamOff] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -45,6 +47,33 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
+
+  // Check room ownership status with server
+  useEffect(() => {
+    let cancelled = false;
+    async function checkRole() {
+      try {
+        const res = await getRoomRole(meetingCode, session?.access_token);
+        if (!cancelled) {
+          setIsOwner(res.isOwner);
+          if (res.isOwner) {
+            setSelectedRole("tutor");
+          } else {
+            setSelectedRole("student");
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setIsOwner(false);
+          setSelectedRole("student");
+        }
+      }
+    }
+    checkRole();
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingCode, session]);
 
   // Initialize display name from profile if available
   useEffect(() => {
@@ -125,12 +154,14 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
     setIsCamOff(!isCamOff);
   };
 
-  const handleJoinWithRole = (role: "tutor" | "student", present = false) => {
-    const fallbackPrefix = role === "tutor" ? "Tutor" : "Student";
+  const handleJoinWithRole = (requestedRole: "tutor" | "student", present = false) => {
+    // Only verified room owners can join as tutor
+    const effectiveRole = isOwner && requestedRole === "tutor" ? "tutor" : "student";
+    const fallbackPrefix = effectiveRole === "tutor" ? "Tutor" : "Student";
     const finalName = displayName.trim() || profile?.name || `${fallbackPrefix} ${Math.floor(100 + Math.random() * 900)}`;
 
     if (!profile) {
-      joinAsGuest(finalName, role);
+      joinAsGuest(finalName);
     }
 
     // Stop lobby preview tracks before transferring to in-call engine
@@ -143,7 +174,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
       camOff: isCamOff,
       displayName: finalName,
       presentImmediately: present,
-      role: role,
+      role: effectiveRole,
     });
   };
 
@@ -241,15 +272,15 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
             {/* Role Badge in Preview */}
             <div className="absolute top-4 right-4 flex items-center gap-1.5 bg-[#0e0d0b]/80 backdrop-blur-md px-3 py-1 rounded-full border border-[#f3eee6]/10 text-xs">
-              {selectedRole === "tutor" ? (
+              {isOwner && selectedRole === "tutor" ? (
                 <>
                   <GraduationCap className="w-3.5 h-3.5 text-[#f59e0b]" />
-                  <span className="text-[#f59e0b] font-semibold text-xs font-mono">Tutor Role</span>
+                  <span className="text-[#f59e0b] font-semibold text-xs font-mono">Tutor (Owner)</span>
                 </>
               ) : (
                 <>
                   <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400 font-semibold text-xs font-mono">Student Role</span>
+                  <span className="text-emerald-400 font-semibold text-xs font-mono">Student</span>
                 </>
               )}
             </div>
@@ -298,59 +329,81 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
           {/* Role Selection Cards */}
           <div className="w-full space-y-2 text-left">
             <label className="text-[11px] font-mono font-semibold text-[#a39e94] block uppercase tracking-wider">
-              Select Your Role
+              {isOwner ? "Select Your Role" : "Your Role in Classroom"}
             </label>
-            <div className="grid grid-cols-2 gap-2.5">
-              {/* Tutor Option */}
-              <div
-                onClick={() => setSelectedRole("tutor")}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  selectedRole === "tutor"
-                    ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
-                    : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className={`p-2 rounded-lg ${selectedRole === "tutor" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
-                    <GraduationCap className="w-4 h-4" />
+
+            {isOwner ? (
+              <div className="grid grid-cols-2 gap-2.5">
+                {/* Tutor Option */}
+                <div
+                  onClick={() => setSelectedRole("tutor")}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                    selectedRole === "tutor"
+                      ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
+                      : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className={`p-2 rounded-lg ${selectedRole === "tutor" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
+                      <GraduationCap className="w-4 h-4" />
+                    </div>
+                    {selectedRole === "tutor" && <Check className="w-4 h-4 text-[#f59e0b]" />}
                   </div>
-                  {selectedRole === "tutor" && <Check className="w-4 h-4 text-[#f59e0b]" />}
+                  <div>
+                    <h3 className={`text-sm font-semibold ${selectedRole === "tutor" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
+                      Tutor (Host)
+                    </h3>
+                    <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
+                      Room creator: host controls, whiteboard & moderation
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className={`text-sm font-semibold ${selectedRole === "tutor" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
-                    Tutor / Teacher
-                  </h3>
-                  <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
-                    Host controls, math whiteboard, live polls & moderation
-                  </p>
+
+                {/* Student Option */}
+                <div
+                  onClick={() => setSelectedRole("student")}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                    selectedRole === "student"
+                      ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
+                      : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className={`p-2 rounded-lg ${selectedRole === "student" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
+                      <BookOpen className="w-4 h-4" />
+                    </div>
+                    {selectedRole === "student" && <Check className="w-4 h-4 text-[#f59e0b]" />}
+                  </div>
+                  <div>
+                    <h3 className={`text-sm font-semibold ${selectedRole === "student" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
+                      Student / Learner
+                    </h3>
+                    <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
+                      Join as participant without host controls
+                    </p>
+                  </div>
                 </div>
               </div>
-
-              {/* Student Option */}
-              <div
-                onClick={() => setSelectedRole("student")}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  selectedRole === "student"
-                    ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
-                    : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className={`p-2 rounded-lg ${selectedRole === "student" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
+            ) : (
+              /* Non-owner: only student option shown, with explicit "Joining as student" */
+              <div className="bg-[#1a1814] border border-[#f3eee6]/10 rounded-xl p-3.5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                     <BookOpen className="w-4 h-4" />
                   </div>
-                  {selectedRole === "student" && <Check className="w-4 h-4 text-[#f59e0b]" />}
+                  <div>
+                    <div className="text-sm font-semibold text-[#f3eee6] flex items-center gap-2">
+                      <span>Joining as student</span>
+                      <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded-full font-mono border border-emerald-500/20">Student</span>
+                    </div>
+                    <p className="text-[11px] text-[#a39e94]">
+                      Interactive audio/video participation, chat, polls & whiteboard viewing
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className={`text-sm font-semibold ${selectedRole === "student" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
-                    Student / Learner
-                  </h3>
-                  <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
-                    Live classroom, raise hand, answer polls & interactive chat
-                  </p>
-                </div>
+                <Check className="w-4 h-4 text-emerald-400 mr-1" />
               </div>
-            </div>
+            )}
           </div>
 
           {/* Name Input */}
@@ -360,14 +413,14 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder={selectedRole === "tutor" ? "e.g. Prof. Sharma / Tutor" : "e.g. Rahul / Student"}
+              placeholder={isOwner && selectedRole === "tutor" ? "e.g. Prof. Sharma / Tutor" : "e.g. Rahul / Student"}
               className="w-full bg-[#1a1814] border border-[#f3eee6]/15 rounded-lg px-4 py-3 text-xs text-[#f3eee6] placeholder-[#a39e94] focus:outline-none focus:border-[#f59e0b] transition"
             />
           </div>
 
           {/* Explicit Join Action Buttons */}
           <div className="w-full space-y-2.5 pt-1">
-            {selectedRole === "tutor" ? (
+            {isOwner && selectedRole === "tutor" ? (
               <>
                 <button
                   onClick={() => handleJoinWithRole("tutor", false)}

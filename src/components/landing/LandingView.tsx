@@ -24,8 +24,9 @@ import {
   BookOpen,
   ArrowUpRight
 } from "lucide-react";
-import { generateMeetingCode, sanitizeRoomId } from "../../lib/utils";
+import { sanitizeRoomId } from "../../lib/utils";
 import { useAuth } from "../../auth/authContext";
+import { createRoom } from "../../services/roomService";
 import { toast } from "sonner";
 
 interface LandingViewProps {
@@ -33,26 +34,109 @@ interface LandingViewProps {
 }
 
 export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
-  const { user, profile, signInWithGoogle, signOut } = useAuth();
+  const { user, profile, session, signInWithGoogle, signOut } = useAuth();
   const [meetingInput, setMeetingInput] = useState("");
   const [showNewMeetingDropdown, setShowNewMeetingDropdown] = useState(false);
   const [showLinkModal, setShowLinkModal] = useState(false);
   const [generatedLink, setGeneratedLink] = useState("");
   const [showCheckoutModal, setShowCheckoutModal] = useState<string | null>(null);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
 
-  const handleStartInstant = () => {
-    const code = generateMeetingCode();
+  // Resume pending action after OAuth redirect or notify on cancel
+  React.useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const errorParam = urlParams.get("error") || hashParams.get("error") || urlParams.get("error_description");
+    if (errorParam) {
+      sessionStorage.removeItem("pendingAction");
+      toast.error("Sign-in was cancelled. No meeting created.");
+      window.history.replaceState({}, "", window.location.pathname);
+      return;
+    }
+
+    const pending = sessionStorage.getItem("pendingAction");
+    if (!pending) return;
+
+    if (session?.access_token && user) {
+      sessionStorage.removeItem("pendingAction");
+      setIsCreatingRoom(true);
+      if (pending === "new-meeting") {
+        createRoom(session.access_token)
+          .then(({ code }) => {
+            toast.success("Signed in! Starting your class as tutor...");
+            onStartMeeting(code);
+          })
+          .catch((err) => {
+            toast.error(err.message || "Failed to start meeting");
+          })
+          .finally(() => setIsCreatingRoom(false));
+      } else if (pending === "create-link") {
+        createRoom(session.access_token)
+          .then(({ code }) => {
+            const url = `${window.location.origin}/meet/${code}`;
+            setGeneratedLink(url);
+            setShowLinkModal(true);
+            toast.success("Meeting link generated!");
+          })
+          .catch((err) => {
+            toast.error(err.message || "Failed to create meeting link");
+          })
+          .finally(() => setIsCreatingRoom(false));
+      }
+    }
+  }, [session, user, onStartMeeting]);
+
+  const handleStartInstant = async () => {
     setShowNewMeetingDropdown(false);
-    onStartMeeting(code);
+    if (!user || !session?.access_token) {
+      toast.info("Sign in with Google to start a meeting");
+      sessionStorage.setItem("pendingAction", "new-meeting");
+      try {
+        await signInWithGoogle();
+      } catch (err: any) {
+        sessionStorage.removeItem("pendingAction");
+        toast.error("Failed to start Google sign-in");
+      }
+      return;
+    }
+
+    setIsCreatingRoom(true);
+    try {
+      const { code } = await createRoom(session.access_token);
+      onStartMeeting(code);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to start meeting");
+    } finally {
+      setIsCreatingRoom(false);
+    }
   };
 
-  const handleCreateForLater = () => {
-    const code = generateMeetingCode();
-    const url = `${window.location.origin}/meet/${code}`;
-    setGeneratedLink(url);
+  const handleCreateForLater = async () => {
     setShowNewMeetingDropdown(false);
-    setShowLinkModal(true);
+    if (!user || !session?.access_token) {
+      toast.info("Sign in with Google to start a meeting");
+      sessionStorage.setItem("pendingAction", "create-link");
+      try {
+        await signInWithGoogle();
+      } catch (err: any) {
+        sessionStorage.removeItem("pendingAction");
+        toast.error("Failed to start Google sign-in");
+      }
+      return;
+    }
+
+    setIsCreatingRoom(true);
+    try {
+      const { code } = await createRoom(session.access_token);
+      const url = `${window.location.origin}/meet/${code}`;
+      setGeneratedLink(url);
+      setShowLinkModal(true);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to generate meeting link");
+    } finally {
+      setIsCreatingRoom(false);
+    }
   };
 
   const handleJoinByCode = (e: React.FormEvent) => {
@@ -177,12 +261,19 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
               <div className="relative">
                 <button
                   onClick={() => setShowNewMeetingDropdown(!showNewMeetingDropdown)}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-sm font-semibold shadow-lg shadow-[#f59e0b]/25 transition hover:scale-[1.01] active:scale-[0.99]"
+                  disabled={isCreatingRoom}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-sm font-semibold shadow-lg shadow-[#f59e0b]/25 transition hover:scale-[1.01] active:scale-[0.99] disabled:opacity-60"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>New Meeting</span>
+                  <span>{isCreatingRoom ? "Starting..." : "New Meeting"}</span>
                   <ChevronDown className="w-3.5 h-3.5 opacity-80" />
                 </button>
+
+                {!user && (
+                  <div className="text-[11px] text-[#a39e94] mt-1.5 flex items-center gap-1 font-mono">
+                    <span>Sign in to start a class</span>
+                  </div>
+                )}
 
                 {showNewMeetingDropdown && (
                   <div className="absolute top-14 left-0 w-72 bg-[#1a1814] border border-[#f3eee6]/15 rounded-xl shadow-2xl p-2 z-50 text-left">

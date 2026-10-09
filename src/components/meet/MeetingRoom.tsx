@@ -80,15 +80,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const engineRef = useRef<MathsyMediasoupEngine | null>(null);
   const playerRef = useRef<HTMLDivElement>(null);
 
-  // Strictly prioritize chosen role
-  const isHost =
-    initialOptions.role === "tutor" ||
-    (initialOptions.role === undefined && Boolean(profile?.isHost || profile?.role === "tutor")) ||
-    initialOptions.displayName.toLowerCase().includes("tutor") ||
-    initialOptions.displayName.toLowerCase().includes("host");
+  // Server-granted role (derived from lobby selection, confirmed via server roomJoined response)
+  const [grantedRole, setGrantedRole] = useState<"tutor" | "student">(
+    initialOptions.role === "tutor" ? "tutor" : "student"
+  );
+  const isHost = grantedRole === "tutor";
 
   const myUserId = profile?.id || "user_" + Math.random().toString(36).substring(2, 8);
-  const myName = initialOptions.displayName || profile?.name || (isHost ? "Tutor" : "Student");
+  const myName = initialOptions.displayName || profile?.name || (initialOptions.role === "tutor" ? "Tutor" : "Student");
 
   // Connection State
   const [connectionState, setConnectionState] = useState<
@@ -270,6 +269,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setConnectionState(state);
       if (state === "connected") {
         toast.success(`Joined room: ${meetingCode}`);
+      }
+    };
+
+    engine.onRoleAssigned = (serverRole) => {
+      setGrantedRole(serverRole);
+      if (serverRole === "tutor") {
+        setUnmuteRequestStatus("approved");
+        setShowCameraGateModal(false);
       }
     };
 

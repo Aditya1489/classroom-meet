@@ -37,10 +37,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (session?.user) {
         setProfile({
           id: session.user.id,
-          name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Host",
+          name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "User",
           email: session.user.email || "",
           avatarUrl: session.user.user_metadata?.avatar_url || "",
-          isHost: true
+          isHost: false,
+          role: "student",
         });
       } else {
         // Check for saved guest session
@@ -62,10 +63,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (session?.user) {
         setProfile({
           id: session.user.id,
-          name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Host",
+          name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "User",
           email: session.user.email || "",
           avatarUrl: session.user.user_metadata?.avatar_url || "",
-          isHost: true
+          isHost: false,
+          role: "student",
         });
         localStorage.removeItem("mathsy_meet_guest");
       }
@@ -96,16 +98,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const joinAsGuest = (guestName: string, role: "tutor" | "student" = "student") => {
-    const trimmed = guestName.trim() || (role === "tutor" ? "Tutor" : "Student") + " " + Math.floor(100 + Math.random() * 900);
-    const isTutor = role === "tutor";
+  const joinAsGuest = (guestName: string, _role?: "tutor" | "student") => {
+    const trimmed = guestName.trim() || "Student " + Math.floor(100 + Math.random() * 900);
     const guestProfile: UserProfile = {
       id: "guest_" + Math.random().toString(36).substring(2, 10),
       name: trimmed,
       email: "",
-      avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(trimmed)}&backgroundColor=${isTutor ? "1a73e8" : "10b981"}`,
-      isHost: isTutor,
-      role: role,
+      avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(trimmed)}&backgroundColor=10b981`,
+      isHost: false,
+      role: "student",
     };
     setProfile(guestProfile);
     localStorage.setItem("mathsy_meet_guest", JSON.stringify(guestProfile));
