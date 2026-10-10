@@ -64,12 +64,15 @@ export class MathsyMediasoupEngine {
 
   public serverRole: "tutor" | "student" = "student";
   public isServerOwner: boolean = false;
+  public isDemo: boolean = false;
+  public demoRemainingSec: number | null = null;
+  public onDemoRoomEnded?: () => void;
   public getAuthToken(): string {
     return this.activeToken;
   }
 
   // Listeners
-  public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean) => void;
+  public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean, roomData?: any) => void;
   public onParticipantsChange?: (participants: RemoteParticipant[]) => void;
   public onChatMessage?: (message: ChatMessage) => void;
   public onPollsChange?: (polls: Poll[]) => void;
@@ -178,13 +181,28 @@ export class MathsyMediasoupEngine {
     });
 
     // Handle room join confirmation from server
-    this.socket.on("roomJoined", (data: { role?: "tutor" | "student"; isOwner?: boolean }) => {
+    this.socket.on("roomJoined", (data: {
+      role?: "tutor" | "student";
+      isOwner?: boolean;
+      isDemo?: boolean;
+      remainingSec?: number;
+      whiteboardSnapshot?: any;
+      letStudentsDraw?: boolean;
+      pinnedMessage?: any;
+    }) => {
       if (data?.role) {
         this.serverRole = data.role === "tutor" ? "tutor" : "student";
         this.isServerOwner = Boolean(data.isOwner);
-        console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}`);
-        this.onRoleAssigned?.(this.serverRole, this.isServerOwner);
+        this.isDemo = Boolean(data.isDemo);
+        this.demoRemainingSec = typeof data.remainingSec === "number" ? data.remainingSec : null;
+        console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}, isDemo: ${this.isDemo}`);
+        this.onRoleAssigned?.(this.serverRole, this.isServerOwner, data);
       }
+    });
+
+    this.socket.on("demoRoomEnded", () => {
+      console.log("[MathsyMeet Engine] Received demoRoomEnded from server");
+      this.onDemoRoomEnded?.();
     });
 
     // Handle peer lifecycle events

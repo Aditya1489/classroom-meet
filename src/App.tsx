@@ -3,6 +3,7 @@ import { LandingView } from "./components/landing/LandingView";
 import { LobbyView } from "./components/lobby/LobbyView";
 import { MeetingRoom } from "./components/meet/MeetingRoom";
 import { sanitizeRoomId } from "./lib/utils";
+import { createDemoRoom } from "./services/roomService";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
@@ -23,9 +24,36 @@ export default function App() {
     role: "tutor",
   });
 
-  // Check URL path on load (e.g. /meet/abc-defg-hij)
+  // Check URL path on load (e.g. /meet/abc-defg-hij, /demo, ?demo=1)
   useEffect(() => {
     const path = window.location.pathname;
+    const urlParams = new URLSearchParams(window.location.search);
+    const isDemoQuery = urlParams.get("demo") === "1";
+
+    if (path === "/demo" || path.startsWith("/demo/") || isDemoQuery) {
+      if (path.includes("/meet/")) {
+        const code = sanitizeRoomId(path.split("/meet/")[1]);
+        if (code) {
+          setActiveMeetingCode(code);
+          setCurrentView("lobby");
+          return;
+        }
+      }
+      toast.info("Starting instant 30-minute demo room...");
+      createDemoRoom()
+        .then(({ code, token }) => {
+          sessionStorage.setItem(`demo_token_${code}`, token);
+          setActiveMeetingCode(code);
+          window.history.replaceState({}, "", `/meet/${code}?demo=1`);
+          setCurrentView("lobby");
+        })
+        .catch((err) => {
+          toast.error(err.message || "Failed to create demo room");
+          setCurrentView("landing");
+        });
+      return;
+    }
+
     if (path.includes("/meet/")) {
       const code = sanitizeRoomId(path.split("/meet/")[1]);
       if (code) {

@@ -38,6 +38,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const [displayName, setDisplayName] = useState(profile?.name || "");
   const [selectedRole, setSelectedRole] = useState<"tutor" | "student">("student");
   const [isOwner, setIsOwner] = useState(false);
+  const [isDemoRoom, setIsDemoRoom] = useState(meetingCode.startsWith("demo-"));
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCamOff, setIsCamOff] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -53,9 +54,13 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
     let cancelled = false;
     async function checkRole() {
       try {
-        const res = await getRoomRole(meetingCode, session?.access_token);
+        const demoStoredToken = sessionStorage.getItem(`demo_token_${meetingCode}`);
+        const effectiveAuthToken = session?.access_token || demoStoredToken || undefined;
+        const res = await getRoomRole(meetingCode, effectiveAuthToken);
         if (!cancelled) {
           setIsOwner(res.isOwner);
+          const isDemo = Boolean(res.isDemo || meetingCode.startsWith("demo-"));
+          setIsDemoRoom(isDemo);
           if (res.isOwner) {
             setSelectedRole("tutor");
           } else {
@@ -317,7 +322,9 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
         {/* Right: Join Action Panel */}
         <div className="w-full max-w-md flex flex-col items-center lg:items-start text-center lg:text-left space-y-5">
           <div>
-            <span className="section-label mb-2">LOBBY CHECK-IN</span>
+            <span className="section-label mb-2">
+              {isDemoRoom ? "🌟 DEMO ROOM (30 MIN LIMIT)" : "LOBBY CHECK-IN"}
+            </span>
             <h1 className="font-serif text-3xl md:text-4xl font-normal text-[#f3eee6] mb-1">
               Ready to enter class?
             </h1>

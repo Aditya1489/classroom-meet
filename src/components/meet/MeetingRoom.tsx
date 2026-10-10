@@ -95,6 +95,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     "connecting" | "connected" | "disconnected" | "failed"
   >("connecting");
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [isDemo, setIsDemo] = useState<boolean>(meetingCode.startsWith("demo-"));
+  const [demoRemainingSec, setDemoRemainingSec] = useState<number | null>(meetingCode.startsWith("demo-") ? 1800 : null);
+  const [isDemoEnded, setIsDemoEnded] = useState<boolean>(false);
 
   // Media States
   const [isMicEnabled, setIsMicEnabled] = useState(!initialOptions.micMuted);
@@ -259,6 +262,23 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
   }, [isYouTubeLive]);
 
+
+  // Demo Room Countdown Timer
+  useEffect(() => {
+    if (!isDemo || demoRemainingSec === null) return;
+    const interval = setInterval(() => {
+      setDemoRemainingSec((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          setIsDemoEnded(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDemo, demoRemainingSec]);
+
   // Post Class Workflow Modal
   const [showPostClassModal, setShowPostClassModal] = useState(false);
 
@@ -279,12 +299,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     };
 
-    engine.onRoleAssigned = (serverRole) => {
+    engine.onRoleAssigned = (serverRole, isOwner, roomData) => {
       setGrantedRole(serverRole);
+      if (roomData?.isDemo) {
+        setIsDemo(true);
+        if (typeof roomData.remainingSec === "number") {
+          setDemoRemainingSec(roomData.remainingSec);
+        }
+      }
       if (serverRole === "tutor") {
         setUnmuteRequestStatus("approved");
         setShowCameraGateModal(false);
       }
+    };
+
+    engine.onDemoRoomEnded = () => {
+      setIsDemoEnded(true);
     };
 
     engine.onParticipantsChange = (updated) => {
@@ -736,6 +766,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             }}
             title={`Status: ${connectionState}`}
           />
+
+          {/* Demo room countdown badge */}
+          {isDemo && demoRemainingSec !== null && (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold animate-pulse">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              Demo room — ends in {Math.floor(demoRemainingSec / 60).toString().padStart(2, "0")}:{(demoRemainingSec % 60).toString().padStart(2, "0")}
+            </div>
+          )}
         </div>
 
         {/* Center: Layout Selector */}

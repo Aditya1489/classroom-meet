@@ -1,6 +1,17 @@
 export interface RoomRoleResponse {
   exists: boolean;
   isOwner: boolean;
+  isDemo?: boolean;
+  remainingSec?: number;
+}
+
+export interface DemoRoomResponse {
+  code: string;
+  token: string;
+  hostUserId: string;
+  isDemo: boolean;
+  maxDurationMinutes: number;
+  maxParticipants: number;
 }
 
 const getServerUrl = (): string => {
@@ -66,4 +77,32 @@ export async function getRoomRole(code: string, accessToken?: string): Promise<R
   } catch {
     return { exists: false, isOwner: false };
   }
+}
+
+
+/**
+ * Creates an instant 30-minute demo room on the server (max 5 participants).
+ * Rate-limited per IP, does not require Google sign-in.
+ */
+export async function createDemoRoom(): Promise<DemoRoomResponse> {
+  const serverUrl = getServerUrl();
+  if (!serverUrl) {
+    throw new Error("Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.");
+  }
+
+  const res = await fetch(`${serverUrl}/api/demo-room`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!res.ok) {
+    let errorMsg = `Failed to create demo room (${res.status})`;
+    try {
+      const data = await res.json();
+      if (data?.error) errorMsg = data.error;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+
+  return res.json();
 }

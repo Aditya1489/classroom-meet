@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { sanitizeRoomId } from "../../lib/utils";
 import { useAuth } from "../../auth/authContext";
-import { createRoom } from "../../services/roomService";
+import { createRoom, createDemoRoom } from "../../services/roomService";
 import { toast } from "sonner";
 
 interface LandingViewProps {
@@ -86,6 +86,22 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
       }
     }
   }, [session, user, onStartMeeting]);
+
+  const handleStartDemo = async () => {
+    setShowNewMeetingDropdown(false);
+    setIsCreatingRoom(true);
+    try {
+      toast.info("Launching instant 30-minute demo room...");
+      const { code, token } = await createDemoRoom();
+      sessionStorage.setItem(`demo_token_${code}`, token);
+      window.history.pushState({}, "", `/meet/${code}?demo=1`);
+      onStartMeeting(code);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to start demo room");
+    } finally {
+      setIsCreatingRoom(false);
+    }
+  };
 
   const handleStartInstant = async () => {
     setShowNewMeetingDropdown(false);
@@ -297,6 +313,16 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
                         <div className="text-[10px] text-[#a39e94] font-normal">Generate shareable class link</div>
                       </div>
                     </button>
+                    <button
+                      onClick={handleStartDemo}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-[#221f1a] text-xs font-semibold text-[#f3eee6] transition border-t border-[#f3eee6]/10 pt-2"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-400" />
+                      <div>
+                        <div className="text-amber-300">Try 30-Min Demo</div>
+                        <div className="text-[10px] text-[#a39e94] font-normal">Instant room, no sign-in required</div>
+                      </div>
+                    </button>
                   </div>
                 )}
               </div>
@@ -321,6 +347,18 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
                   Join
                 </button>
               </form>
+            </div>
+
+            {/* Quick Demo CTA */}
+            <div>
+              <button
+                onClick={handleStartDemo}
+                disabled={isCreatingRoom}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition shadow-sm"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Try Instant 30-Minute Demo (No Sign-in)</span>
+              </button>
             </div>
 
             {/* Sub-bullets in Geist Mono style */}
