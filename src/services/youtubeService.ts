@@ -121,8 +121,14 @@ let isStopping = false;
 // Auto-recovery attempt tracking (B5: max 3 attempts within 2 minutes)
 const recoveryAttempts: number[] = [];
 
-// Chunk transmission queue (B2)
-const chunkQueue: Uint8Array[] = [];
+// Chunk transmission queue with sequence numbers (B2)
+interface QueuedChunk {
+  seq: number;
+  data: Uint8Array;
+}
+const chunkQueue: QueuedChunk[] = [];
+let currentSeq = 0;
+let activeToken = "";
 let isTransmitting = false;
 let finalChunkDrainResolve: (() => void) | null = null;
 
@@ -137,9 +143,10 @@ function getHttpServerUrl(wsUrl?: string): string {
 export interface StartYouTubeLiveOptions {
   meetingCode: string;
   title: string;
+  token?: string; // Authenticated tutor token for HTTP relay
   localAudioTrack: MediaStreamTrack | null;
   remoteAudioTracks?: MediaStreamTrack[];
-  emitSignal?: (event: string, payload: any) => void;
+  emitSignal?: (event: string, payload: any, ack?: (res: any) => void) => void;
   onSignal?: (event: string, callback: (payload: any) => void) => () => void;
   onStatusChange?: (status: "idle" | "connecting" | "live" | "ended" | "error") => void;
   onStatsUpdate?: (stats: StreamStats) => void;
@@ -168,7 +175,8 @@ async function processChunkQueue(): Promise<void> {
 
   try {
     while (chunkQueue.length > 0 && !isStopping) {
-      const chunk = chunkQueue[0];
+      const item = chunkQueue[0];
+      const chunk = item.data;
       const chunkPayload =
         chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
           ? chunk
@@ -181,12 +189,18 @@ async function processChunkQueue(): Promise<void> {
       while (attempt < 3 && !success && !isStopping) {
         attempt++;
         try {
-          // B2: HTTP POST /rtmp-chunk ONLY, no x-class-id header
-          const res = await fetch(`${rtmpServerUrl}/rtmp-chunk?classId=${encodeURIComponent(activeMeetingCode)}`, {
+          const headers: Record<string, string> = {
+            "Content-Type": "application/octet-stream",
+            "x-seq": String(item.seq),
+          };
+          if (activeToken) {
+            headers["Authorization"] = `Bearer ${activeToken}`;
+          }
+
+          // In-order single transmission path with sequence numbers & verified token
+          const res = await fetch(`${rtmpServerUrl}/rtmp-chunk?classId=${encodeURIComponent(activeMeetingCode)}&seq=${item.seq}`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/octet-stream",
-            },
+            headers,
             body: chunkPayload as BodyInit,
           });
 
@@ -310,7 +324,8 @@ async function triggerAutoRecovery(): Promise<void> {
       if (e.data && e.data.size > 0 && !isStopping) {
         try {
           const buf = await e.data.arrayBuffer();
-          chunkQueue.push(new Uint8Array(buf));
+          const seq = ++currentSeq;
+          chunkQueue.push({ seq, data: new Uint8Array(buf) });
           processChunkQueue();
         } catch (err) {
           console.error("[YouTubeService] Recorder chunk error:", err);
@@ -401,6 +416,8 @@ export async function startYouTubeLiveStreaming(
   isStopping = false;
   hasReachedActiveState = false;
   activeMeetingCode = meetingCode;
+  activeToken = options.token || "";
+  currentSeq = 0;
   activeEmitSignal = emitSignal || null;
   chunkQueue.length = 0;
 
@@ -450,7 +467,8 @@ export async function startYouTubeLiveStreaming(
     if (e.data && e.data.size > 0 && !isStopping) {
       try {
         const buf = await e.data.arrayBuffer();
-        chunkQueue.push(new Uint8Array(buf));
+        const seq = ++currentSeq;
+        chunkQueue.push({ seq, data: new Uint8Array(buf) });
         processChunkQueue();
       } catch (err) {
         console.error("[YouTubeService] Error processing recorded slice:", err);
@@ -509,9 +527,14 @@ export async function startYouTubeLiveStreaming(
     }
   });
 
-  // Emit startRtmpStream signal to server (B1: redact URL)
+  // Emit startRtmpStream signal to server with ack callback
   if (emitSignal) {
-    emitSignal("startRtmpStream", { classId: meetingCode, rtmpUrl });
+    emitSignal("startRtmpStream", { classId: meetingCode, rtmpUrl }, (ack?: any) => {
+      if (ack?.error) {
+        toast.dismiss("yt-stream-init");
+        handleFatalError(`Server rejected live stream: ${ack.error}`);
+      }
+    });
   }
 
   try {

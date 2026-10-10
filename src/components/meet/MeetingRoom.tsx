@@ -38,6 +38,7 @@ import {
   Tablet,
   Disc,
   LayoutGrid,
+  AlertTriangle,
   Radio,
   Sparkles,
   Shield,
@@ -93,6 +94,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [connectionState, setConnectionState] = useState<
     "connecting" | "connected" | "disconnected" | "failed"
   >("connecting");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Media States
   const [isMicEnabled, setIsMicEnabled] = useState(!initialOptions.micMuted);
@@ -265,10 +267,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const engine = new MathsyMediasoupEngine();
     engineRef.current = engine;
 
-    engine.onConnectionStateChange = (state) => {
+    engine.onConnectionStateChange = (state, errMsg) => {
       setConnectionState(state);
       if (state === "connected") {
+        setConnectionError(null);
         toast.success(`Joined room: ${meetingCode}`);
+      } else if (state === "failed") {
+        const msg = errMsg || "Could not connect to the classroom server.";
+        setConnectionError(msg);
+        toast.error("Connection Failed", { description: msg });
       }
     };
 
@@ -584,14 +591,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const handleStartYouTubeLive = async () => {
     try {
       setIsLiveConnecting(true);
-      const session = await startYouTubeLiveStreaming({
+      const authSessionToken = session?.access_token || engineRef.current?.getAuthToken() || "";
+      const liveStreamSession = await startYouTubeLiveStreaming({
         meetingCode,
         title: `${myName}'s Mathsy Live Class - ${meetingCode}`,
+        token: authSessionToken,
         localAudioTrack,
         remoteAudioTracks: remoteParticipants
           .map((p) => p.audioTrack)
           .filter(Boolean) as MediaStreamTrack[],
-        emitSignal: (event, payload) => engineRef.current?.emitSignal(event, payload),
+        emitSignal: (event, payload, ack) => engineRef.current?.emitSignal(event, payload, ack),
         onSignal: (event, cb) => engineRef.current?.onSignal(event, cb),
         onStatusChange: (status) => {
           if (status === "connecting") {
@@ -619,8 +628,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         },
       });
 
-      if (session) {
-        setYoutubeLiveUrl(session.youtubeUrl);
+      if (liveStreamSession) {
+        setYoutubeLiveUrl(liveStreamSession.youtubeUrl);
       }
     } catch (err: any) {
       console.error("[YouTubeLive] Failed to start:", err);

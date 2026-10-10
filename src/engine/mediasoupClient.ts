@@ -64,6 +64,9 @@ export class MathsyMediasoupEngine {
 
   public serverRole: "tutor" | "student" = "student";
   public isServerOwner: boolean = false;
+  public getAuthToken(): string {
+    return this.activeToken;
+  }
 
   // Listeners
   public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean) => void;
@@ -72,7 +75,8 @@ export class MathsyMediasoupEngine {
   public onPollsChange?: (polls: Poll[]) => void;
   public onReaction?: (reaction: ReactionEvent) => void;
   public onWhiteboardData?: (data: any) => void;
-  public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed") => void;
+  public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed", errorMessage?: string) => void;
+  public activeToken: string = "";
 
   private signalingUrl: string;
 
@@ -117,12 +121,21 @@ export class MathsyMediasoupEngine {
         if (guestRes.ok) {
           const guestData = await guestRes.json();
           effectiveToken = guestData.token;
+          this.activeToken = effectiveToken;
         } else {
-          console.error("[MathsyMeet Engine] Failed to obtain guest token:", guestRes.status);
+          const errMsg = `Failed to obtain guest token: server returned HTTP ${guestRes.status}`;
+          console.error("[MathsyMeet Engine]", errMsg);
+          this.onConnectionStateChange?.("failed", errMsg);
+          throw new Error(errMsg);
         }
       } catch (err: any) {
-        console.error("[MathsyMeet Engine] Network error requesting guest token:", err.message);
+        const errMsg = `Network error requesting guest token: ${err.message}`;
+        console.error("[MathsyMeet Engine]", errMsg);
+        this.onConnectionStateChange?.("failed", errMsg);
+        throw new Error(errMsg);
       }
+    } else {
+      this.activeToken = effectiveToken;
     }
 
     // Establish WebSocket to Mediasoup signaling server
@@ -149,7 +162,14 @@ export class MathsyMediasoupEngine {
 
     this.socket.on("connect_error", (err) => {
       console.error("[MathsyMeet Engine] Socket connection error:", err.message);
-      this.onConnectionStateChange?.("failed");
+      this.onConnectionStateChange?.("failed", err.message || "Failed to establish connection to classroom server");
+    });
+
+    this.socket.on("error", (err: any) => {
+      console.error("[MathsyMeet Engine] Server error notification:", err);
+      if (err?.code === "ROOM_FULL") {
+        this.onConnectionStateChange?.("failed", err.message || "Room is full (max participants reached)");
+      }
     });
 
     this.socket.on("disconnect", () => {
@@ -484,9 +504,13 @@ export class MathsyMediasoupEngine {
     this.onPollsChange?.(this.activePolls);
   }
 
-  public emitSignal(event: string, payload: any): void {
+  public emitSignal(event: string, payload: any, ack?: (res: any) => void): void {
     if (this.socket) {
-      this.socket.emit(event, payload);
+      if (ack) {
+        this.socket.emit(event, payload, ack);
+      } else {
+        this.socket.emit(event, payload);
+      }
     }
   }
 
