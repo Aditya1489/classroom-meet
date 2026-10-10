@@ -153,6 +153,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     }
   };
 
+  // Pen Device Mode (?pen=1 or passed in options)
+  const isPenDevice = window.location.search.includes("pen=1") || Boolean((initialOptions as any)?.isPenDevice);
+
+  // Expelled state
+  const [isExpelled, setIsExpelled] = useState(false);
+  const [expelledReason, setExpelledReason] = useState("");
+
+  // Camera-off approval state
+  const [pendingCameraOffRequest, setPendingCameraOffRequest] = useState<{ studentId: string; studentName: string; reason?: string } | null>(null);
+
+  // Whiteboard sync state
+  const [initialWhiteboardSnapshot, setInitialWhiteboardSnapshot] = useState<any>(null);
+  const [remoteWhiteboardSnapshot, setRemoteWhiteboardSnapshot] = useState<any>(null);
+  const [letStudentsDraw, setLetStudentsDraw] = useState(false);
+
   // Tablet Companion Pairing Code
   const [tabletCode] = useState(() => generateTabletCode());
   const [showTabletModal, setShowTabletModal] = useState(false);
@@ -307,7 +322,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           setDemoRemainingSec(roomData.remainingSec);
         }
       }
-      if (serverRole === "tutor") {
+      if (roomData?.whiteboardSnapshot) {
+        setInitialWhiteboardSnapshot(roomData.whiteboardSnapshot);
+      }
+      if (typeof roomData?.letStudentsDraw === "boolean") {
+        setLetStudentsDraw(roomData.letStudentsDraw);
+      }
+      if (roomData?.pinnedMessage) {
+        setPinnedMessage(roomData.pinnedMessage);
+      }
+      if (typeof roomData?.isChatLocked === "boolean") {
+        setIsChatLocked(roomData.isChatLocked);
+      }
+      if (roomData?.activePoll) {
+        setActivePoll(roomData.activePoll);
+      }
+      if (serverRole === "tutor" || isPenDevice) {
         setUnmuteRequestStatus("approved");
         setShowCameraGateModal(false);
       }
@@ -528,7 +558,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     engineRef.current?.sendChatMessage(myName, text, isHost);
   };
 
-  // Launch Poll
+  // Launch Poll (Broadcasts to everyone via socket)
   const handleLaunchPoll = (pollData: {
     question: string;
     options: string[];
@@ -553,68 +583,114 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     setHasVotedPoll(false);
     setIsSideDrawerOpen(true);
     setActiveSideTab("polls");
+    engineRef.current?.emitSignal("poll:update", newPoll);
     toast.success("Poll launched to all students!");
   };
 
-  // Vote Poll
+  // Vote Poll (Broadcasts vote & updates leaderboard)
   const handleVotePoll = (optionIndex: number) => {
     if (!activePoll || hasVotedPoll) return;
 
-    setActivePoll((prev) => {
-      if (!prev) return null;
-      const currentVotes = { ...prev.votes };
-      currentVotes[optionIndex] = (currentVotes[optionIndex] || 0) + 1;
-      const isCorrect = prev.correctOptionIndex === optionIndex;
+    const currentVotes = { ...activePoll.votes };
+    currentVotes[optionIndex] = (currentVotes[optionIndex] || 0) + 1;
+    const isCorrect = activePoll.correctOptionIndex === optionIndex;
 
-      return {
-        ...prev,
-        votes: currentVotes,
-        totalVotes: prev.totalVotes + 1,
-        voters: [
-          ...prev.voters,
-          {
-            userId: myUserId,
-            userName: myName,
-            optionIndex,
-            timestamp: Date.now(),
-            isCorrect,
-          },
-        ],
-      };
-    });
+    const updatedPoll: PollItem = {
+      ...activePoll,
+      votes: currentVotes,
+      totalVotes: activePoll.totalVotes + 1,
+      voters: [
+        ...activePoll.voters,
+        {
+          userId: myUserId,
+          userName: myName,
+          optionIndex,
+          timestamp: Date.now(),
+          isCorrect,
+        },
+      ],
+    };
 
+    setActivePoll(updatedPoll);
     setHasVotedPoll(true);
+    engineRef.current?.emitSignal("poll:vote", updatedPoll);
+    toast.success("Vote recorded!");
   };
 
-  // End Poll
+  // End Poll (Reveals answers and final scores to all participants)
   const handleEndPoll = () => {
     if (!activePoll) return;
-    setActivePoll((prev) => (prev ? { ...prev, isActive: false } : null));
-    toast.info("Poll ended. Leaderboard revealed!");
+    const endedPoll = { ...activePoll, isActive: false };
+    setActivePoll(endedPoll);
+    engineRef.current?.emitSignal("poll:update", endedPoll);
+    toast.info("Poll ended. Leaderboard revealed to everyone!");
   };
 
-  // Mute All Students (Host)
+  // Mute All Students (Tutor Only)
   const handleMuteAll = () => {
+    engineRef.current?.forceMuteAll();
     toast.success("Muted all students");
   };
 
-  // Lower All Hands (Host)
+  // Lower All Hands (Tutor Only)
   const handleLowerAllHands = () => {
+    engineRef.current?.lowerAllHands();
     setIsHandRaised(false);
     toast.success("Lowered all raised hands");
   };
 
-  // Force Mute Single Student (Host)
+  // Lower One Student Hand (Tutor Only)
+  const handleLowerStudentHand = (studentId: string) => {
+    engineRef.current?.lowerStudentHand(studentId);
+    if (studentId === myUserId) setIsHandRaised(false);
+  };
+
+  // Force Mute Single Student (Tutor Only)
   const handleForceMuteStudent = (studentId: string, studentName: string) => {
+    engineRef.current?.forceMuteStudent(studentId);
     toast.success(`Muted ${studentName}`);
   };
 
-  // Expel Student (Host)
+  // Expel Student & Block Rejoin (Tutor Only)
   const handleExpelStudent = (studentId: string, studentName: string) => {
-    if (window.confirm(`Are you sure you want to remove ${studentName} from the class?`)) {
+    if (window.confirm(`Are you sure you want to remove ${studentName} from the class and block rejoin?`)) {
+      engineRef.current?.expelStudent(studentId);
       setRemoteParticipants((prev) => prev.filter((p) => p.id !== studentId));
-      toast.success(`${studentName} removed from session`);
+      toast.success(`${studentName} removed from session and banned`);
     }
+  };
+
+  // Chat Lock & Pin (Tutor Only)
+  const handleToggleChatLock = () => {
+    const nextLocked = !isChatLocked;
+    setIsChatLocked(nextLocked);
+    engineRef.current?.setChatLock(nextLocked);
+    toast.info(nextLocked ? "Chat locked for students" : "Chat unlocked");
+  };
+
+  const handlePinMessage = (text: string) => {
+    const pin = { text, senderName: myName };
+    setPinnedMessage(pin);
+    engineRef.current?.setChatPin(pin);
+    toast.success("Message pinned at top of chat");
+  };
+
+  const handleUnpinMessage = () => {
+    setPinnedMessage(null);
+    engineRef.current?.setChatPin(null);
+  };
+
+  // Camera-off entry requests
+  const handleRequestCameraOff = () => {
+    setJoinPendingApproval(true);
+    engineRef.current?.requestCameraOff("Student requested camera-off entry");
+    toast.info("Camera-off request sent to tutor. Waiting for approval...");
+  };
+
+  const handleRespondCameraOff = (studentId: string, approved: boolean) => {
+    engineRef.current?.respondCameraOff(studentId, approved);
+    setPendingCameraOffRequest(null);
+    toast.success(approved ? "Approved camera-off request" : "Declined camera-off request");
   };
 
   // YouTube Live Handlers (B3, B4, B7)
@@ -960,7 +1036,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   setShowWhiteboard(false);
                   setLayoutMode("grid");
                 }}
-                isHost={isHost}
+                isHost={isHost || isPenDevice}
+                initialSnapshot={initialWhiteboardSnapshot}
+                remoteSnapshot={remoteWhiteboardSnapshot}
+                letStudentsDraw={letStudentsDraw}
+                onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
+                onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
               />
               {/* Floating PIP Host Camera */}
               {isCamEnabled && localVideoTrack && (
@@ -999,7 +1080,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       isHandRaised={featured.isHandRaised}
                       isPinned={true}
                       onTogglePin={() => setPinnedId(null)}
-                      onLowerHand={() => isHost && handleLowerAllHands()}
+                      onLowerHand={() => isHost && handleLowerStudentHand(featured.id)}
                       onForceMute={() => handleForceMuteStudent(featured.id, featured.name)}
                       onExpel={() => handleExpelStudent(featured.id, featured.name)}
                       className="w-full h-full"
@@ -1029,7 +1110,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         isHandRaised={p.isHandRaised}
                         isPinned={false}
                         onTogglePin={() => setPinnedId(p.id)}
-                        onLowerHand={() => isHost && handleLowerAllHands()}
+                        onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
                         onForceMute={() => handleForceMuteStudent(p.id, p.name)}
                         onExpel={() => handleExpelStudent(p.id, p.name)}
                         className="w-48 md:w-full aspect-video shrink-0"
@@ -1069,7 +1150,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   isHandRaised={p.isHandRaised}
                   isPinned={p.id === pinnedId}
                   onTogglePin={() => setPinnedId(pinnedId === p.id ? null : p.id)}
-                  onLowerHand={() => isHost && handleLowerAllHands()}
+                  onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
                   onForceMute={() => handleForceMuteStudent(p.id, p.name)}
                   onExpel={() => handleExpelStudent(p.id, p.name)}
                   className="w-full h-full"
@@ -1098,16 +1179,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           chatMessages={chatMessages}
           onSendMessage={handleSendMessage}
           isChatLocked={isChatLocked}
-          onToggleChatLock={() => {
-            setIsChatLocked(!isChatLocked);
-            toast.info(!isChatLocked ? "Chat locked for students" : "Chat unlocked");
-          }}
+          onToggleChatLock={handleToggleChatLock}
           pinnedMessage={pinnedMessage}
-          onPinMessage={(text) => {
-            setPinnedMessage({ text, senderName: myName });
-            toast.success("Message pinned at the top");
-          }}
-          onUnpinMessage={() => setPinnedMessage(null)}
+          onPinMessage={handlePinMessage}
+          onUnpinMessage={handleUnpinMessage}
           activePoll={activePoll}
           onLaunchPoll={handleLaunchPoll}
           onVotePoll={handleVotePoll}
@@ -1115,9 +1190,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onDismissLeaderboard={() => setActivePoll(null)}
           hasVoted={hasVotedPoll}
           participants={allParticipants}
-          onLowerHand={(uid) => {
-            if (uid === myUserId) setIsHandRaised(false);
-          }}
+          onLowerHand={(uid) => isHost && handleLowerStudentHand(uid)}
           onLowerAllHands={handleLowerAllHands}
           onForceMuteStudent={handleForceMuteStudent}
           onMuteAllStudents={handleMuteAll}
@@ -1329,6 +1402,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         open={showTabletModal}
         onOpenChange={setShowTabletModal}
         tabletCode={tabletCode}
+        classId={meetingCode}
       />
 
       {/* Pre-Join Mandatory Camera Gate Modal */}
@@ -1340,16 +1414,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           handleCameraToggle();
           setShowCameraGateModal(false);
         }}
-        onRequestCameraOff={() => {
-          setJoinPendingApproval(true);
-          toast.info("Sent camera-off request to host.");
-          setTimeout(() => {
-            setJoinPendingApproval(false);
-            setCameraOffAllowed(true);
-            setShowCameraGateModal(false);
-            toast.success("Host approved camera-off exemption!");
-          }, 3000);
-        }}
+        onRequestCameraOff={handleRequestCameraOff}
         onCancel={onLeaveMeeting}
       />
 
@@ -1370,6 +1435,54 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onLeaveMeeting();
         }}
       />
+
+      {/* Tutor Camera-Off Request Prompt */}
+      {pendingCameraOffRequest && isHost && (
+        <div className="fixed bottom-24 right-6 z-50 bg-[#1a1814] border border-[#f59e0b]/40 rounded-2xl p-4 shadow-2xl max-w-sm animate-in slide-in-from-bottom">
+          <div className="flex items-center gap-2 mb-2 text-[#f59e0b] font-semibold text-sm">
+            <VideoOff className="w-4 h-4" /> Camera-Off Request
+          </div>
+          <p className="text-xs text-zinc-300 mb-3">
+            <strong className="text-white">{pendingCameraOffRequest.studentName || "A student"}</strong> is requesting to join class with camera turned OFF.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              onClick={() => handleRespondCameraOff(pendingCameraOffRequest.studentId, true)}
+              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-xl"
+            >
+              Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleRespondCameraOff(pendingCameraOffRequest.studentId, false)}
+              className="flex-1 border-white/20 bg-white/5 hover:bg-white/10 text-white text-xs rounded-xl"
+            >
+              Decline
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Expelled Overlay (Blocks Rejoin) */}
+      {isExpelled && (
+        <div className="fixed inset-0 z-[100000] bg-black/95 flex flex-col items-center justify-center p-6 text-center">
+          <div className="w-16 h-16 rounded-3xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-500 mb-4">
+            <LogOut className="w-8 h-8" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Removed from Classroom</h2>
+          <p className="text-sm text-gray-400 max-w-md mb-6">
+            {expelledReason || "You were removed from this room by the tutor and cannot rejoin this session."}
+          </p>
+          <Button
+            onClick={onLeaveMeeting}
+            className="bg-white/10 hover:bg-white/20 text-white rounded-xl px-6 py-2.5 text-xs font-semibold"
+          >
+            Exit to Home
+          </Button>
+        </div>
+      )}
 
       {/* Post-Class Workflow Modal (Host) */}
       <PostClassModal

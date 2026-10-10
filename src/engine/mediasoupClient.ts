@@ -80,6 +80,21 @@ export class MathsyMediasoupEngine {
   public onWhiteboardData?: (data: any) => void;
   public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed", errorMessage?: string) => void;
   public activeToken: string = "";
+  public isChatLocked: boolean = false;
+  public pinnedMessage: any = null;
+  public letStudentsDraw: boolean = false;
+  public whiteboardSnapshot: any = null;
+
+  // Section 3 Listeners
+  public onForceMute?: (reason: string) => void;
+  public onExpelled?: (reason: string) => void;
+  public onHandLowered?: (studentId?: string) => void;
+  public onHandLowerAll?: () => void;
+  public onChatLockChange?: (locked: boolean) => void;
+  public onChatPinChange?: (pinnedMessage: any) => void;
+  public onDrawingPermissionChange?: (allowed: boolean) => void;
+  public onCameraOffRequest?: (data: { studentId: string; studentName: string; reason?: string }) => void;
+  public onCameraOffResponse?: (data: { studentId: string; approved: boolean; reason?: string }) => void;
 
   private signalingUrl: string;
 
@@ -189,12 +204,17 @@ export class MathsyMediasoupEngine {
       whiteboardSnapshot?: any;
       letStudentsDraw?: boolean;
       pinnedMessage?: any;
+      isChatLocked?: boolean;
     }) => {
       if (data?.role) {
         this.serverRole = data.role === "tutor" ? "tutor" : "student";
         this.isServerOwner = Boolean(data.isOwner);
         this.isDemo = Boolean(data.isDemo);
         this.demoRemainingSec = typeof data.remainingSec === "number" ? data.remainingSec : null;
+        if (data.whiteboardSnapshot) this.whiteboardSnapshot = data.whiteboardSnapshot;
+        if (typeof data.letStudentsDraw === "boolean") this.letStudentsDraw = data.letStudentsDraw;
+        if (data.pinnedMessage) this.pinnedMessage = data.pinnedMessage;
+        if (typeof data.isChatLocked === "boolean") this.isChatLocked = data.isChatLocked;
         console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}, isDemo: ${this.isDemo}`);
         this.onRoleAssigned?.(this.serverRole, this.isServerOwner, data);
       }
@@ -252,6 +272,66 @@ export class MathsyMediasoupEngine {
         p.isHandRaised = raised;
         this.notifyParticipants();
       }
+    });
+
+    this.socket.on("forceMute", (payload: any) => {
+      console.log("[MathsyMeet Engine] Received forceMute from tutor:", payload);
+      this.disableAudio();
+      this.onForceMute?.(payload?.reason || "You were muted by the tutor");
+    });
+
+    this.socket.on("expelled", (payload: any) => {
+      console.log("[MathsyMeet Engine] Received expelled from tutor:", payload);
+      this.disconnect();
+      this.onExpelled?.(payload?.reason || "Removed by tutor");
+    });
+
+    this.socket.on("hand:lowered", (payload: any) => {
+      console.log("[MathsyMeet Engine] Received hand:lowered:", payload);
+      const studentId = payload?.studentId;
+      if (studentId) {
+        const p = this.participants.get(studentId);
+        if (p) p.isHandRaised = false;
+        this.notifyParticipants();
+      }
+      this.onHandLowered?.(studentId);
+    });
+
+    this.socket.on("hand:lowerAll", () => {
+      console.log("[MathsyMeet Engine] Received hand:lowerAll");
+      for (const p of this.participants.values()) {
+        p.isHandRaised = false;
+      }
+      this.notifyParticipants();
+      this.onHandLowerAll?.();
+    });
+
+    this.socket.on("chatLock", (payload: any) => {
+      this.isChatLocked = Boolean(payload?.locked);
+      console.log("[MathsyMeet Engine] Received chatLock:", this.isChatLocked);
+      this.onChatLockChange?.(this.isChatLocked);
+    });
+
+    this.socket.on("chatPin", (payload: any) => {
+      this.pinnedMessage = payload?.message || null;
+      console.log("[MathsyMeet Engine] Received chatPin:", this.pinnedMessage);
+      this.onChatPinChange?.(this.pinnedMessage);
+    });
+
+    this.socket.on("whiteboard:drawingPermission", (payload: any) => {
+      this.letStudentsDraw = Boolean(payload?.allowed);
+      console.log("[MathsyMeet Engine] Received whiteboard:drawingPermission:", this.letStudentsDraw);
+      this.onDrawingPermissionChange?.(this.letStudentsDraw);
+    });
+
+    this.socket.on("cameraOffRequest", (payload: any) => {
+      console.log("[MathsyMeet Engine] Received cameraOffRequest:", payload);
+      this.onCameraOffRequest?.(payload);
+    });
+
+    this.socket.on("cameraOffResponse", (payload: any) => {
+      console.log("[MathsyMeet Engine] Received cameraOffResponse:", payload);
+      this.onCameraOffResponse?.(payload);
     });
   }
 
@@ -492,6 +572,49 @@ export class MathsyMediasoupEngine {
 
   public broadcastWhiteboard(data: any) {
     this.socket?.emit("whiteboard:sync", data);
+  }
+
+  public toggleWhiteboardDrawing(allowed: boolean) {
+    this.letStudentsDraw = allowed;
+    this.socket?.emit("whiteboard:toggleDrawing", { allowed });
+  }
+
+  public forceMuteStudent(studentId: string) {
+    this.socket?.emit("forceMute", { studentId });
+  }
+
+  public forceMuteAll() {
+    this.socket?.emit("forceMuteAll");
+  }
+
+  public expelStudent(studentId: string, reason?: string) {
+    this.socket?.emit("expelStudent", { studentId, reason });
+  }
+
+  public lowerStudentHand(studentId?: string) {
+    this.socket?.emit("hand:lower", { studentId });
+  }
+
+  public lowerAllHands() {
+    this.socket?.emit("hand:lowerAll");
+  }
+
+  public setChatLock(locked: boolean) {
+    this.isChatLocked = locked;
+    this.socket?.emit("chatLock", { locked });
+  }
+
+  public setChatPin(message: any) {
+    this.pinnedMessage = message;
+    this.socket?.emit("chatPin", { message });
+  }
+
+  public requestCameraOff(reason?: string) {
+    this.socket?.emit("cameraOffRequest", { reason });
+  }
+
+  public respondCameraOff(studentId: string, approved: boolean) {
+    this.socket?.emit("cameraOffResponse", { studentId, approved });
   }
 
   public createPoll(question: string, options: string[], creatorName: string) {

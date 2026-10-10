@@ -2,13 +2,14 @@ import React, { useState, useEffect } from "react";
 import { LandingView } from "./components/landing/LandingView";
 import { LobbyView } from "./components/lobby/LobbyView";
 import { MeetingRoom } from "./components/meet/MeetingRoom";
+import { PairTabletPage } from "./components/meet/PairTabletPage";
 import { sanitizeRoomId } from "./lib/utils";
 import { createDemoRoom } from "./services/roomService";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<"landing" | "lobby" | "room" | "left">("landing");
+  const [currentView, setCurrentView] = useState<"landing" | "lobby" | "room" | "left" | "pair">("landing");
   const [activeMeetingCode, setActiveMeetingCode] = useState<string>("");
   const [joinOptions, setJoinOptions] = useState<{
     micMuted: boolean;
@@ -29,6 +30,11 @@ export default function App() {
     const path = window.location.pathname;
     const urlParams = new URLSearchParams(window.location.search);
     const isDemoQuery = urlParams.get("demo") === "1";
+
+    if (path === "/pair" || path.startsWith("/pair")) {
+      setCurrentView("pair");
+      return;
+    }
 
     if (path === "/demo" || path.startsWith("/demo/") || isDemoQuery) {
       if (path.includes("/meet/")) {
@@ -62,6 +68,20 @@ export default function App() {
       }
     }
   }, []);
+
+  const handleTabletPaired = (data: { classId: string; token: string; isPenDevice: boolean }) => {
+    sessionStorage.setItem(`pair_token_${data.classId}`, data.token);
+    setActiveMeetingCode(data.classId);
+    setJoinOptions({
+      micMuted: true,
+      camOff: true,
+      displayName: "Tablet Companion",
+      presentImmediately: false,
+      role: "tutor",
+    });
+    window.history.pushState({}, "", `/meet/${data.classId}?pen=1`);
+    setCurrentView("room");
+  };
 
   const handleStartMeeting = (code: string) => {
     setActiveMeetingCode(code);
@@ -97,6 +117,13 @@ export default function App() {
   return (
     <div className="w-full min-h-screen bg-[#0e0d0b] text-[#f3eee6] selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
       <Toaster position="top-right" richColors />
+
+            {currentView === "pair" && (
+        <PairTabletPage
+          onPaired={handleTabletPaired}
+          onBackToHome={handleReturnToHome}
+        />
+      )}
 
       {currentView === "landing" && (
         <LandingView onStartMeeting={handleStartMeeting} />

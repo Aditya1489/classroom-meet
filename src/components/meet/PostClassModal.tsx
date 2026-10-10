@@ -1,3 +1,4 @@
+import { exportWhiteboardToPdf } from "../../utils/whiteboardPdf";
 import React from "react";
 import {
   Dialog,
@@ -26,8 +27,17 @@ export const PostClassModal: React.FC<PostClassModalProps> = ({
   durationFormatted,
   onComplete,
 }) => {
-  const handleExportNotes = () => {
-    toast.success("Whiteboard geometry notes and diagrams exported as PDF!");
+  const [isExporting, setIsExporting] = React.useState(false);
+  const handleExportNotes = async () => {
+    try {
+      setIsExporting(true);
+      await exportWhiteboardToPdf(null, `Mathsy_${meetingCode}_Notes.pdf`);
+      toast.success("Whiteboard notes downloaded as PDF!");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to export whiteboard PDF");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -62,8 +72,7 @@ export const PostClassModal: React.FC<PostClassModalProps> = ({
               onClick={handleExportNotes}
               className="text-xs font-semibold border-[#f3eee6]/15 bg-[#221f1a] hover:bg-[#28251f] text-[#f3eee6] gap-1.5 rounded-xl"
             >
-              <Download className="w-3.5 h-3.5" />
-              Export PDF
+              {isExporting ? "Exporting..." : (<><Download className="w-3.5 h-3.5" /> Export PDF</>)}
             </Button>
           </div>
         </div>
