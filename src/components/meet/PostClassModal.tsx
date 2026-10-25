@@ -27,7 +27,7 @@ export const PostClassModal: React.FC<PostClassModalProps> = ({
   onComplete,
 }) => {
   const handleExportNotes = () => {
-    toast.success("Whiteboard geometry notes and diagrams exported as PDF!");
+    toast.info("PDF export isn't available yet.", { id: "export-notes" });
   };
 
   return (

@@ -90,13 +90,14 @@ pollsRouter.post("/:roomCode/polls", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Question and non-empty options array are required" });
     }
 
-    // Ensure room exists
-    await query(
-      `INSERT INTO live_classes (room_code, title)
-       VALUES ($1, $2)
-       ON CONFLICT (room_code) DO NOTHING;`,
-      [roomCode, `Class ${roomCode}`]
+    // Ensure room exists and is active
+    const roomRes = await query(
+      "SELECT id, is_active FROM live_classes WHERE room_code = $1",
+      [roomCode]
     );
+    if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
+      return res.status(404).json({ error: "Room not found or class has ended" });
+    }
 
     const validCreatorId = created_by && created_by.includes("-") && created_by.length === 36 ? created_by : null;
 

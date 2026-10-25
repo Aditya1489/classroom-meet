@@ -54,6 +54,17 @@ export async function initDb(): Promise<boolean> {
       } else {
         console.warn("[PostgreSQL] schema.sql not found at", schemaPath);
       }
+
+      // Run database migrations in migrations/ directory
+      const migrationsDir = path.join(__dirname, "migrations");
+      if (fs.existsSync(migrationsDir)) {
+        const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith(".sql")).sort();
+        for (const file of files) {
+          const migrationSql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+          await client.query(migrationSql);
+          console.log(`[PostgreSQL] Applied migration: ${file}`);
+        }
+      }
       return true;
     } finally {
       client.release();

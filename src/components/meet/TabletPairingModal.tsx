@@ -29,7 +29,6 @@ export const TabletPairingModal: React.FC<TabletPairingModalProps> = ({
   const handleCopy = () => {
     navigator.clipboard.writeText(formattedCode);
     setCopied(true);
-    toast.success("Tablet code copied to clipboard!");
     setTimeout(() => setCopied(false), 2000);
   };
 

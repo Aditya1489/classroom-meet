@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_yNcCRVtUq22A1dx8o6zAqSA8AoYx",
+      "name": "classroom-meet",
+      "directory": ".",
+      "orgId": "team_OIeXFLYFGeeVUmaA3pOPHNGl"
+    }
+  ]
+}

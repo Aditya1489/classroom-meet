@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 import { RemoteParticipant } from "../../engine/mediasoupClient";
-import { Users, X, Mic, MicOff, Hand, Copy, Shield, VolumeX } from "lucide-react";
+import { Users, X, Mic, MicOff, Hand, Copy, Shield, VolumeX, Check } from "lucide-react";
 import { toast } from "sonner";
 
 interface ParticipantsDrawerProps {
@@ -9,6 +9,7 @@ interface ParticipantsDrawerProps {
   onClose: () => void;
   meetingCode: string;
   isHost: boolean;
+  onMuteAll?: () => void;
 }
 
 export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
@@ -17,13 +18,16 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
   onClose,
   meetingCode,
   isHost,
+  onMuteAll,
 }) => {
+  const [copiedLink, setCopiedLink] = useState(false);
   const totalCount = participants.length + 1;
 
   const copyInviteLink = () => {
     const url = `${window.location.origin}/meet/${meetingCode}`;
     navigator.clipboard.writeText(url);
-    toast.success("Meeting link copied to clipboard!");
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   return (
@@ -50,8 +54,8 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
           onClick={copyInviteLink}
           className="w-full flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium py-2 rounded-xl transition"
         >
-          <Copy className="w-4 h-4 text-[#8ab4f8]" />
-          <span>Copy Meeting Link</span>
+          {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-[#8ab4f8]" />}
+          <span className={copiedLink ? "text-emerald-400" : ""}>{copiedLink ? "Link Copied!" : "Copy Meeting Link"}</span>
         </button>
       </div>
 
@@ -129,7 +133,7 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
       {isHost && participants.length > 0 && (
         <div className="p-3 border-t border-white/10 bg-[#1c1d20]">
           <button
-            onClick={() => toast.info("All participants muted by host")}
+            onClick={() => onMuteAll?.()}
             className="w-full flex items-center justify-center gap-2 text-xs font-medium py-2 rounded-xl text-red-400 hover:bg-red-500/10 transition border border-red-500/20"
           >
             <VolumeX className="w-3.5 h-3.5" />

@@ -102,7 +102,7 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
   const copyLiveLink = () => {
     const targetUrl = liveStreamUrl || connectedChannel?.liveUrl || `${window.location.origin}/meet/${meetingCode}`;
     navigator.clipboard.writeText(targetUrl);
-    toast.success("YouTube Live Link copied to clipboard!");
+    toast.success("YouTube Live Link copied to clipboard!", { id: "copy-yt-link" });
   };
 
   return (

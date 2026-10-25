@@ -16,6 +16,9 @@ interface VideoTileProps {
   isSpeaking?: boolean;
   isHandRaised?: boolean;
   isPinned?: boolean;
+  isMicRequested?: boolean;
+  onApproveMic?: () => void;
+  onDenyMic?: () => void;
   onTogglePin?: () => void;
   onLowerHand?: () => void;
   onForceMute?: () => void;
@@ -36,43 +39,15 @@ export const VideoTile: React.FC<VideoTileProps> = ({
   isSpeaking = false,
   isHandRaised = false,
   isPinned = false,
+  isMicRequested = false,
+  onApproveMic,
+  onDenyMic,
   onTogglePin,
   onLowerHand,
   onForceMute,
   onExpel,
   className = "",
 }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
-
-  // Attach Video Track
-  useEffect(() => {
-    const videoEl = videoRef.current;
-    if (!videoEl) return;
-
-    if (videoTrack) {
-      const stream = new MediaStream([videoTrack]);
-      videoEl.srcObject = stream;
-      videoEl.play().catch((e) => console.warn("[VideoTile] play() error:", e));
-    } else {
-      videoEl.srcObject = null;
-    }
-  }, [videoTrack]);
-
-  // Attach Remote Audio Track (Local audio should be muted to avoid feedback)
-  useEffect(() => {
-    const audioEl = audioRef.current;
-    if (!audioEl || isLocal) return;
-
-    if (audioTrack) {
-      const stream = new MediaStream([audioTrack]);
-      audioEl.srcObject = stream;
-      audioEl.play().catch((e) => console.warn("[VideoTile] audio play() error:", e));
-    } else {
-      audioEl.srcObject = null;
-    }
-  }, [audioTrack, isLocal]);
-
   const hasVideo = Boolean(videoTrack) && !isVideoMuted;
 
   return (
@@ -85,8 +60,6 @@ export const VideoTile: React.FC<VideoTileProps> = ({
           : "border-[#f3eee6]/10 hover:border-[#f59e0b]/30"
       } ${isPinned ? "ring-2 ring-[#f59e0b]" : ""} ${className}`}
     >
-      {/* Remote Audio Element */}
-      {!isLocal && <audio ref={audioRef} autoPlay playsInline />}
 
       {/* Video stream */}
       {hasVideo && videoTrack ? (
@@ -128,8 +101,39 @@ export const VideoTile: React.FC<VideoTileProps> = ({
         </div>
       </div>
 
-      {/* Top right badges: Raised Hand & Pin */}
+      {/* Top right badges: Speaking Request, Raised Hand & Pin */}
       <div className="absolute top-3 right-3 flex items-center gap-1.5 z-20">
+        {isMicRequested && isViewerHost && (
+          <div className="flex items-center gap-1.5 bg-amber-500 text-zinc-950 px-2 py-0.5 rounded-full text-[10px] font-bold shadow-lg animate-pulse border border-amber-300">
+            <Mic className="w-3 h-3" />
+            <span>Wants to speak</span>
+            {onApproveMic && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onApproveMic();
+                }}
+                className="bg-emerald-700 hover:bg-emerald-600 text-white text-[9px] px-1.5 py-0.5 rounded font-semibold transition cursor-pointer"
+                title="Allow Speaking"
+              >
+                Allow
+              </button>
+            )}
+            {onDenyMic && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDenyMic();
+                }}
+                className="bg-zinc-900 hover:bg-zinc-800 text-white text-[9px] px-1.5 py-0.5 rounded font-semibold transition cursor-pointer"
+                title="Decline"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+
         {isHandRaised && (
           <button
             onClick={(e) => {

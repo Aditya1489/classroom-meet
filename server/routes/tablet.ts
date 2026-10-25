@@ -15,13 +15,14 @@ tabletRouter.post("/generate", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "room_code and pairing_code are required" });
     }
 
-    // Ensure room exists
-    await query(
-      `INSERT INTO live_classes (room_code, title)
-       VALUES ($1, $2)
-       ON CONFLICT (room_code) DO NOTHING;`,
-      [room_code, `Class ${room_code}`]
+    // Ensure room exists and is active
+    const roomRes = await query(
+      "SELECT id, is_active FROM live_classes WHERE room_code = $1",
+      [room_code]
     );
+    if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
+      return res.status(404).json({ error: "Room not found or class has ended" });
+    }
 
     const validHostId = host_user_id && host_user_id.includes("-") && host_user_id.length === 36 ? host_user_id : null;
 

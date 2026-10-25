@@ -14,10 +14,12 @@ import { PreJoinCameraGateModal, InClassCameraOffWarningModal } from "./CameraGa
 import { FloatingReactionsOverlay, ReactionPickerBar, FloatingReaction } from "./FloatingReactions";
 import { PostClassModal } from "./PostClassModal";
 import { ClassFeedSidepanel, ChatMsg, PollItem } from "./ClassFeedSidepanel";
+import { InfoDrawer } from "./InfoDrawer";
 import { Whiteboard } from "../whiteboard/Whiteboard";
 import { RecordingModal } from "../recording/RecordingModal";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { useAuth } from "../../auth/authContext";
+import { dbClient } from "../../lib/dbClient";
 import { Button } from "../ui/button";
 import {
   Mic,
@@ -49,6 +51,9 @@ import {
   BookOpen,
   Youtube,
   ExternalLink,
+  Info,
+  Check,
+  X,
 } from "lucide-react";
 import { YouTubeConnectModal } from "../youtube/YouTubeConnectModal";
 import {
@@ -69,6 +74,23 @@ interface MeetingRoomProps {
   onLeaveMeeting: () => void;
 }
 
+const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ participant }) => {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (participant.audioTrack && !participant.isAudioMuted) {
+      const stream = new MediaStream([participant.audioTrack]);
+      el.srcObject = stream;
+      el.play().catch((e) => console.warn(`[MathsyMeet AudioSink] play() error for ${participant.id}:`, e));
+    } else {
+      el.srcObject = null;
+    }
+  }, [participant.audioTrack, participant.isAudioMuted]);
+
+  return <audio ref={audioRef} autoPlay playsInline />;
+};
+
 export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   meetingCode,
   initialOptions,
@@ -78,14 +100,37 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const engineRef = useRef<MathsyMediasoupEngine | null>(null);
   const playerRef = useRef<HTMLDivElement>(null);
 
-  // Strictly prioritize chosen role
-  const isHost =
-    initialOptions.role === "tutor" ||
-    (initialOptions.role === undefined && Boolean(profile?.isHost || profile?.role === "tutor")) ||
-    initialOptions.displayName.toLowerCase().includes("tutor") ||
-    initialOptions.displayName.toLowerCase().includes("host");
+  // Host status is authorized server-side based on room ownership (live_classes.tutor_id === user.id)
+  // Display names containing "tutor" or "host" confer ZERO privileges.
+  const [isHost, setIsHost] = useState<boolean>(() => {
+    const fromSession = typeof window !== "undefined" && window.sessionStorage.getItem(`mathsy_host_${meetingCode}`) === "true";
+    return initialOptions.role === "tutor" || profile?.role === "tutor" || fromSession;
+  });
 
-  const myUserId = profile?.id || "user_" + Math.random().toString(36).substring(2, 8);
+  const isHostRef = useRef<boolean>(isHost);
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
+
+  // Persistent user identity: strictly maintained across renders to prevent ID desync with Mediasoup SFU & Tutor approvals
+  const [myUserId] = useState<string>(() => {
+    if (profile?.id) return profile.id.replace(/_/g, "-");
+    const sessionKey = `mathsy_uid_${meetingCode}`;
+    if (typeof window !== "undefined") {
+      const saved = window.sessionStorage.getItem(sessionKey);
+      if (saved) return saved.replace(/_/g, "-");
+      const generated = "usr-" + Math.random().toString(36).substring(2, 9);
+      window.sessionStorage.setItem(sessionKey, generated);
+      return generated;
+    }
+    return "usr-" + Math.random().toString(36).substring(2, 9);
+  });
+
+  const myUserIdRef = useRef<string>(myUserId);
+  useEffect(() => {
+    myUserIdRef.current = myUserId;
+  }, [myUserId]);
+
   const myName = initialOptions.displayName || profile?.name || (isHost ? "Tutor" : "Student");
 
   // Connection State
@@ -93,8 +138,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     "connecting" | "connected" | "disconnected" | "failed"
   >("connecting");
 
-  // Media States
-  const [isMicEnabled, setIsMicEnabled] = useState(!initialOptions.micMuted);
+  // Media States (students join with microphone muted by default)
+  const [isMicEnabled, setIsMicEnabled] = useState(Boolean(isHost && !initialOptions.micMuted));
   const [isCamEnabled, setIsCamEnabled] = useState(!initialOptions.camOff);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isHandRaised, setIsHandRaised] = useState(false);
@@ -159,11 +204,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [cameraRequests, setCameraRequests] = useState<Array<{ studentId: string; name: string; type: string }>>([]);
 
   // Approval-gated Microphone State (for students)
+  const [hasSpeakingPermission, setHasSpeakingPermission] = useState<boolean>(isHost);
   const [unmuteRequestStatus, setUnmuteRequestStatus] = useState<"none" | "requesting" | "approved">(isHost ? "approved" : "none");
   const [unmuteRequests, setUnmuteRequests] = useState<Array<{ userId: string; name: string }>>([]);
 
   // Side Drawer State
   const [isSideDrawerOpen, setIsSideDrawerOpen] = useState(false);
+  const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "polls" | "participants">("chat");
   const [unreadChatCount, setUnreadChatCount] = useState(0);
 
@@ -237,10 +284,53 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const engine = new MathsyMediasoupEngine();
     engineRef.current = engine;
 
+    const loadChatHistory = async () => {
+      try {
+        const history = await dbClient.getChatHistory(meetingCode);
+        if (history && Array.isArray(history.messages)) {
+          const mapped: ChatMsg[] = history.messages.map((m: any) => ({
+            id: m._id || m.id,
+            clientMessageId: m.clientMessageId,
+            senderId: m.senderId,
+            senderName: m.senderName,
+            message: m.text,
+            timestamp: m.createdAt
+              ? new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+              : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isHost: Boolean(m.isHost || m.senderRole === "tutor" || m.senderRole === "host"),
+            status: "sent" as const,
+          }));
+
+          setChatMessages((prev) => {
+            const historyIds = new Set(mapped.map((m) => m.id));
+            const historyClientIds = new Set(mapped.map((m) => m.clientMessageId).filter(Boolean));
+            const pendingLive = prev.filter(
+              (p) => !historyIds.has(p.id) && (!p.clientMessageId || !historyClientIds.has(p.clientMessageId))
+            );
+            return [...mapped, ...pendingLive];
+          });
+        }
+        if (typeof history?.isChatLocked === "boolean") {
+          setIsChatLocked(history.isChatLocked);
+        }
+        if (history?.pinnedMessage !== undefined) {
+          setPinnedMessage(history.pinnedMessage);
+        }
+      } catch (err) {
+        console.warn("[MeetingRoom] Failed to load chat history:", err);
+      }
+    };
+
     engine.onConnectionStateChange = (state) => {
       setConnectionState(state);
       if (state === "connected") {
-        toast.success(`Joined room: ${meetingCode}`);
+        loadChatHistory();
+        dbClient.getWhiteboardState(meetingCode).then((wbState) => {
+          if (wbState?.isOpen && !isHostRef.current) {
+            setShowWhiteboard(true);
+            setLayoutMode("whiteboard");
+          }
+        });
       }
     };
 
@@ -248,20 +338,81 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setRemoteParticipants([...updated]);
     };
 
-    engine.onChatMessage = (msg: any) => {
-      const normalized: ChatMsg = {
-        id: msg.id || Math.random().toString(),
-        senderId: msg.senderId || msg.from?.identity || "unknown",
-        senderName: msg.senderName || msg.from?.name || "Student",
-        message: msg.text || msg.message || "",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        isHost: msg.isHost || false,
-      };
+    engine.onPeerLeft = (peerId) => {
+      console.log("[MeetingRoom] Peer left:", peerId);
+      setUnmuteRequests((prev) => prev.filter((r) => r.userId !== peerId && (r as any).peerId !== peerId));
+    };
 
-      setChatMessages((prev) => [...prev, normalized]);
-      if (!isSideDrawerOpen || activeSideTab !== "chat") {
+    engine.onChatMessage = (msg: any) => {
+      const msgId = msg.id || msg._id || msg.clientMessageId;
+      const clientMsgId = msg.clientMessageId;
+
+      setChatMessages((prev) => {
+        const exists = prev.some(
+          (m) =>
+            (msgId && m.id === msgId) ||
+            (clientMsgId && (m.id === clientMsgId || m.clientMessageId === clientMsgId))
+        );
+        if (exists) {
+          return prev.map((m) => {
+            if (
+              (msgId && m.id === msgId) ||
+              (clientMsgId && (m.id === clientMsgId || m.clientMessageId === clientMsgId))
+            ) {
+              return {
+                ...m,
+                id: msgId || m.id,
+                clientMessageId: clientMsgId || m.clientMessageId,
+                status: "sent" as const,
+                message: msg.text || msg.message || m.message,
+                isHost: Boolean(msg.isHost ?? m.isHost),
+              };
+            }
+            return m;
+          });
+        }
+
+        const normalized: ChatMsg = {
+          id: msgId || Math.random().toString(),
+          clientMessageId: clientMsgId,
+          senderId: msg.senderId || msg.from?.identity || "unknown",
+          senderName: msg.senderName || msg.from?.name || "Student",
+          message: msg.text || msg.message || "",
+          timestamp: msg.timestamp || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          isHost: Boolean(msg.isHost),
+          status: "sent" as const,
+        };
+
+        return [...prev, normalized];
+      });
+
+      // Never count current user's own messages as unread!
+      const isMyMessage = msg.senderId === myUserId;
+      if (!isMyMessage && (!isSideDrawerOpen || activeSideTab !== "chat")) {
         setUnreadChatCount((c) => c + 1);
       }
+    };
+
+    engine.onChatLockChange = (locked) => {
+      setIsChatLocked(locked);
+      toast.info(locked ? "Chat has been locked by tutor" : "Chat has been unlocked", { id: "chat-lock" });
+    };
+
+    engine.onPinnedMessageChange = (pin) => {
+      setPinnedMessage(pin);
+      if (pin) {
+        toast.success("New announcement pinned at the top", { id: "pinned-msg" });
+      }
+    };
+
+    engine.onClassEnded = () => {
+      setChatMessages([]);
+      setIsChatLocked(true);
+      setPinnedMessage(null);
+      setUnmuteRequests([]);
+      setHasSpeakingPermission(false);
+      setUnmuteRequestStatus("none");
+      toast.info("The class has ended. Chat history has been cleared.", { id: "class-ended" });
     };
 
     engine.onReaction = (r: ReactionEvent) => {
@@ -277,23 +428,170 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }, 2500);
     };
 
-    // Connect to room session
+    // Microphone speaking request handling (Student -> Tutor)
+    engine.onUnmuteRequest = (req) => {
+      console.log(`[MicFlow][${req.correlationId || "unknown"}] MeetingRoom onUnmuteRequest:`, {
+        req,
+        isHostRef: isHostRef.current,
+        myUserId,
+      });
+      if (!isHostRef.current) {
+        console.warn(`[MicFlow][${req.correlationId || "unknown"}] Dropped onUnmuteRequest: current user is not tutor/host`);
+        return;
+      }
+      setUnmuteRequests((prev) => {
+        if (prev.some((r) => r.userId === req.userId)) {
+          console.log(`[MicFlow][${req.correlationId || "unknown"}] Request already queued for student:`, req.userId);
+          return prev;
+        }
+        console.log(`[MicFlow][${req.correlationId || "unknown"}] Added to unmuteRequests queue. New size:`, prev.length + 1);
+        return [...prev, req];
+      });
+    };
+
+    // Real-time meeting control signals (mic approval, force mute, cancel request)
+    engine.onControlMessage = (ctrl) => {
+      const targetId = (ctrl.targetUserId || ctrl.userId || (ctrl as any).peerId || "").toLowerCase().replace(/_/g, "-");
+      const currentId = (myUserIdRef.current || myUserId || "").toLowerCase().replace(/_/g, "-");
+      const engineId = (engineRef.current?.getCurrentUserId() || "").toLowerCase().replace(/_/g, "-");
+      const isTargetMe = Boolean(targetId && (targetId === currentId || targetId === engineId));
+
+      if (ctrl.controlAction === "MIC_RESPONSE") {
+        if (isTargetMe) {
+          if (ctrl.approved) {
+            setHasSpeakingPermission(true);
+            setUnmuteRequestStatus("approved");
+
+            // Attempt activation; gracefully catch browser gesture or hardware errors
+            engine
+              .enableAudio()
+              .then((track) => {
+                if (track) {
+                  setLocalAudioTrack(track);
+                  setIsMicEnabled(true);
+                }
+              })
+              .catch((err: any) => {
+                console.warn("[MeetingRoom] Async audio activation prevented by browser:", err.message);
+                setIsMicEnabled(false);
+                if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                  toast.error("Microphone permission blocked by browser. Allow mic access in site settings, then click Unmute.");
+                } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+                  toast.error("No microphone detected. Please plug in a microphone, then click Unmute.");
+                }
+              });
+          } else {
+            setHasSpeakingPermission(false);
+            setUnmuteRequestStatus("none");
+            engine.disableAudio();
+            setLocalAudioTrack(null);
+            setIsMicEnabled(false);
+          }
+        }
+      } else if (ctrl.controlAction === "FORCE_MUTE") {
+        // Enforce room isolation (normalized)
+        const ctrlRoom = (ctrl.roomCode || "").toLowerCase().trim();
+        const curRoom = meetingCode.toLowerCase().trim();
+        if (ctrlRoom && curRoom && ctrlRoom !== curRoom) return;
+
+        if (ctrl.all && !isHostRef.current) {
+          engine.disableAudio();
+          setLocalAudioTrack(null);
+          setIsMicEnabled(false);
+          setHasSpeakingPermission(false);
+          setUnmuteRequestStatus("none");
+        } else if (isTargetMe) {
+          engine.disableAudio();
+          setLocalAudioTrack(null);
+          setIsMicEnabled(false);
+          setHasSpeakingPermission(false);
+          setUnmuteRequestStatus("none");
+        }
+      } else if (ctrl.controlAction === "CANCEL_REQUEST") {
+        if (isHostRef.current) {
+          console.log(`[MicFlow][${ctrl.correlationId || "cancel"}] Tutor received CANCEL_REQUEST for user:`, ctrl.userId || ctrl.senderId);
+          setUnmuteRequests((prev) => prev.filter((r) => r.userId !== ctrl.userId && r.userId !== ctrl.senderId));
+        }
+      } else if (ctrl.controlAction === "WHITEBOARD_STATE") {
+        const ctrlRoom = (ctrl.roomCode || "").toLowerCase().trim();
+        const curRoom = meetingCode.toLowerCase().trim();
+        if (ctrlRoom && curRoom && ctrlRoom !== curRoom) return;
+        // Tutor/Host view state is authoritative for all students
+        if (!isHostRef.current) {
+          const shouldOpen = Boolean(ctrl.isOpen);
+          setShowWhiteboard(shouldOpen);
+          setLayoutMode(shouldOpen ? "whiteboard" : "grid");
+        }
+      }
+    };
+
+    // Record self in room attendance in PostgreSQL with server-verified role
+    dbClient
+      .recordParticipantJoin({
+        room_code: meetingCode,
+        user_id: myUserId,
+        display_name: myName,
+        role: isHostRef.current ? "tutor" : "student",
+      })
+      .then((joinRes) => {
+        if (joinRes) {
+          if (joinRes.tutorId) {
+            engine.setAuthorizedTutorId(String(joinRes.tutorId));
+          }
+          if (joinRes.participant?.role === "tutor" || joinRes.isHost) {
+            setIsHost(true);
+            isHostRef.current = true;
+            setHasSpeakingPermission(true);
+            setUnmuteRequestStatus("approved");
+            engine.setIsHostUser(true);
+          }
+        }
+      });
+
+    // Late-joining participant: query active whiteboard state
+    dbClient.getWhiteboardState(meetingCode).then((wbState) => {
+      if (wbState?.isOpen) {
+        setShowWhiteboard(true);
+        setLayoutMode("whiteboard");
+      }
+    });
+
+    // Handle tab close / refresh: send beacon leave to keep attendance clean
+    const handleBeforeUnload = () => {
+      try {
+        const payload = JSON.stringify({ user_id: myUserId, display_name: myName });
+        const blob = new Blob([payload], { type: "application/json" });
+        navigator.sendBeacon(`/api/rooms/${encodeURIComponent(meetingCode)}/leave`, blob);
+      } catch (e) {
+        // ignore
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    const authToken = session?.access_token || localStorage.getItem("mathsy_meet_token") || "";
+
+    // Connect to room session with verified server-issued session token
     engine
       .connect({
         roomId: meetingCode,
         userId: myUserId,
         userName: myName,
         role: isHost ? "host" : "student",
-        token: session?.access_token || "",
+        token: authToken,
       })
       .then(async () => {
         if (!initialOptions.camOff) {
           const vTrack = await engine.enableVideo();
           setLocalVideoTrack(vTrack);
         }
-        if (!initialOptions.micMuted) {
-          const aTrack = await engine.enableAudio();
-          setLocalAudioTrack(aTrack);
+        // Students join muted by default and cannot publish audio before tutor permission
+        if (isHost && !initialOptions.micMuted) {
+          try {
+            const aTrack = await engine.enableAudio();
+            setLocalAudioTrack(aTrack);
+          } catch (err: any) {
+            console.warn("[MeetingRoom] Tutor audio autostart note:", err.message);
+          }
         }
         if (initialOptions.presentImmediately) {
           const sTrack = await engine.startScreenShare();
@@ -306,10 +604,26 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       });
 
     return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
       stopYouTubeLiveStreaming();
       engine.disconnect();
     };
   }, [meetingCode]);
+
+  const handleMicError = (err: any) => {
+    console.error("[MeetingRoom] Microphone access error:", err);
+    setIsMicEnabled(false);
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      toast.error("Microphone permission denied by browser. Please enable microphone permissions in your browser address bar.");
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      toast.error("No microphone device found. Please connect a microphone.");
+    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+      toast.error("Microphone is currently in use by another application.");
+    } else {
+      toast.error(err.message || "Failed to access microphone.");
+    }
+  };
 
   // Audio / Mic Handler
   const handleToggleMic = async () => {
@@ -321,32 +635,34 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         engine.disableAudio();
         setLocalAudioTrack(null);
         setIsMicEnabled(false);
-        toast.info("Microphone muted");
       } else {
-        const track = await engine.enableAudio();
-        setLocalAudioTrack(track);
-        setIsMicEnabled(true);
-        toast.success("Microphone unmuted");
+        try {
+          const track = await engine.enableAudio();
+          setLocalAudioTrack(track);
+          setIsMicEnabled(true);
+        } catch (err: any) {
+          handleMicError(err);
+        }
       }
     } else {
-      // Student logic: check if unmuting is allowed or requires request
-      if (isMicEnabled) {
+      // Student logic: speaking requires approval every time
+      if (hasSpeakingPermission && isMicEnabled) {
+        // Student mutes microphone -> revokes speaking permission so starting mic requires approval every time
         engine.disableAudio();
         setLocalAudioTrack(null);
         setIsMicEnabled(false);
+        setHasSpeakingPermission(false);
         setUnmuteRequestStatus("none");
-        toast.info("Microphone muted");
-      } else if (unmuteRequestStatus === "approved") {
-        const track = await engine.enableAudio();
-        setLocalAudioTrack(track);
-        setIsMicEnabled(true);
-        toast.success("Microphone activated");
       } else {
-        setUnmuteRequestStatus("requesting");
-        toast.info("Speaking request sent to host.");
-        // If simulated or socket present
-        if (engine.socket) {
-          engine.socket.emit("unmuteRequest", { type: "REQUEST_UNMUTE", userId: myUserId, name: myName });
+        // Student is muted or does not have speaking permission
+        if (unmuteRequestStatus === "requesting") {
+          // Cancel pending speaking request (no popup)
+          engine.cancelMicRequest(myUserIdRef.current);
+          setUnmuteRequestStatus("none");
+        } else {
+          // Request permission from tutor every time (no popup)
+          setUnmuteRequestStatus("requesting");
+          engine.requestMic(myUserIdRef.current, myName);
         }
       }
     }
@@ -362,12 +678,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         engine.disableVideo();
         setLocalVideoTrack(null);
         setIsCamEnabled(false);
-        toast.info("Camera disabled");
       } else {
         const track = await engine.enableVideo();
         setLocalVideoTrack(track);
         setIsCamEnabled(true);
-        toast.success("Camera enabled");
       }
     } else {
       if (!isCamEnabled) {
@@ -375,7 +689,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         setLocalVideoTrack(track);
         setIsCamEnabled(true);
         setShowCameraGateModal(false);
-        toast.success("Camera enabled");
       } else {
         // Turning camera OFF triggers policy warning
         setShowCameraOffWarningModal(true);
@@ -393,14 +706,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setLocalScreenTrack(null);
       setIsScreenSharing(false);
       if (layoutMode === "screenshare") setLayoutMode("grid");
-      toast.info("Screen share ended");
     } else {
       const track = await engine.startScreenShare();
       if (track) {
         setLocalScreenTrack(track);
         setIsScreenSharing(true);
         setLayoutMode("screenshare");
-        toast.success("Screen sharing started");
       }
     }
   };
@@ -414,6 +725,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     } else if (layoutMode === "whiteboard") {
       setLayoutMode("grid");
     }
+
+    if (isHost) {
+      engineRef.current?.broadcastWhiteboardState(meetingCode, next, true);
+      dbClient.setWhiteboardState(meetingCode, next);
+    }
   };
 
   // Student Raise Hand
@@ -421,7 +737,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const next = !isHandRaised;
     setIsHandRaised(next);
     engineRef.current?.toggleHandRaise(myName, next);
-    toast.info(next ? "Hand raised! Host notified." : "Hand lowered");
+    if (next) {
+      toast.info("Hand raised! Host notified.", { id: "hand-raise" });
+    }
   };
 
   // Send Reaction
@@ -440,19 +758,78 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     }, 2500);
   };
 
-  // Send Chat Message
+  // Send Chat Message via single persistence authority (MongoDB backend) + real-time broadcast
   const handleSendMessage = (text: string) => {
-    const msgPayload: ChatMsg = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+    const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const optimisticMsg: ChatMsg = {
+      id: clientMessageId,
+      clientMessageId,
       senderId: myUserId,
       senderName: myName,
       message: text,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       isHost: isHost,
+      status: "sending",
     };
 
-    setChatMessages((prev) => [...prev, msgPayload]);
-    engineRef.current?.sendChatMessage(myName, text, isHost);
+    setChatMessages((prev) => [...prev, optimisticMsg]);
+
+    const performSend = async (cId: string, content: string) => {
+      try {
+        const res = await dbClient.saveChatMessage(meetingCode, content, cId);
+        if (res && (res.success || res.message)) {
+          const canonical = res.message || res;
+          const canonicalId = canonical._id || canonical.id || cId;
+          const canonicalTimestamp = canonical.createdAt
+            ? new Date(canonical.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+            : optimisticMsg.timestamp;
+
+          setChatMessages((prev) =>
+            prev.map((m) =>
+              m.id === cId || m.clientMessageId === cId
+                ? {
+                    ...m,
+                    id: canonicalId,
+                    clientMessageId: cId,
+                    status: "sent",
+                    timestamp: canonicalTimestamp,
+                    isHost: Boolean(canonical.isHost ?? isHost),
+                  }
+                : m
+            )
+          );
+
+          // Broadcast saved canonical message to peers
+          engineRef.current?.broadcastChatMessage({
+            id: canonicalId,
+            clientMessageId: cId,
+            senderId: myUserId,
+            senderName: myName,
+            text: content,
+            timestamp: canonicalTimestamp,
+            isHost: Boolean(canonical.isHost ?? isHost),
+          });
+        } else {
+          throw new Error(res?.error || "Failed to save message");
+        }
+      } catch (err: any) {
+        console.error("[MeetingRoom] Error saving message:", err);
+        toast.error(err.message || "Failed to send message");
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === cId || m.clientMessageId === cId
+              ? {
+                  ...m,
+                  status: "failed",
+                  onRetry: () => performSend(cId, content),
+                }
+              : m
+          )
+        );
+      }
+    };
+
+    performSend(clientMessageId, text);
   };
 
   // Launch Poll
@@ -480,7 +857,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     setHasVotedPoll(false);
     setIsSideDrawerOpen(true);
     setActiveSideTab("polls");
-    toast.success("Poll launched to all students!");
+    toast.success("Poll launched to all students!", { id: "poll-launch" });
   };
 
   // Vote Poll
@@ -520,9 +897,29 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     toast.info("Poll ended. Leaderboard revealed!");
   };
 
+  // Approve speaking request (Host)
+  const handleApproveMic = (studentId: string, studentName: string) => {
+    engineRef.current?.respondMicRequest(studentId, true, myName);
+    const norm = (studentId || "").toLowerCase().replace(/_/g, "-");
+    setUnmuteRequests((prev) => prev.filter((r) => {
+      const rNorm = (r.userId || "").toLowerCase().replace(/_/g, "-");
+      return r.userId !== studentId && rNorm !== norm;
+    }));
+  };
+
+  // Deny speaking request (Host)
+  const handleDenyMic = (studentId: string, studentName: string) => {
+    engineRef.current?.respondMicRequest(studentId, false, myName);
+    const norm = (studentId || "").toLowerCase().replace(/_/g, "-");
+    setUnmuteRequests((prev) => prev.filter((r) => {
+      const rNorm = (r.userId || "").toLowerCase().replace(/_/g, "-");
+      return r.userId !== studentId && rNorm !== norm;
+    }));
+  };
+
   // Mute All Students (Host)
   const handleMuteAll = () => {
-    toast.success("Muted all students");
+    engineRef.current?.forceMuteAll();
   };
 
   // Lower All Hands (Host)
@@ -533,7 +930,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Force Mute Single Student (Host)
   const handleForceMuteStudent = (studentId: string, studentName: string) => {
-    toast.success(`Muted ${studentName}`);
+    engineRef.current?.forceMuteParticipant(studentId);
   };
 
   // Expel Student (Host)
@@ -593,19 +990,28 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   }, []);
 
   // End Meeting Handler
-  const handleEndClassClick = () => {
+  const handleEndClassClick = async () => {
+    dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
     if (isYouTubeLive) {
       stopYouTubeLiveStreaming();
       setIsYouTubeLive(false);
     }
     if (isHost) {
+      try {
+        await dbClient.endMeeting(meetingCode);
+        engineRef.current?.broadcastClassEnded();
+      } catch (err) {
+        console.warn("[MeetingRoom] Error ending meeting on backend:", err);
+      }
+      setChatMessages([]);
       setShowPostClassModal(true);
     } else {
       onLeaveMeeting();
     }
   };
 
-  // All participants list (Local User + Remote Peers)
+  // All participants list (Local User + Remote Mediasoup Peers)
+  // 100% Dynamic: Only active live connected participants are shown in the video grid.
   const allParticipants = [
     {
       id: myUserId,
@@ -617,16 +1023,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       isVideoMuted: !isCamEnabled,
       isHandRaised: isHandRaised,
     },
-    ...remoteParticipants.map((p) => ({
-      id: p.id,
-      name: p.name,
-      role: p.role || "student",
-      audioTrack: p.audioTrack || null,
-      videoTrack: p.videoTrack || null,
-      isAudioMuted: p.isAudioMuted ?? !p.audioTrack,
-      isVideoMuted: p.isVideoMuted ?? !p.videoTrack,
-      isHandRaised: p.isHandRaised ?? false,
-    })),
+    ...remoteParticipants
+      .filter((p) => p.id !== myUserId && p.name.trim().toLowerCase() !== myName.trim().toLowerCase())
+      .map((p) => ({
+        id: p.id,
+        userId: (p as any).userId || p.id,
+        name: p.name,
+        role: p.role || "student",
+        audioTrack: p.audioTrack || null,
+        videoTrack: p.videoTrack || null,
+        isAudioMuted: p.isAudioMuted ?? !p.audioTrack,
+        isVideoMuted: p.isVideoMuted ?? !p.videoTrack,
+        isHandRaised: p.isHandRaised ?? false,
+      })),
   ];
 
   const totalRaisedHands = allParticipants.filter((p) => p.isHandRaised).length;
@@ -636,16 +1045,31 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       ref={playerRef}
       className="flex flex-col h-screen w-screen bg-[#0e0d0b] text-[#f3eee6] overflow-hidden select-none font-sans relative"
     >
+      {/* Persistent Audio Sink: Guarantees remote student/tutor audio is always played regardless of active view layout (Whiteboard, Screen Share, Spotlight, or Grid) */}
+      <div className="hidden" aria-hidden="true">
+        {remoteParticipants.map((p) => (
+          <RemoteAudioElement key={p.id} participant={p} />
+        ))}
+      </div>
+
       {/* ── CLASSROOM HEADER ── */}
       <header className="h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-4 flex items-center justify-between z-20 backdrop-blur-md">
         {/* Left: Room Badge & Duration */}
         <div className="flex items-center gap-3 min-w-0">
-          <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              setIsInfoDrawerOpen(!isInfoDrawerOpen);
+              if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
+            }}
+            title="Meeting details (Click to view code & link)"
+            className="flex items-center gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-3 py-1 rounded-full text-xs transition cursor-pointer group"
+          >
             <span className="w-2.5 h-2.5 rounded-full bg-[#10b981] animate-pulse shrink-0" />
-            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate">
+            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate group-hover:text-[#f59e0b] transition">
               {meetingCode}
             </span>
-          </div>
+            <Info className="w-3.5 h-3.5 text-[#a39e94] group-hover:text-[#f59e0b] transition ml-0.5" />
+          </button>
 
           <div className="hidden sm:flex items-center gap-1.5 bg-[#1a1814] border border-[#f3eee6]/10 px-2.5 py-1 rounded-full text-xs font-mono text-[#a39e94]">
             <Clock className="w-3.5 h-3.5 text-[#a39e94]" />
@@ -679,8 +1103,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         <div className="hidden md:flex items-center gap-1 bg-[#1a1814] border border-[#f3eee6]/10 p-1 rounded-xl">
           <button
             onClick={() => {
+              const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
               setShowWhiteboard(false);
               setLayoutMode("grid");
+              if (isHost && wasWhiteboard) {
+                engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+                dbClient.setWhiteboardState(meetingCode, false);
+              }
             }}
             className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
               layoutMode === "grid" && !showWhiteboard
@@ -694,8 +1123,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
           <button
             onClick={() => {
+              const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
               setShowWhiteboard(false);
               setLayoutMode("spotlight");
+              if (isHost && wasWhiteboard) {
+                engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+                dbClient.setWhiteboardState(meetingCode, false);
+              }
             }}
             className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
               layoutMode === "spotlight" && !showWhiteboard
@@ -712,6 +1146,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               onClick={() => {
                 setShowWhiteboard(true);
                 setLayoutMode("whiteboard");
+                engineRef.current?.broadcastWhiteboardState(meetingCode, true, true);
+                dbClient.setWhiteboardState(meetingCode, true);
               }}
               className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
                 showWhiteboard || layoutMode === "whiteboard"
@@ -824,6 +1260,41 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
       {/* ── MAIN WORKSPACE & STAGE ── */}
       <main className="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* Floating Tutor Speaking Request Banner */}
+        {isHost && unmuteRequests.length > 0 && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-[#181612]/95 border border-amber-500/50 backdrop-blur-md rounded-2xl px-5 py-3 shadow-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4 duration-300">
+            <div className="w-9 h-9 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
+              <Mic className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs sm:text-sm font-semibold text-white truncate">
+                <span className="text-amber-400 font-bold">{unmuteRequests[0].name}</span> requested to speak
+              </span>
+              <span className="text-[11px] text-[#a39e94]">
+                {unmuteRequests.length > 1
+                  ? `+${unmuteRequests.length - 1} more student(s) waiting`
+                  : "Click Allow to unmute student microphone"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-1">
+              <button
+                onClick={() => handleApproveMic(unmuteRequests[0].userId, unmuteRequests[0].name)}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
+              >
+                <Check className="w-3.5 h-3.5" />
+                Allow Mic
+              </button>
+              <button
+                onClick={() => handleDenyMic(unmuteRequests[0].userId, unmuteRequests[0].name)}
+                className="bg-zinc-800 hover:bg-zinc-700 text-[#d4cfc5] text-xs font-medium px-2.5 py-1.5 rounded-lg border border-white/10 transition cursor-pointer active:scale-95"
+              >
+                <X className="w-3.5 h-3.5" />
+                Decline
+              </button>
+            </div>
+          </div>
+        )}
+
         <section className="flex-1 min-w-0 h-full relative p-3 flex flex-col justify-center items-center overflow-hidden">
           {/* SCREEN SHARE PRESENTATION MODE */}
           {layoutMode === "screenshare" && localScreenTrack ? (
@@ -854,8 +1325,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 onClose={() => {
                   setShowWhiteboard(false);
                   setLayoutMode("grid");
+                  if (isHost) {
+                    engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+                    dbClient.setWhiteboardState(meetingCode, false);
+                  }
                 }}
                 isHost={isHost}
+                roomCode={meetingCode}
+                engine={engineRef.current}
+                myUserId={myUserId}
               />
               {/* Floating PIP Host Camera */}
               {isCamEnabled && localVideoTrack && (
@@ -892,6 +1370,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       isViewerHost={isHost}
                       isSpeaking={!featured.isAudioMuted && Boolean(featured.audioTrack)}
                       isHandRaised={featured.isHandRaised}
+                      isMicRequested={unmuteRequests.some((r) => r.userId === featured.id || (featured as any).userId === r.userId)}
+                      onApproveMic={() => {
+                        const m = unmuteRequests.find((r) => r.userId === featured.id || (featured as any).userId === r.userId);
+                        handleApproveMic(m?.userId || featured.id, featured.name);
+                      }}
+                      onDenyMic={() => {
+                        const m = unmuteRequests.find((r) => r.userId === featured.id || (featured as any).userId === r.userId);
+                        handleDenyMic(m?.userId || featured.id, featured.name);
+                      }}
                       isPinned={true}
                       onTogglePin={() => setPinnedId(null)}
                       onLowerHand={() => isHost && handleLowerAllHands()}
@@ -922,6 +1409,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         isViewerHost={isHost}
                         isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
                         isHandRaised={p.isHandRaised}
+                        isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
+                        onApproveMic={() => {
+                          const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                          handleApproveMic(m?.userId || p.id, p.name);
+                        }}
+                        onDenyMic={() => {
+                          const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                          handleDenyMic(m?.userId || p.id, p.name);
+                        }}
                         isPinned={false}
                         onTogglePin={() => setPinnedId(p.id)}
                         onLowerHand={() => isHost && handleLowerAllHands()}
@@ -962,6 +1458,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   isViewerHost={isHost}
                   isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
                   isHandRaised={p.isHandRaised}
+                  isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
+                  onApproveMic={() => {
+                    const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                    handleApproveMic(m?.userId || p.id, p.name);
+                  }}
+                  onDenyMic={() => {
+                    const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                    handleDenyMic(m?.userId || p.id, p.name);
+                  }}
                   isPinned={p.id === pinnedId}
                   onTogglePin={() => setPinnedId(pinnedId === p.id ? null : p.id)}
                   onLowerHand={() => isHost && handleLowerAllHands()}
@@ -976,6 +1481,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           {/* Floating Physics Reactions Overlay */}
           <FloatingReactionsOverlay reactions={activeReactions} />
         </section>
+
+        {/* ── MEETING DETAILS INFO DRAWER (Google Meet Style) ── */}
+        <InfoDrawer
+          isOpen={isInfoDrawerOpen}
+          meetingCode={meetingCode}
+          onClose={() => setIsInfoDrawerOpen(false)}
+          hostName={isHost ? myName : (allParticipants.find((p) => p.role === "host")?.name || "Tutor")}
+          isHost={isHost}
+        />
 
         {/* ── UNIFIED 3-TAB CLASS FEED SIDE DRAWER ── */}
         <ClassFeedSidepanel
@@ -993,16 +1507,39 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           chatMessages={chatMessages}
           onSendMessage={handleSendMessage}
           isChatLocked={isChatLocked}
-          onToggleChatLock={() => {
-            setIsChatLocked(!isChatLocked);
-            toast.info(!isChatLocked ? "Chat locked for students" : "Chat unlocked");
+          onToggleChatLock={async () => {
+            const nextLock = !isChatLocked;
+            setIsChatLocked(nextLock);
+            try {
+              await dbClient.setChatLock(meetingCode, nextLock);
+              engineRef.current?.emitChatLock(nextLock);
+              toast.info(nextLock ? "Chat locked for students" : "Chat unlocked");
+            } catch (err: any) {
+              setIsChatLocked(!nextLock);
+              toast.error(err.message || "Failed to toggle chat lock");
+            }
           }}
           pinnedMessage={pinnedMessage}
-          onPinMessage={(text) => {
-            setPinnedMessage({ text, senderName: myName });
-            toast.success("Message pinned at the top");
+          onPinMessage={async (text) => {
+            const pinData = { text, senderName: myName };
+            setPinnedMessage(pinData);
+            try {
+              await dbClient.setPinnedMessage(meetingCode, text);
+              engineRef.current?.emitChatPin(pinData);
+              toast.success("Message pinned at the top");
+            } catch (err: any) {
+              toast.error(err.message || "Failed to pin message");
+            }
           }}
-          onUnpinMessage={() => setPinnedMessage(null)}
+          onUnpinMessage={async () => {
+            setPinnedMessage(null);
+            try {
+              await dbClient.setPinnedMessage(meetingCode, null);
+              engineRef.current?.emitChatPin(null);
+            } catch (err: any) {
+              toast.error(err.message || "Failed to unpin message");
+            }
+          }}
           activePoll={activePoll}
           onLaunchPoll={handleLaunchPoll}
           onVotePoll={handleVotePoll}
@@ -1017,6 +1554,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onForceMuteStudent={handleForceMuteStudent}
           onMuteAllStudents={handleMuteAll}
           onExpelStudent={handleExpelStudent}
+          unmuteRequests={unmuteRequests}
+          onApproveMic={handleApproveMic}
+          onDenyMic={handleDenyMic}
         />
       </main>
 
@@ -1032,14 +1572,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
                 : unmuteRequestStatus === "requesting"
                 ? "bg-amber-500 text-white animate-pulse"
+                : hasSpeakingPermission
+                ? "bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50"
                 : "bg-red-600 hover:bg-red-700 text-white"
             }`}
             title={
               isMicEnabled
                 ? "Mute Microphone"
                 : unmuteRequestStatus === "requesting"
-                ? "Approval Pending..."
-                : "Unmute Microphone"
+                ? "Speaking request pending tutor approval (Click to cancel)"
+                : hasSpeakingPermission
+                ? "Unmute Microphone (Speaking Approved)"
+                : isHost
+                ? "Unmute Microphone"
+                : "Request Tutor to Speak"
             }
           >
             {isMicEnabled ? (
@@ -1095,46 +1641,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           )}
         </div>
 
-        {/* Center: Whiteboard, YouTube Live & Reactions */}
+        {/* Center: Reactions */}
         <div className="flex items-center gap-2 relative">
-          {/* Whiteboard Button (Host) */}
-          {isHost && (
-            <Button
-              onClick={handleToggleWhiteboard}
-              className={`h-11 px-5 rounded-full font-bold text-xs gap-2 transition border shadow-md ${
-                showWhiteboard
-                  ? "bg-[#1a73e8] text-white border-[#1a73e8]/40"
-                  : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-yellow-400" />
-              <span>{showWhiteboard ? "Hide Whiteboard" : "Math Whiteboard"}</span>
-            </Button>
-          )}
-
-          {/* YouTube Live Quick Button (Host) */}
-          {isHost && (
-            <Button
-              onClick={() => {
-                if (isYouTubeLive) {
-                  handleStopYouTubeLive();
-                } else {
-                  setIsRecordingModalOpen(true);
-                }
-              }}
-              className={`h-11 px-4 rounded-full font-bold text-xs gap-2 transition border shadow-md ${
-                isYouTubeLive
-                  ? "bg-red-600 hover:bg-red-700 text-white border-red-500 shadow-lg shadow-red-600/30 animate-pulse"
-                  : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
-              }`}
-              title={isYouTubeLive ? "End YouTube Live stream" : "Go Live on YouTube"}
-            >
-              <Youtube className={`w-4 h-4 ${isYouTubeLive ? "text-white" : "text-red-500"}`} />
-              <span className="hidden md:inline">
-                {isYouTubeLive ? `End Live (${formatDuration(youtubeLiveSeconds)})` : "Go Live"}
-              </span>
-            </Button>
-          )}
 
           {/* Floating Reaction Picker Popover */}
           <div className="relative">
@@ -1173,10 +1681,28 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </Button>
           )}
 
+          {/* Meeting Details / Info Trigger (Google Meet style) */}
+          <Button
+            onClick={() => {
+              setIsInfoDrawerOpen(!isInfoDrawerOpen);
+              if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
+            }}
+            className={`h-11 px-3.5 rounded-full font-bold text-xs border transition relative gap-1.5 cursor-pointer ${
+              isInfoDrawerOpen
+                ? "bg-[#f59e0b] text-[#0e0d0b] border-[#f59e0b] shadow-md shadow-[#f59e0b]/20"
+                : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
+            }`}
+            title="Meeting details (Meeting link & code)"
+          >
+            <Info className="w-4 h-4" />
+            <span className="hidden md:inline">Info</span>
+          </Button>
+
           {/* Class Feed Sidepanel Trigger */}
           <Button
             onClick={() => {
               setIsSideDrawerOpen(!isSideDrawerOpen);
+              if (!isSideDrawerOpen) setIsInfoDrawerOpen(false);
               setUnreadChatCount(0);
             }}
             className={`h-11 px-4 rounded-full font-bold text-xs border transition relative gap-2 ${
@@ -1237,12 +1763,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         }}
         onRequestCameraOff={() => {
           setJoinPendingApproval(true);
-          toast.info("Sent camera-off request to host.");
           setTimeout(() => {
             setJoinPendingApproval(false);
             setCameraOffAllowed(true);
             setShowCameraGateModal(false);
-            toast.success("Host approved camera-off exemption!");
+            toast.success("Host approved camera-off exemption!", { id: "cam-exemption" });
           }, 3000);
         }}
         onCancel={onLeaveMeeting}
@@ -1255,7 +1780,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         onKeepCameraOn={() => setShowCameraOffWarningModal(false)}
         onRequestExemption={() => {
           setShowCameraOffWarningModal(false);
-          toast.info("Exemption request sent to host.");
+          toast.info("Exemption request sent to host.", { id: "cam-exemption-req" });
         }}
         onTurnOffAndLeave={() => {
           setShowCameraOffWarningModal(false);
@@ -1272,7 +1797,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         onOpenChange={setShowPostClassModal}
         meetingCode={meetingCode}
         durationFormatted={formatDuration(elapsedSeconds)}
-        onComplete={() => {
+        onComplete={async () => {
+          try {
+            await dbClient.endMeeting(meetingCode);
+            engineRef.current?.broadcastClassEnded();
+          } catch (err) {
+            console.warn("[MeetingRoom] Error ending meeting:", err);
+          }
+          setChatMessages([]);
           setShowPostClassModal(false);
           onLeaveMeeting();
         }}

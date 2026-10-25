@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
+import { toast } from "sonner";
 
 export interface UserProfile {
   id: string;
@@ -14,7 +15,12 @@ interface AuthContextType {
   session: { access_token: string; user: UserProfile } | null;
   profile: UserProfile | null;
   loading: boolean;
+  isAuthenticated: boolean;
+  needsOnboardingRole: boolean;
   signInWithGoogle: () => Promise<void>;
+  signUpWithGoogle: (role: "tutor" | "student") => Promise<void>;
+  updateRole: (role: "tutor" | "student") => Promise<void>;
+  dismissOnboardingRole: () => void;
   joinAsGuest: (guestName: string, role?: "tutor" | "student") => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -22,7 +28,7 @@ interface AuthContextType {
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
 const GOOGLE_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-  "624389472912-jb3ji3bklfi2frmb9nuhc3n9alnfpdqm.apps.googleusercontent.com";
+  "207248778617-3n7l8vp8cgqv8dhiqltnsnmoj9n8ain7.apps.googleusercontent.com";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -30,6 +36,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [session, setSession] = useState<{ access_token: string; user: UserProfile } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [needsOnboardingRole, setNeedsOnboardingRole] = useState(false);
+
+  const isAuthenticated = Boolean(
+    profile?.email &&
+    (session?.access_token || localStorage.getItem("mathsy_meet_token")) &&
+    !profile?.id?.startsWith("guest_")
+  );
 
   // Helper to save session
   const saveSession = (user: UserProfile, token: string) => {
@@ -43,46 +56,75 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearSession = () => {
     setProfile(null);
     setSession(null);
+    setNeedsOnboardingRole(false);
     localStorage.removeItem("mathsy_meet_token");
     localStorage.removeItem("mathsy_meet_user");
     localStorage.removeItem("mathsy_meet_guest");
+    localStorage.removeItem("mathsy_meet_signup_role");
+    localStorage.removeItem("mathsy_meet_auth_intent");
   };
 
   useEffect(() => {
     // 1. Check for token in URL hash/params (e.g. from Google OAuth callback)
     const hash = window.location.hash;
-    if (hash && hash.includes("access_token=")) {
+    if (hash && (hash.includes("access_token=") || hash.includes("id_token="))) {
       try {
         const params = new URLSearchParams(hash.substring(1));
+        const idToken = params.get("id_token");
         const accessToken = params.get("access_token");
-        if (accessToken) {
-          // Fetch Google User Profile with access token
-          fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-            headers: { Authorization: `Bearer ${accessToken}` },
+
+        if (idToken || accessToken) {
+          const signupRole = localStorage.getItem("mathsy_meet_signup_role") as ("tutor" | "student" | null);
+          const authIntent = localStorage.getItem("mathsy_meet_auth_intent") || (signupRole ? "signup" : "signin");
+          localStorage.removeItem("mathsy_meet_signup_role");
+          localStorage.removeItem("mathsy_meet_auth_intent");
+
+          // Authenticate with verified Google credential on PostgreSQL backend
+          fetch(`${API_BASE}/auth/google`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              idToken: idToken || undefined,
+              accessToken: accessToken || undefined,
+              role: authIntent === "signup" ? (signupRole || undefined) : undefined,
+            }),
           })
-            .then((r) => r.json())
-            .then(async (googleUser) => {
-              if (googleUser?.email) {
-                // Upsert user into PostgreSQL
-                const res = await fetch(`${API_BASE}/auth/google`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    email: googleUser.email,
-                    name: googleUser.name,
-                    avatarUrl: googleUser.picture,
-                    providerUserId: googleUser.sub,
-                    role: "tutor",
-                  }),
-                });
-                if (res.ok) {
-                  const data = await res.json();
-                  saveSession(data.user, data.token);
-                  window.history.replaceState({}, document.title, window.location.pathname);
+            .then(async (res) => {
+              if (res.ok) {
+                const data = await res.json();
+                saveSession(data.user, data.token);
+
+                if (data.needsRoleSelection) {
+                  setNeedsOnboardingRole(true);
+                } else if (data.isNewUser) {
+                  toast.success(`Welcome to Mathsy Meet, ${data.user.name}! (${data.user.role === "tutor" ? "Tutor" : "Student"})`);
+                } else {
+                  toast.success(`Welcome back, ${data.user.name}! (${data.user.role === "tutor" ? "Tutor" : "Student"})`);
                 }
+
+                // Handle preserved redirect URL safely (prevent open redirects)
+                const redirectUrl = localStorage.getItem("mathsy_meet_redirect_url");
+                if (redirectUrl) {
+                  localStorage.removeItem("mathsy_meet_redirect_url");
+                  if (redirectUrl.startsWith("/meet/") && !redirectUrl.includes("://") && !redirectUrl.startsWith("//")) {
+                    window.history.replaceState({}, document.title, redirectUrl);
+                    window.dispatchEvent(new PopStateEvent("popstate"));
+                    return;
+                  }
+                }
+                window.history.replaceState({}, document.title, window.location.pathname);
+              } else {
+                const errData = await res.json().catch(() => ({}));
+                console.error("[Auth] Server rejected Google authentication:", res.status, errData);
+                toast.error(errData.error || "Failed to authenticate with Google. Please try again.");
+                clearSession();
+                window.history.replaceState({}, document.title, window.location.pathname);
               }
             })
-            .catch((err) => console.warn("[Auth] Failed to exchange Google token:", err))
+            .catch((err) => {
+              console.error("[Auth] Failed to reach auth backend:", err);
+              toast.error("Authentication backend is unreachable. Please verify server connection.");
+            })
             .finally(() => setLoading(false));
           return;
         }
@@ -110,7 +152,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         })
         .catch(() => {
-          // If offline / local fallback, restore cached user
+          // If network glitch, tentatively keep cached user session
           if (savedUser) {
             try {
               const u = JSON.parse(savedUser);
@@ -121,73 +163,91 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         })
         .finally(() => setLoading(false));
     } else {
-      // Check for saved guest
-      const savedGuest = localStorage.getItem("mathsy_meet_guest");
-      if (savedGuest) {
-        try {
-          const parsed = JSON.parse(savedGuest);
-          setProfile(parsed);
-        } catch {}
-      }
+      // Remove any legacy guest state
+      localStorage.removeItem("mathsy_meet_guest");
       setLoading(false);
     }
   }, []);
 
-  const signInWithGoogle = async () => {
+  const triggerGoogleOAuth = (intent: "signin" | "signup", role?: "tutor" | "student") => {
     try {
+      localStorage.setItem("mathsy_meet_auth_intent", intent);
+      if (role) {
+        localStorage.setItem("mathsy_meet_signup_role", role);
+      } else {
+        localStorage.removeItem("mathsy_meet_signup_role");
+      }
+      if (window.location.pathname.includes("/meet/")) {
+        localStorage.setItem("mathsy_meet_redirect_url", window.location.pathname);
+      }
       const redirectUri = window.location.origin;
       const scope = encodeURIComponent("openid email profile");
+      const nonce = Math.random().toString(36).substring(2, 15);
       const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(
         redirectUri
-      )}&response_type=token&scope=${scope}&prompt=select_account`;
+      )}&response_type=token id_token&scope=${scope}&prompt=select_account&nonce=${nonce}`;
 
       window.location.href = authUrl;
     } catch (err: any) {
-      console.error("[Auth] Google Sign-in error:", err.message);
+      console.error("[Auth] Google OAuth trigger error:", err.message);
       throw err;
     }
   };
 
-  const joinAsGuest = async (guestName: string, role: "tutor" | "student" = "student") => {
-    const trimmed =
-      guestName.trim() ||
-      (role === "tutor" ? "Tutor" : "Student") + " " + Math.floor(100 + Math.random() * 900);
-    const isTutor = role === "tutor";
+  const signInWithGoogle = async () => {
+    triggerGoogleOAuth("signin");
+  };
+
+  const signUpWithGoogle = async (role: "tutor" | "student") => {
+    triggerGoogleOAuth("signup", role);
+  };
+
+  const dismissOnboardingRole = () => {
+    setNeedsOnboardingRole(false);
+  };
+
+  const updateRole = async (newRole: "tutor" | "student") => {
+    if (!profile) return;
+    const token = localStorage.getItem("mathsy_meet_token");
+    if (!token) return;
 
     try {
-      // Attempt to register guest in PostgreSQL database
-      const res = await fetch(`${API_BASE}/auth/guest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guestName: trimmed, role }),
+      const res = await fetch(`${API_BASE}/auth/role`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ role: newRole }),
       });
-
       if (res.ok) {
         const data = await res.json();
-        saveSession(data.user, data.token);
-        return;
+        const updated: UserProfile = {
+          ...profile,
+          role: newRole,
+          isHost: newRole === "tutor",
+        };
+        saveSession(updated, data.token || token);
+        setNeedsOnboardingRole(false);
+        toast.success(`Active role updated to ${newRole === "tutor" ? "Tutor" : "Student"}`);
+      } else {
+        toast.error("Failed to update role on server");
       }
     } catch (err) {
-      console.warn("[Auth] PostgreSQL guest endpoint unreachable, using client fallback:", err);
+      console.warn("[Auth] Failed to update role on backend:", err);
+      toast.error("Failed to update role. Please try again.");
     }
+  };
 
-    // Client-side fallback if backend is offline
-    const fallbackProfile: UserProfile = {
-      id: "guest_" + Math.random().toString(36).substring(2, 10),
-      name: trimmed,
-      email: "",
-      avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(
-        trimmed
-      )}&backgroundColor=${isTutor ? "1a73e8" : "10b981"}`,
-      isHost: isTutor,
-      role: role,
-    };
-    setProfile(fallbackProfile);
-    localStorage.setItem("mathsy_meet_guest", JSON.stringify(fallbackProfile));
+  const joinAsGuest = async (_guestName: string, _role: "tutor" | "student" = "student") => {
+    // Guest accounts are disabled: require authentic Google sign-in
+    toast.info("Please sign in with Google to enter your class with an authentic verified account.");
+    triggerGoogleOAuth("signin");
   };
 
   const signOut = async () => {
     clearSession();
+    toast.info("You have signed out.");
   };
 
   return (
@@ -197,7 +257,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         session,
         profile,
         loading,
+        isAuthenticated,
+        needsOnboardingRole,
         signInWithGoogle,
+        signUpWithGoogle,
+        updateRole,
+        dismissOnboardingRole,
         joinAsGuest,
         signOut,
       }}

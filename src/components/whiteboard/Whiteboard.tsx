@@ -1,10 +1,12 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { Tldraw, Editor, createShapeId } from "tldraw";
 import "tldraw/tldraw.css";
 import { CompassShapeUtil } from "./shapes/CompassShapeUtil";
 import { ProtractorShapeUtil } from "./shapes/ProtractorShapeUtil";
 import { RulerShapeUtil } from "./shapes/RulerShapeUtil";
 import { SetSquareShapeUtil } from "./shapes/SetSquareShapeUtil";
+import { MathsyMediasoupEngine } from "../../engine/mediasoupClient";
+import { dbClient } from "../../lib/dbClient";
 import {
   Ruler,
   Compass,
@@ -14,7 +16,8 @@ import {
   Trash2,
   Sparkles,
   Triangle,
-  CircleDot
+  CircleDot,
+  Users
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -28,16 +31,127 @@ const customShapeUtils = [
 interface WhiteboardProps {
   onClose: () => void;
   isHost?: boolean;
+  roomCode?: string;
+  engine?: MathsyMediasoupEngine | null;
+  myUserId?: string;
 }
 
-export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false }) => {
+export const Whiteboard: React.FC<WhiteboardProps> = ({
+  onClose,
+  isHost = false,
+  roomCode,
+  engine,
+  myUserId,
+}) => {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const snapshotTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleMount = (ed: Editor) => {
     setEditor(ed);
     ed.zoomToFit();
+
+    // Late Join / Fresh Mount: Load snapshot from PostgreSQL if available
+    if (roomCode) {
+      dbClient.getWhiteboardSnapshot(roomCode).then((snapshot) => {
+        if (snapshot && ed) {
+          try {
+            ed.loadSnapshot(snapshot);
+            console.log("[Whiteboard] Authoritative snapshot loaded for room:", roomCode);
+          } catch (err) {
+            console.warn("[Whiteboard] Error restoring snapshot:", err);
+          }
+        }
+      });
+    }
   };
+
+  // Real-time synchronization of drawing, shapes, and erasures
+  useEffect(() => {
+    if (!editor) return;
+
+    // 1. Listen for local user changes (document scope only)
+    const unlisten = editor.store.listen(
+      (entry) => {
+        // Strictly filter to local user actions to prevent echo loops
+        if (entry.source !== "user") return;
+
+        const { added, updated, removed } = entry.changes;
+        const hasChanges =
+          Object.keys(added).length > 0 ||
+          Object.keys(updated).length > 0 ||
+          Object.keys(removed).length > 0;
+
+        if (!hasChanges) return;
+
+        // Transmit incremental diff to room participants
+        if (engine && roomCode) {
+          engine.broadcastWhiteboard({
+            type: "diff",
+            roomCode,
+            senderId: myUserId || "local",
+            changes: { added, updated, removed },
+            timestamp: Date.now(),
+          });
+        }
+
+        // Debounced snapshot persistence to PostgreSQL (Host authoritative)
+        if (isHost && roomCode) {
+          if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
+          snapshotTimerRef.current = setTimeout(async () => {
+            try {
+              const snapshot = editor.getSnapshot();
+              await dbClient.saveWhiteboardSnapshot(roomCode, snapshot);
+            } catch (err) {
+              console.warn("[Whiteboard] Error saving snapshot:", err);
+            }
+          }, 2000);
+        }
+      },
+      { source: "user", scope: "document" }
+    );
+
+    // 2. Process incoming remote drawing diffs from room peers
+    const handleRemoteWhiteboardData = (data: any) => {
+      if (!data || typeof data !== "object") return;
+
+      // Ensure room isolation
+      if (data.roomCode && roomCode && data.roomCode !== roomCode) return;
+
+      // Ignore own echoed events
+      if (data.senderId && myUserId && data.senderId === myUserId) return;
+
+      if (data.type === "diff" && data.changes) {
+        try {
+          editor.store.mergeRemoteChanges(() => {
+            editor.store.applyDiff(data.changes);
+          });
+        } catch (err) {
+          console.warn("[Whiteboard] Error applying remote diff:", err);
+        }
+      } else if (data.type === "snapshot" && data.snapshot) {
+        try {
+          editor.loadSnapshot(data.snapshot);
+        } catch (err) {
+          console.warn("[Whiteboard] Error applying remote snapshot:", err);
+        }
+      }
+    };
+
+    if (engine) {
+      engine.onWhiteboardData = handleRemoteWhiteboardData;
+    }
+
+    return () => {
+      unlisten();
+      if (engine && engine.onWhiteboardData === handleRemoteWhiteboardData) {
+        engine.onWhiteboardData = undefined;
+      }
+      if (snapshotTimerRef.current) {
+        clearTimeout(snapshotTimerRef.current);
+      }
+    };
+  }, [editor, engine, roomCode, isHost, myUserId]);
 
   const insertRuler = () => {
     if (!editor) return;
@@ -50,7 +164,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
       y: pagePoint.y - 35,
       props: { w: 420, h: 70, rotation: 0, color: "blue" },
     });
-    toast.success("Geometry Ruler inserted on canvas");
   };
 
   const insertCompass = () => {
@@ -64,7 +177,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
       y: pagePoint.y - 120,
       props: { w: 200, h: 240, angle: 45, rotation: 0, color: "blue" },
     });
-    toast.success("Geometry Compass inserted on canvas");
   };
 
   const insertProtractor = () => {
@@ -78,7 +190,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
       y: pagePoint.y - 80,
       props: { w: 300, h: 160, rotation: 0, color: "blue" },
     });
-    toast.success("180° Protractor inserted on canvas");
   };
 
   const insertSetSquare = () => {
@@ -92,7 +203,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
       y: pagePoint.y - 120,
       props: { w: 240, h: 240, rotation: 0, color: "blue" },
     });
-    toast.success("Set Square triangle inserted on canvas");
   };
 
   const clearCanvas = () => {
@@ -100,7 +210,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
     const shapes = Array.from(editor.getCurrentPageShapeIds());
     if (shapes.length === 0) return;
     editor.deleteShapes(shapes);
-    toast.info("Whiteboard canvas cleared");
+    toast.info("Whiteboard canvas cleared", { id: "clear-canvas" });
   };
 
   return (
@@ -116,9 +226,16 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
             <Sparkles className="w-3.5 h-3.5" />
             <span className="font-mono text-[11px]">Mathsy Geometry Canvas</span>
           </div>
-          <span className="hidden sm:inline text-xs text-[#a39e94]">
-            Ruler, Compass & Protractor Instruments
-          </span>
+          {isHost ? (
+            <span className="hidden sm:inline text-xs text-[#a39e94]">
+              Ruler, Compass & Protractor Instruments
+            </span>
+          ) : (
+            <div className="flex items-center gap-1 text-[11px] text-amber-400/90 bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/20 font-medium">
+              <Users className="w-3 h-3" />
+              <span>Live Shared Classroom Board</span>
+            </div>
+          )}
         </div>
 
         {/* Geometry Quick Tools */}
@@ -159,15 +276,18 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
             <span className="hidden md:inline font-mono text-[11px]">Set Square</span>
           </button>
 
-          <div className="h-4 w-px bg-[#f3eee6]/10 mx-1" />
-
-          <button
-            onClick={clearCanvas}
-            title="Clear Canvas"
-            className="p-1.5 text-[#a39e94] hover:text-red-400 hover:bg-[#221f1a] rounded-lg transition"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {isHost && (
+            <>
+              <div className="h-4 w-px bg-[#f3eee6]/10 mx-1" />
+              <button
+                onClick={clearCanvas}
+                title="Clear Canvas"
+                className="p-1.5 text-[#a39e94] hover:text-red-400 hover:bg-[#221f1a] rounded-lg transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
         </div>
 
         {/* Window controls */}
@@ -179,13 +299,15 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ onClose, isHost = false 
           >
             {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
-          <button
-            onClick={onClose}
-            title="Close Whiteboard"
-            className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {isHost && (
+            <button
+              onClick={onClose}
+              title="Close Whiteboard for Classroom"
+              className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 

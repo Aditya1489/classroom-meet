@@ -36,14 +36,15 @@ function getHttpServerUrl(wsUrl: string): string {
 export async function getGoogleAccessToken(): Promise<string | null> {
   try {
     const refreshToken =
-      (import.meta as any).env?.VITE_YOUTUBE_REFRESH_TOKEN ||
-      "1//04EUIyzDUSRUsCgYIARAAGAQSNwF-L9Ir5XnQUPv7DlEP53XXSZcdPr2soYrt695pbfbaKBAJnLrMnn1hlevfCG5VaD4TjHv7_Dw";
+      (import.meta as any).env?.VITE_YOUTUBE_REFRESH_TOKEN || "";
     const clientId =
-      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_ID ||
-      "65166613028-i5bb5pai6ob6qjploqtr7r47m2bmha46.apps.googleusercontent.com";
+      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_ID || "";
     const clientSecret =
-      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_SECRET ||
-      "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";
+      (import.meta as any).env?.VITE_YOUTUBE_CLIENT_SECRET || "";
+
+    if (!refreshToken || !clientId || !clientSecret) {
+      return null;
+    }
 
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
@@ -638,6 +639,10 @@ export async function startYouTubeLiveStreaming(
  * Stops any ongoing YouTube live stream and releases all captured tracks.
  */
 export function stopYouTubeLiveStreaming(): void {
+  if (!activeSession && !activeRecorder && !activeDisplayStream) {
+    return;
+  }
+
   if (activeEmitSignal && activeClassId) {
     try {
       activeEmitSignal("stopRtmpStream", { classId: activeClassId });

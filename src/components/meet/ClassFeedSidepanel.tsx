@@ -14,11 +14,13 @@ import {
   Clock,
   Shield,
   Hand,
+  Mic,
   MicOff,
   LogOut,
   Video,
   VideoOff,
   CheckCircle2,
+  Check,
   Copy,
 } from "lucide-react";
 import { Button } from "../ui/button";
@@ -33,6 +35,9 @@ export interface ChatMsg {
   message: string;
   timestamp: string;
   isHost?: boolean;
+  status?: "sending" | "sent" | "failed";
+  clientMessageId?: string;
+  onRetry?: () => void;
 }
 
 export interface PollItem {
@@ -100,6 +105,9 @@ interface ClassFeedSidepanelProps {
   onForceMuteStudent: (userId: string, name: string) => void;
   onMuteAllStudents: () => void;
   onExpelStudent: (userId: string, name: string) => void;
+  unmuteRequests?: Array<{ userId: string; name: string }>;
+  onApproveMic?: (userId: string, name: string) => void;
+  onDenyMic?: (userId: string, name: string) => void;
 }
 
 export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
@@ -130,11 +138,16 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
   onForceMuteStudent,
   onMuteAllStudents,
   onExpelStudent,
+  unmuteRequests = [],
+  onApproveMic,
+  onDenyMic,
 }) => {
   // Chat Input State
   const [inputText, setInputText] = useState("");
   const [pinInputText, setPinInputText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
 
   // Poll Creator State
   const [showCreatePoll, setShowCreatePoll] = useState(false);
@@ -144,13 +157,25 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
   const [newCorrectOption, setNewCorrectOption] = useState<number | null>(null);
   const [newTimer, setNewTimer] = useState<number | null>(30);
   const [selectedVoteIndex, setSelectedVoteIndex] = useState<number | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
 
-  // Auto scroll chat to bottom
+  const handleScroll = () => {
+    if (messagesContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+      isNearBottomRef.current = scrollHeight - scrollTop - clientHeight < 120;
+    }
+  };
+
+  // Smart auto scroll chat to bottom (only if near bottom or sent by current user)
   useEffect(() => {
     if (activeTab === "chat") {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      const lastMsg = chatMessages[chatMessages.length - 1];
+      const isMyMsg = lastMsg && lastMsg.senderId === currentUserId;
+      if (isNearBottomRef.current || isMyMsg) {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
     }
-  }, [chatMessages, activeTab]);
+  }, [chatMessages, activeTab, currentUserId]);
 
   if (!isOpen) return null;
 
@@ -203,13 +228,13 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
     setNewOptions(["", ""]);
     setNewCorrectOption(null);
     setShowCreatePoll(false);
-    toast.success("Poll launched to class!");
   };
 
   const copyInviteLink = () => {
     const url = `${window.location.origin}/meet/${meetingCode}`;
     navigator.clipboard.writeText(url);
-    toast.success("Meeting link copied to clipboard!");
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   return (
@@ -337,7 +362,7 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
           )}
 
           {/* Message Stream */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
+          <div ref={messagesContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-3.5">
             {chatMessages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-xs text-center p-6">
                 <MessageSquare className="w-10 h-10 mb-2 opacity-30 text-zinc-400" />
@@ -361,6 +386,25 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
                         </span>
                       )}
                       <span className="text-[9px] text-zinc-500">{msg.timestamp}</span>
+                      {msg.status === "sending" && (
+                        <span className="text-[9px] text-amber-400/80 flex items-center gap-0.5" title="Sending...">
+                          <Clock className="w-2.5 h-2.5 animate-spin" />
+                        </span>
+                      )}
+                      {msg.status === "failed" && (
+                        <span className="text-[9px] text-red-400 flex items-center gap-1 font-bold">
+                          <span>Failed</span>
+                          {msg.onRetry && (
+                            <button
+                              onClick={msg.onRetry}
+                              className="underline hover:text-red-300 font-normal cursor-pointer"
+                              title="Retry sending"
+                            >
+                              Retry
+                            </button>
+                          )}
+                        </span>
+                      )}
                       {isHost && (
                         <button
                           onClick={() => onPinMessage(msg.message)}
@@ -379,7 +423,7 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
                           : msg.isHost
                           ? "bg-yellow-500/10 text-white border border-yellow-500/20 rounded-tl-none font-medium"
                           : "bg-zinc-800 text-zinc-100 rounded-tl-none"
-                      }`}
+                      } ${msg.status === "sending" ? "opacity-75" : ""}`}
                     >
                       <p>{msg.message}</p>
                     </div>
@@ -632,7 +676,6 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
                 <Button
                   onClick={() => {
                     onVotePoll(selectedVoteIndex);
-                    toast.success("Vote recorded!");
                   }}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl"
                 >
@@ -756,8 +799,8 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
             onClick={copyInviteLink}
             className="w-full flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold py-2 rounded-xl transition text-[#8ab4f8] cursor-pointer"
           >
-            <Copy className="w-3.5 h-3.5" />
-            <span>Copy Meeting Link</span>
+            {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            <span className={copiedLink ? "text-emerald-400" : ""}>{copiedLink ? "Link Copied!" : "Copy Meeting Link"}</span>
           </button>
 
           {/* Dynamic 2-Column Video Grid for all Users (Matching CRM) */}
@@ -770,12 +813,21 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
               const isMe = p.id === currentUserId;
               const isTutorRole = p.role === "host" || p.role === "tutor";
               const hasHandRaised = p.isHandRaised;
+              const pNorm = (p.id || "").toLowerCase().replace(/_/g, "-");
+              const pUserNorm = ((p as any).userId || "").toLowerCase().replace(/_/g, "-");
+              const match = unmuteRequests?.find((r) => {
+                const rNorm = (r.userId || "").toLowerCase().replace(/_/g, "-");
+                return r.userId === p.id || (p as any).userId === r.userId || rNorm === pNorm || (pUserNorm && rNorm === pUserNorm);
+              });
+              const hasMicRequested = Boolean(match);
 
               return (
                 <div
                   key={p.id}
                   className={`group flex flex-col p-1.5 rounded-xl border transition-all ${
-                    hasHandRaised
+                    hasMicRequested
+                      ? "bg-amber-500/15 border-amber-500/60 ring-2 ring-amber-500/40"
+                      : hasHandRaised
                       ? "bg-amber-500/10 border-amber-500/50 ring-2 ring-amber-500/30"
                       : isTutorRole
                       ? "bg-[#f59e0b]/10 border-[#f59e0b]/30"
@@ -792,6 +844,36 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
 
                   {/* 16:9 Video Tile Box */}
                   <div className="w-full aspect-video bg-[#0e0d0b] rounded-lg overflow-hidden border border-[#f3eee6]/10 relative">
+                    {/* Speaking Request badge in top-left */}
+                    {hasMicRequested && isHost && (
+                      <div className="absolute top-1 left-1 z-40 bg-amber-500 text-zinc-950 px-1.5 py-0.5 rounded-full text-[9px] font-bold shadow-lg flex items-center gap-1 border border-amber-300 animate-pulse">
+                        <Mic className="w-2.5 h-2.5" />
+                        <span>Wants to speak</span>
+                        {onApproveMic && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onApproveMic(match?.userId || p.id, p.name);
+                            }}
+                            className="bg-emerald-700 hover:bg-emerald-600 text-white text-[8px] px-1 py-0.5 rounded font-semibold cursor-pointer"
+                          >
+                            Allow
+                          </button>
+                        )}
+                        {onDenyMic && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDenyMic(match?.userId || p.id, p.name);
+                            }}
+                            className="bg-zinc-900 hover:bg-zinc-800 text-white text-[8px] px-1 py-0.5 rounded font-semibold cursor-pointer"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     {/* Bottom-left audio visualizer pill */}
                     <div className="absolute bottom-1.5 left-1.5 z-20 bg-zinc-950/80 backdrop-blur-md border border-white/10 px-1.5 py-0.5 rounded-full flex items-center shadow-md">
                       <GoogleMeetAudioVisualizer track={p.audioTrack} isMuted={p.isAudioMuted} />

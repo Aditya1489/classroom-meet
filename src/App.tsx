@@ -23,20 +23,55 @@ export default function App() {
     role: "tutor",
   });
 
+  const [isHostFromLanding, setIsHostFromLanding] = useState<boolean>(false);
+  const [initialRole, setInitialRole] = useState<"tutor" | "student">("tutor");
+
   // Check URL path on load (e.g. /meet/abc-defg-hij)
   useEffect(() => {
-    const path = window.location.pathname;
-    if (path.includes("/meet/")) {
-      const code = sanitizeRoomId(path.split("/meet/")[1]);
-      if (code) {
-        setActiveMeetingCode(code);
-        setCurrentView("lobby");
+    const checkPath = () => {
+      const path = window.location.pathname;
+      if (path.includes("/meet/")) {
+        const code = sanitizeRoomId(path.split("/meet/")[1]);
+        if (code) {
+          setActiveMeetingCode(code);
+          localStorage.setItem("mathsy_meet_redirect_url", `/meet/${code}`);
+          const wasHost = sessionStorage.getItem(`mathsy_host_${code}`) === "true";
+          setIsHostFromLanding(wasHost);
+          setInitialRole(wasHost ? "tutor" : "student");
+
+          // Keep user inside the meeting room on page reload
+          const activeSession = sessionStorage.getItem(`mathsy_active_meet_${code}`);
+          if (activeSession) {
+            try {
+              const parsedOptions = JSON.parse(activeSession);
+              setJoinOptions(parsedOptions);
+              setCurrentView("room");
+              return;
+            } catch (e) {
+              console.warn("Failed to parse saved meet session:", e);
+            }
+          }
+
+          setCurrentView("lobby");
+        }
       }
-    }
+    };
+
+    checkPath();
+    window.addEventListener("popstate", checkPath);
+    return () => window.removeEventListener("popstate", checkPath);
   }, []);
 
-  const handleStartMeeting = (code: string) => {
+  const handleStartMeeting = (code: string, role: "tutor" | "student" = "tutor") => {
     setActiveMeetingCode(code);
+    const isHost = role === "tutor";
+    setIsHostFromLanding(isHost);
+    setInitialRole(role);
+    if (isHost) {
+      sessionStorage.setItem(`mathsy_host_${code}`, "true");
+    } else {
+      sessionStorage.removeItem(`mathsy_host_${code}`);
+    }
     window.history.pushState({}, "", `/meet/${code}`);
     setCurrentView("lobby");
   };
@@ -49,10 +84,16 @@ export default function App() {
     role: "tutor" | "student";
   }) => {
     setJoinOptions(options);
+    if (activeMeetingCode) {
+      sessionStorage.setItem(`mathsy_active_meet_${activeMeetingCode}`, JSON.stringify(options));
+    }
     setCurrentView("room");
   };
 
   const handleLeaveMeeting = () => {
+    if (activeMeetingCode) {
+      sessionStorage.removeItem(`mathsy_active_meet_${activeMeetingCode}`);
+    }
     setCurrentView("left");
   };
 
@@ -61,14 +102,18 @@ export default function App() {
   };
 
   const handleReturnToHome = () => {
+    if (activeMeetingCode) {
+      sessionStorage.removeItem(`mathsy_active_meet_${activeMeetingCode}`);
+    }
     window.history.pushState({}, "", "/");
     setActiveMeetingCode("");
+    setIsHostFromLanding(false);
     setCurrentView("landing");
   };
 
   return (
     <div className="w-full min-h-screen bg-[#0e0d0b] text-[#f3eee6] selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
-      <Toaster position="top-right" richColors />
+      <Toaster position="bottom-left" toastOptions={{ duration: 3000 }} richColors closeButton />
 
       {currentView === "landing" && (
         <LandingView onStartMeeting={handleStartMeeting} />
@@ -77,6 +122,8 @@ export default function App() {
       {currentView === "lobby" && (
         <LobbyView
           meetingCode={activeMeetingCode}
+          isHostFromLanding={isHostFromLanding}
+          initialRole={initialRole}
           onJoinMeeting={handleJoinMeeting}
           onBackToHome={handleReturnToHome}
         />

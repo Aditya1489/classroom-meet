@@ -130,9 +130,9 @@ export const dbClient = {
   /**
    * Participants
    */
-  async recordParticipantJoin(participant: DbParticipant): Promise<void> {
+  async recordParticipantJoin(participant: DbParticipant): Promise<{ participant?: DbParticipant; isHost?: boolean; sessionId?: string; tutorId?: string } | null> {
     try {
-      await fetch(`${API_BASE}/rooms/${encodeURIComponent(participant.room_code)}/participants`, {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(participant.room_code)}/participants`, {
         method: "POST",
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -141,8 +141,13 @@ export const dbClient = {
           role: participant.role,
         }),
       });
+      if (res.ok) {
+        return await res.json();
+      }
+      return null;
     } catch (err) {
       console.warn("[dbClient] Participant join error:", err);
+      return null;
     }
   },
 
@@ -160,39 +165,117 @@ export const dbClient = {
     }
   },
 
-  /**
-   * Chat Messages
-   */
-  async saveChatMessage(msg: DbChatMessage): Promise<void> {
+  async recordParticipantLeave(roomCode: string, userId?: string, displayName?: string): Promise<void> {
     try {
-      await fetch(`${API_BASE}/rooms/${encodeURIComponent(msg.room_code)}/chat`, {
+      await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/leave`, {
         method: "POST",
         headers: getAuthHeaders(),
         body: JSON.stringify({
-          sender_id: msg.sender_id,
-          sender_name: msg.sender_name,
-          sender_role: msg.sender_role,
-          content: msg.content,
-          timestamp: msg.timestamp || Date.now(),
+          user_id: userId,
+          display_name: displayName,
         }),
       });
     } catch (err) {
-      console.warn("[dbClient] Error saving chat message to PostgreSQL:", err);
+      console.warn("[dbClient] Error recording participant leave:", err);
     }
   },
 
-  async getChatHistory(roomCode: string, limit = 100): Promise<DbChatMessage[]> {
+  /**
+   * Temporary In-Class Chat Messages (MongoDB)
+   */
+  async saveChatMessage(
+    roomCode: string,
+    text: string,
+    clientMessageId?: string
+  ): Promise<{ success: boolean; message?: any; error?: string }> {
     try {
-      const res = await fetch(
-        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat?limit=${limit}`,
-        { headers: getAuthHeaders() }
-      );
-      if (!res.ok) return [];
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          text,
+          clientMessageId,
+        }),
+      });
+
       const data = await res.json();
-      return data?.messages || [];
+      if (!res.ok) {
+        return { success: false, error: data?.error || "Failed to send message" };
+      }
+      return { success: true, message: data.message };
+    } catch (err: any) {
+      console.warn("[dbClient] Error saving chat message:", err);
+      return { success: false, error: "Network error saving message" };
+    }
+  },
+
+  async getChatHistory(
+    roomCode: string
+  ): Promise<{ messages: any[]; isChatLocked: boolean; pinnedMessage: any | null; sessionId?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        return { messages: [], isChatLocked: false, pinnedMessage: null };
+      }
+      const data = await res.json();
+      return {
+        messages: data?.messages || [],
+        isChatLocked: Boolean(data?.isChatLocked),
+        pinnedMessage: data?.pinnedMessage || null,
+        sessionId: data?.sessionId,
+      };
     } catch (err) {
-      console.warn("[dbClient] Error fetching chat history from PostgreSQL:", err);
-      return [];
+      console.warn("[dbClient] Error fetching chat history:", err);
+      return { messages: [], isChatLocked: false, pinnedMessage: null };
+    }
+  },
+
+  async setChatLock(roomCode: string, locked: boolean): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat/lock`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ locked }),
+      });
+      return res.ok;
+    } catch (err) {
+      console.warn("[dbClient] Error toggling chat lock:", err);
+      return false;
+    }
+  },
+
+  async setPinnedMessage(roomCode: string, text: string | null): Promise<any> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat/pin`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data?.pinnedMessage || null;
+    } catch (err) {
+      console.warn("[dbClient] Error updating pinned message:", err);
+      return null;
+    }
+  },
+
+  async endMeeting(roomCode: string): Promise<{ success: boolean; deletedCount?: number; error?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/end`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data?.error || "Failed to end meeting" };
+      }
+      return { success: true, deletedCount: data?.deletedCount };
+    } catch (err: any) {
+      console.warn("[dbClient] Error ending meeting:", err);
+      return { success: false, error: "Network error ending meeting" };
     }
   },
 
@@ -208,6 +291,36 @@ export const dbClient = {
       });
     } catch (err) {
       console.warn("[dbClient] Error persisting whiteboard to PostgreSQL:", err);
+    }
+  },
+
+  async setWhiteboardState(roomCode: string, isOpen: boolean): Promise<void> {
+    try {
+      await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard/state`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ isOpen }),
+      });
+    } catch (err) {
+      console.warn("[dbClient] Error persisting whiteboard view state:", err);
+    }
+  },
+
+  async getWhiteboardState(roomCode: string): Promise<{ snapshot: any | null; isOpen: boolean }> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard`,
+        { headers: getAuthHeaders() }
+      );
+      if (!res.ok) return { snapshot: null, isOpen: false };
+      const data = await res.json();
+      return {
+        snapshot: data?.snapshot || null,
+        isOpen: Boolean(data?.isOpen),
+      };
+    } catch (err) {
+      console.warn("[dbClient] Error loading whiteboard state:", err);
+      return { snapshot: null, isOpen: false };
     }
   },
 

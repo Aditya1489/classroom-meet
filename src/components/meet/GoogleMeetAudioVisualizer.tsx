@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { VolumeX } from "lucide-react";
+import { MicOff } from "lucide-react";
 
 interface GoogleMeetAudioVisualizerProps {
   track?: MediaStreamTrack | null;
@@ -12,8 +12,10 @@ export const GoogleMeetAudioVisualizer: React.FC<GoogleMeetAudioVisualizerProps>
 }) => {
   const [volume, setVolume] = useState(0);
 
+  const isEffectivelyMuted = isMuted || !track || track.readyState !== "live" || !track.enabled;
+
   useEffect(() => {
-    if (!track || track.readyState !== "live" || isMuted) {
+    if (isEffectivelyMuted) {
       setVolume(0);
       return;
     }
@@ -71,12 +73,15 @@ export const GoogleMeetAudioVisualizer: React.FC<GoogleMeetAudioVisualizerProps>
         } catch {}
       }
     };
-  }, [track, isMuted]);
+  }, [track, isMuted, isEffectivelyMuted]);
 
-  if (!track || track.readyState !== "live" || isMuted) {
+  if (isEffectivelyMuted) {
     return (
-      <span title="Microphone Muted" className="inline-flex items-center">
-        <VolumeX className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+      <span
+        title="Microphone Muted"
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500/20 text-red-500 shrink-0"
+      >
+        <MicOff className="w-2.5 h-2.5" />
       </span>
     );
   }
