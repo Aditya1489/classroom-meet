@@ -11,7 +11,7 @@ Built as an independent SaaS product that can be sold directly to educators, coa
 From your terminal:
 
 ```bash
-cd /Users/adityachavhan/Documents/Mathsy/mathsy-meet
+cd mathsy-meet
 
 # Start local development server (runs on http://localhost:5174)
 npm run dev
@@ -67,5 +67,5 @@ npm run build
 ---
 
 ## 🔒 CRM Protection Guarantee
-This standalone repository is created entirely in `/Users/adityachavhan/Documents/Mathsy/mathsy-meet`.
+This standalone repository is created entirely as an independent application.
 Your existing Mathsy CRM (`mathsycrm-60886267`) remains **100% untouched, unharmed, and functional**.

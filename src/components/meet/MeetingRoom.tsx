@@ -40,6 +40,7 @@ import {
   Tablet,
   Disc,
   LayoutGrid,
+  AlertTriangle,
   Radio,
   Sparkles,
   Shield,
@@ -59,6 +60,8 @@ import { YouTubeConnectModal } from "../youtube/YouTubeConnectModal";
 import {
   startYouTubeLiveStreaming,
   stopYouTubeLiveStreaming,
+  updateYouTubeLiveAudioSources,
+  StreamStats,
 } from "../../services/youtubeService";
 import { toast } from "sonner";
 
@@ -102,6 +105,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Host status is authorized server-side based on room ownership (live_classes.tutor_id === user.id)
   // Display names containing "tutor" or "host" confer ZERO privileges.
+  const [grantedRole, setGrantedRole] = useState<"tutor" | "student">(
+    initialOptions.role === "tutor" ? "tutor" : "student"
+  );
   const [isHost, setIsHost] = useState<boolean>(() => {
     const fromSession = typeof window !== "undefined" && window.sessionStorage.getItem(`mathsy_host_${meetingCode}`) === "true";
     return initialOptions.role === "tutor" || profile?.role === "tutor" || fromSession;
@@ -137,6 +143,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [connectionState, setConnectionState] = useState<
     "connecting" | "connected" | "disconnected" | "failed"
   >("connecting");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [isDemo, setIsDemo] = useState<boolean>(meetingCode.startsWith("demo-"));
+  const [demoRemainingSec, setDemoRemainingSec] = useState<number | null>(meetingCode.startsWith("demo-") ? 1800 : null);
+  const [isDemoEnded, setIsDemoEnded] = useState<boolean>(false);
 
   // Media States (students join with microphone muted by default)
   const [isMicEnabled, setIsMicEnabled] = useState(Boolean(isHost && !initialOptions.micMuted));
@@ -192,6 +202,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     }
   };
 
+  // Pen Device Mode (?pen=1 or passed in options)
+  const isPenDevice = window.location.search.includes("pen=1") || Boolean((initialOptions as any)?.isPenDevice);
+
+  // Expelled state
+  const [isExpelled, setIsExpelled] = useState(false);
+  const [expelledReason, setExpelledReason] = useState("");
+
+  // Camera-off approval state
+  const [pendingCameraOffRequest, setPendingCameraOffRequest] = useState<{ studentId: string; studentName: string; reason?: string } | null>(null);
+
+  // Whiteboard sync state
+  const [initialWhiteboardSnapshot, setInitialWhiteboardSnapshot] = useState<any>(null);
+  const [remoteWhiteboardSnapshot, setRemoteWhiteboardSnapshot] = useState<any>(null);
+  const [letStudentsDraw, setLetStudentsDraw] = useState(false);
+
   // Tablet Companion Pairing Code
   const [tabletCode] = useState(() => generateTabletCode());
   const [showTabletModal, setShowTabletModal] = useState(false);
@@ -234,9 +259,36 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // YouTube Live State
   const [isYouTubeLive, setIsYouTubeLive] = useState(false);
+  const [isLiveConnecting, setIsLiveConnecting] = useState(false);
+  const [streamStats, setStreamStats] = useState<StreamStats | null>(null);
   const [youtubeLiveSeconds, setYoutubeLiveSeconds] = useState(0);
   const [youtubeLiveUrl, setYoutubeLiveUrl] = useState("");
   const [showYouTubeConnectModal, setShowYouTubeConnectModal] = useState(false);
+
+  // B6: Dynamically update audio mix when local mic or remote tracks change while streaming
+  useEffect(() => {
+    if (isYouTubeLive) {
+      updateYouTubeLiveAudioSources(
+        localAudioTrack,
+        remoteParticipants.map((p) => p.audioTrack).filter(Boolean) as MediaStreamTrack[]
+      );
+    }
+  }, [isYouTubeLive, localAudioTrack, remoteParticipants]);
+
+  // B7: Clean up live stream on pagehide / beforeunload / unmount
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (isYouTubeLive) {
+        stopYouTubeLiveStreaming(false);
+      }
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+    };
+  }, [isYouTubeLive]);
 
   useEffect(() => {
     const handleUrlUpdate = (e: any) => {
@@ -275,6 +327,23 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       if (interval) clearInterval(interval);
     };
   }, [isYouTubeLive]);
+
+
+  // Demo Room Countdown Timer
+  useEffect(() => {
+    if (!isDemo || demoRemainingSec === null) return;
+    const interval = setInterval(() => {
+      setDemoRemainingSec((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          setIsDemoEnded(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDemo, demoRemainingSec]);
 
   // Post Class Workflow Modal
   const [showPostClassModal, setShowPostClassModal] = useState(false);
@@ -321,9 +390,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     };
 
-    engine.onConnectionStateChange = (state) => {
+    engine.onConnectionStateChange = (state, errMsg?: string) => {
       setConnectionState(state);
       if (state === "connected") {
+        setConnectionError(null);
+        toast.success(`Joined room: ${meetingCode}`);
         loadChatHistory();
         dbClient.getWhiteboardState(meetingCode).then((wbState) => {
           if (wbState?.isOpen && !isHostRef.current) {
@@ -331,7 +402,44 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             setLayoutMode("whiteboard");
           }
         });
+      } else if (state === "failed") {
+        const msg = errMsg || "Could not connect to the classroom server.";
+        setConnectionError(msg);
+        toast.error("Connection Failed", { description: msg });
       }
+    };
+
+    engine.onRoleAssigned = (serverRole, isOwner, roomData) => {
+      setGrantedRole(serverRole);
+      if (roomData?.isDemo) {
+        setIsDemo(true);
+        if (typeof roomData.remainingSec === "number") {
+          setDemoRemainingSec(roomData.remainingSec);
+        }
+      }
+      if (roomData?.whiteboardSnapshot) {
+        setInitialWhiteboardSnapshot(roomData.whiteboardSnapshot);
+      }
+      if (typeof roomData?.letStudentsDraw === "boolean") {
+        setLetStudentsDraw(roomData.letStudentsDraw);
+      }
+      if (roomData?.pinnedMessage) {
+        setPinnedMessage(roomData.pinnedMessage);
+      }
+      if (typeof roomData?.isChatLocked === "boolean") {
+        setIsChatLocked(roomData.isChatLocked);
+      }
+      if (roomData?.activePoll) {
+        setActivePoll(roomData.activePoll);
+      }
+      if (serverRole === "tutor" || isPenDevice) {
+        setUnmuteRequestStatus("approved");
+        setShowCameraGateModal(false);
+      }
+    };
+
+    engine.onDemoRoomEnded = () => {
+      setIsDemoEnded(true);
     };
 
     engine.onParticipantsChange = (updated) => {
@@ -832,7 +940,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     performSend(clientMessageId, text);
   };
 
-  // Launch Poll
+  // Launch Poll (Broadcasts to everyone via socket)
   const handleLaunchPoll = (pollData: {
     question: string;
     options: string[];
@@ -857,44 +965,47 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     setHasVotedPoll(false);
     setIsSideDrawerOpen(true);
     setActiveSideTab("polls");
+    engineRef.current?.emitSignal("poll:update", newPoll);
     toast.success("Poll launched to all students!", { id: "poll-launch" });
   };
 
-  // Vote Poll
+  // Vote Poll (Broadcasts vote & updates leaderboard)
   const handleVotePoll = (optionIndex: number) => {
     if (!activePoll || hasVotedPoll) return;
 
-    setActivePoll((prev) => {
-      if (!prev) return null;
-      const currentVotes = { ...prev.votes };
-      currentVotes[optionIndex] = (currentVotes[optionIndex] || 0) + 1;
-      const isCorrect = prev.correctOptionIndex === optionIndex;
+    const currentVotes = { ...activePoll.votes };
+    currentVotes[optionIndex] = (currentVotes[optionIndex] || 0) + 1;
+    const isCorrect = activePoll.correctOptionIndex === optionIndex;
 
-      return {
-        ...prev,
-        votes: currentVotes,
-        totalVotes: prev.totalVotes + 1,
-        voters: [
-          ...prev.voters,
-          {
-            userId: myUserId,
-            userName: myName,
-            optionIndex,
-            timestamp: Date.now(),
-            isCorrect,
-          },
-        ],
-      };
-    });
+    const updatedPoll: PollItem = {
+      ...activePoll,
+      votes: currentVotes,
+      totalVotes: activePoll.totalVotes + 1,
+      voters: [
+        ...activePoll.voters,
+        {
+          userId: myUserId,
+          userName: myName,
+          optionIndex,
+          timestamp: Date.now(),
+          isCorrect,
+        },
+      ],
+    };
 
+    setActivePoll(updatedPoll);
     setHasVotedPoll(true);
+    engineRef.current?.emitSignal("poll:vote", updatedPoll);
+    toast.success("Vote recorded!");
   };
 
-  // End Poll
+  // End Poll (Reveals answers and final scores to all participants)
   const handleEndPoll = () => {
     if (!activePoll) return;
-    setActivePoll((prev) => (prev ? { ...prev, isActive: false } : null));
-    toast.info("Poll ended. Leaderboard revealed!");
+    const endedPoll = { ...activePoll, isActive: false };
+    setActivePoll(endedPoll);
+    engineRef.current?.emitSignal("poll:update", endedPoll);
+    toast.info("Poll ended. Leaderboard revealed to everyone!");
   };
 
   // Approve speaking request (Host)
@@ -920,63 +1031,126 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // Mute All Students (Host)
   const handleMuteAll = () => {
     engineRef.current?.forceMuteAll();
+    toast.success("Muted all students");
   };
 
-  // Lower All Hands (Host)
+  // Lower All Hands (Tutor Only)
   const handleLowerAllHands = () => {
+    engineRef.current?.lowerAllHands();
     setIsHandRaised(false);
     toast.success("Lowered all raised hands");
   };
 
-  // Force Mute Single Student (Host)
-  const handleForceMuteStudent = (studentId: string, studentName: string) => {
-    engineRef.current?.forceMuteParticipant(studentId);
+  // Lower One Student Hand (Tutor Only)
+  const handleLowerStudentHand = (studentId: string) => {
+    engineRef.current?.lowerStudentHand(studentId);
+    if (studentId === myUserId) setIsHandRaised(false);
   };
 
-  // Expel Student (Host)
+  // Force Mute Single Student (Tutor Only)
+  const handleForceMuteStudent = (studentId: string, studentName: string) => {
+    engineRef.current?.forceMuteParticipant?.(studentId);
+    toast.success(`Muted ${studentName}`);
+  };
+
+  // Expel Student & Block Rejoin (Tutor Only)
   const handleExpelStudent = (studentId: string, studentName: string) => {
-    if (window.confirm(`Are you sure you want to remove ${studentName} from the class?`)) {
+    if (window.confirm(`Are you sure you want to remove ${studentName} from the class and block rejoin?`)) {
+      engineRef.current?.expelStudent(studentId);
       setRemoteParticipants((prev) => prev.filter((p) => p.id !== studentId));
-      toast.success(`${studentName} removed from session`);
+      toast.success(`${studentName} removed from session and banned`);
     }
   };
 
-  // YouTube Live Handlers
-  const handleStartYouTubeLive = async (mode: "mathsy" | "personal" = "personal") => {
+  // Chat Lock & Pin (Tutor Only)
+  const handleToggleChatLock = () => {
+    const nextLocked = !isChatLocked;
+    setIsChatLocked(nextLocked);
+    engineRef.current?.setChatLock(nextLocked);
+    toast.info(nextLocked ? "Chat locked for students" : "Chat unlocked");
+  };
+
+  const handlePinMessage = (text: string) => {
+    const pin = { text, senderName: myName };
+    setPinnedMessage(pin);
+    engineRef.current?.setChatPin(pin);
+    toast.success("Message pinned at top of chat");
+  };
+
+  const handleUnpinMessage = () => {
+    setPinnedMessage(null);
+    engineRef.current?.setChatPin(null);
+  };
+
+  // Camera-off entry requests
+  const handleRequestCameraOff = () => {
+    setJoinPendingApproval(true);
+    engineRef.current?.requestCameraOff("Student requested camera-off entry");
+    toast.info("Camera-off request sent to tutor. Waiting for approval...");
+  };
+
+  const handleRespondCameraOff = (studentId: string, approved: boolean) => {
+    engineRef.current?.respondCameraOff(studentId, approved);
+    setPendingCameraOffRequest(null);
+    toast.success(approved ? "Approved camera-off request" : "Declined camera-off request");
+  };
+
+  // YouTube Live Handlers (B3, B4, B7)
+  const handleStartYouTubeLive = async () => {
     try {
-      const session = await startYouTubeLiveStreaming({
+      setIsLiveConnecting(true);
+      const authSessionToken = session?.access_token || engineRef.current?.getAuthToken() || "";
+      const liveStreamSession = await startYouTubeLiveStreaming({
         meetingCode,
-        title: `${initialOptions.displayName || "Tutor"}'s Live Class - ${meetingCode}`,
-        description: `Live Interactive Classroom on Mathsy Meet | Room ${meetingCode}`,
-        broadcastMode: mode,
+        title: `${myName}'s Mathsy Live Class - ${meetingCode}`,
+        token: authSessionToken,
         localAudioTrack,
         remoteAudioTracks: remoteParticipants
           .map((p) => p.audioTrack)
           .filter(Boolean) as MediaStreamTrack[],
-        emitSignal: (event, payload) => engineRef.current?.emitSignal(event, payload),
+        emitSignal: (event, payload, ack) => engineRef.current?.emitSignal(event, payload, ack),
         onSignal: (event, cb) => engineRef.current?.onSignal(event, cb),
         onStatusChange: (status) => {
-          if (status === "live") {
+          if (status === "connecting") {
+            setIsLiveConnecting(true);
+          } else if (status === "live") {
+            setIsLiveConnecting(false);
             setIsYouTubeLive(true);
-          } else if (status === "ended") {
+          } else if (status === "ended" || status === "idle") {
+            setIsLiveConnecting(false);
             setIsYouTubeLive(false);
+            setStreamStats(null);
+          } else if (status === "error") {
+            setIsLiveConnecting(false);
+            setIsYouTubeLive(false);
+            setStreamStats(null);
           }
+        },
+        onStatsUpdate: (stats) => {
+          setStreamStats(stats);
+        },
+        onError: () => {
+          setIsLiveConnecting(false);
+          setIsYouTubeLive(false);
+          setStreamStats(null);
         },
       });
 
-      if (session) {
-        setIsYouTubeLive(true);
-        setYoutubeLiveUrl(session.youtubeUrl);
+      if (liveStreamSession) {
+        setYoutubeLiveUrl(liveStreamSession.youtubeUrl);
       }
     } catch (err: any) {
       console.error("[YouTubeLive] Failed to start:", err);
+      setIsLiveConnecting(false);
       toast.error("Failed to start YouTube Live Stream");
     }
   };
 
-  const handleStopYouTubeLive = () => {
-    stopYouTubeLiveStreaming();
+  const handleStopYouTubeLive = async () => {
+    await stopYouTubeLiveStreaming(true);
     setIsYouTubeLive(false);
+    setIsLiveConnecting(false);
+    setStreamStats(null);
   };
 
   useEffect(() => {
@@ -1097,6 +1271,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             }}
             title={`Status: ${connectionState}`}
           />
+
+          {/* Demo room countdown badge */}
+          {isDemo && demoRemainingSec !== null && (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold animate-pulse">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              Demo room — ends in {Math.floor(demoRemainingSec / 60).toString().padStart(2, "0")}:{(demoRemainingSec % 60).toString().padStart(2, "0")}
+            </div>
+          )}
         </div>
 
         {/* Center: Layout Selector */}
@@ -1205,46 +1387,50 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </Button>
           )}
 
-          {/* Recording & Live Stream trigger */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setIsRecordingModalOpen(true)}
-            className={`h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
-              isYouTubeLive
-                ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
-                : isRecordingActive
-                ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
-                : "bg-zinc-900 border-white/10 text-zinc-300 hover:bg-zinc-800"
-            }`}
-          >
-            {isYouTubeLive ? (
-              <>
-                <Radio className="w-3.5 h-3.5 text-white animate-spin" />
-                <span className="hidden sm:inline">LIVE {formatDuration(youtubeLiveSeconds)}</span>
-              </>
-            ) : (
-              <>
-                <Disc className={`w-3.5 h-3.5 ${isRecordingActive ? "text-red-400" : "text-zinc-400"}`} />
-                <span className="hidden sm:inline">
-                  {isRecordingActive ? `REC ${formatDuration(recordingSeconds)}` : "Record / Live"}
-                </span>
-              </>
-            )}
-          </Button>
+          {/* Recording & Live Stream trigger (Tutors only - B9) */}
+          {isHost && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsRecordingModalOpen(true)}
+                className={`h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
+                  isYouTubeLive
+                    ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
+                    : isRecordingActive
+                    ? "bg-red-500/20 text-red-400 border-red-500/30 animate-pulse"
+                    : "bg-zinc-900 border-white/10 text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                {isYouTubeLive ? (
+                  <>
+                    <Radio className="w-3.5 h-3.5 text-white animate-spin" />
+                    <span className="hidden sm:inline">LIVE {formatDuration(youtubeLiveSeconds)}</span>
+                  </>
+                ) : (
+                  <>
+                    <Disc className={`w-3.5 h-3.5 ${isRecordingActive ? "text-red-400" : "text-zinc-400"}`} />
+                    <span className="hidden sm:inline">
+                      {isRecordingActive ? `REC ${formatDuration(recordingSeconds)}` : "Record / Live"}
+                    </span>
+                  </>
+                )}
+              </Button>
 
-          {/* Active Live Watch Link */}
-          {isYouTubeLive && youtubeLiveUrl && (
-            <a
-              href={youtubeLiveUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="h-8 px-2.5 rounded-xl bg-red-600/20 border border-red-500/40 text-red-300 hover:text-white text-xs font-semibold flex items-center gap-1 transition"
-              title="Open YouTube Live Stream in new tab"
-            >
-              <span className="hidden sm:inline">Watch</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+              {/* Active Live Watch Link */}
+              {isYouTubeLive && youtubeLiveUrl && (
+                <a
+                  href={youtubeLiveUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-8 px-2.5 rounded-xl bg-red-600/20 border border-red-500/40 text-red-300 hover:text-white text-xs font-semibold flex items-center gap-1 transition"
+                  title="Open YouTube Live Stream in new tab"
+                >
+                  <span className="hidden sm:inline">Watch</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )}
+            </>
           )}
 
           {/* Fullscreen toggle */}
@@ -1330,10 +1516,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     dbClient.setWhiteboardState(meetingCode, false);
                   }
                 }}
-                isHost={isHost}
+                isHost={isHost || isPenDevice}
                 roomCode={meetingCode}
                 engine={engineRef.current}
                 myUserId={myUserId}
+                initialSnapshot={initialWhiteboardSnapshot}
+                remoteSnapshot={remoteWhiteboardSnapshot}
+                letStudentsDraw={letStudentsDraw}
+                onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
+                onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
               />
               {/* Floating PIP Host Camera */}
               {isCamEnabled && localVideoTrack && (
@@ -1381,7 +1572,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       }}
                       isPinned={true}
                       onTogglePin={() => setPinnedId(null)}
-                      onLowerHand={() => isHost && handleLowerAllHands()}
+                      onLowerHand={() => isHost && handleLowerStudentHand(featured.id)}
                       onForceMute={() => handleForceMuteStudent(featured.id, featured.name)}
                       onExpel={() => handleExpelStudent(featured.id, featured.name)}
                       className="w-full h-full"
@@ -1420,7 +1611,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         }}
                         isPinned={false}
                         onTogglePin={() => setPinnedId(p.id)}
-                        onLowerHand={() => isHost && handleLowerAllHands()}
+                        onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
                         onForceMute={() => handleForceMuteStudent(p.id, p.name)}
                         onExpel={() => handleExpelStudent(p.id, p.name)}
                         className="w-48 md:w-full aspect-video shrink-0"
@@ -1469,7 +1660,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   }}
                   isPinned={p.id === pinnedId}
                   onTogglePin={() => setPinnedId(pinnedId === p.id ? null : p.id)}
-                  onLowerHand={() => isHost && handleLowerAllHands()}
+                  onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
                   onForceMute={() => handleForceMuteStudent(p.id, p.name)}
                   onExpel={() => handleExpelStudent(p.id, p.name)}
                   className="w-full h-full"
@@ -1547,9 +1738,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onDismissLeaderboard={() => setActivePoll(null)}
           hasVoted={hasVotedPoll}
           participants={allParticipants}
-          onLowerHand={(uid) => {
-            if (uid === myUserId) setIsHandRaised(false);
-          }}
+          onLowerHand={(uid) => isHost && handleLowerStudentHand(uid)}
           onLowerAllHands={handleLowerAllHands}
           onForceMuteStudent={handleForceMuteStudent}
           onMuteAllStudents={handleMuteAll}
@@ -1750,6 +1939,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         open={showTabletModal}
         onOpenChange={setShowTabletModal}
         tabletCode={tabletCode}
+        classId={meetingCode}
       />
 
       {/* Pre-Join Mandatory Camera Gate Modal */}
@@ -1761,15 +1951,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           handleCameraToggle();
           setShowCameraGateModal(false);
         }}
-        onRequestCameraOff={() => {
-          setJoinPendingApproval(true);
-          setTimeout(() => {
-            setJoinPendingApproval(false);
-            setCameraOffAllowed(true);
-            setShowCameraGateModal(false);
-            toast.success("Host approved camera-off exemption!", { id: "cam-exemption" });
-          }, 3000);
-        }}
+        onRequestCameraOff={handleRequestCameraOff}
         onCancel={onLeaveMeeting}
       />
 
@@ -1790,6 +1972,54 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onLeaveMeeting();
         }}
       />
+
+      {/* Tutor Camera-Off Request Prompt */}
+      {pendingCameraOffRequest && isHost && (
+        <div className="fixed bottom-24 right-6 z-50 bg-[#1a1814] border border-[#f59e0b]/40 rounded-2xl p-4 shadow-2xl max-w-sm animate-in slide-in-from-bottom">
+          <div className="flex items-center gap-2 mb-2 text-[#f59e0b] font-semibold text-sm">
+            <VideoOff className="w-4 h-4" /> Camera-Off Request
+          </div>
+          <p className="text-xs text-zinc-300 mb-3">
+            <strong className="text-white">{pendingCameraOffRequest.studentName || "A student"}</strong> is requesting to join class with camera turned OFF.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              onClick={() => handleRespondCameraOff(pendingCameraOffRequest.studentId, true)}
+              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-xl"
+            >
+              Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleRespondCameraOff(pendingCameraOffRequest.studentId, false)}
+              className="flex-1 border-white/20 bg-white/5 hover:bg-white/10 text-white text-xs rounded-xl"
+            >
+              Decline
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Expelled Overlay (Blocks Rejoin) */}
+      {isExpelled && (
+        <div className="fixed inset-0 z-[100000] bg-black/95 flex flex-col items-center justify-center p-6 text-center">
+          <div className="w-16 h-16 rounded-3xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-500 mb-4">
+            <LogOut className="w-8 h-8" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Removed from Classroom</h2>
+          <p className="text-sm text-gray-400 max-w-md mb-6">
+            {expelledReason || "You were removed from this room by the tutor and cannot rejoin this session."}
+          </p>
+          <Button
+            onClick={onLeaveMeeting}
+            className="bg-white/10 hover:bg-white/20 text-white rounded-xl px-6 py-2.5 text-xs font-semibold"
+          >
+            Exit to Home
+          </Button>
+        </div>
+      )}
 
       {/* Post-Class Workflow Modal (Host) */}
       <PostClassModal
@@ -1828,8 +2058,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           toast.info("Recording saved");
         }}
         isLiveStreaming={isYouTubeLive}
+        isLiveConnecting={isLiveConnecting}
         liveStreamSeconds={youtubeLiveSeconds}
         liveStreamUrl={youtubeLiveUrl}
+        streamStats={streamStats}
+        onSessionWatchUrlChange={(url) => setYoutubeLiveUrl(url)}
         onStartYouTubeLive={handleStartYouTubeLive}
         onStopYouTubeLive={handleStopYouTubeLive}
       />

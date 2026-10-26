@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import { useAuth } from "../../auth/authContext";
 import { AuthRoleModal } from "../auth/AuthRoleModal";
 import { dbClient } from "../../lib/dbClient";
+import { getRoomRole } from "../../services/roomService";
 
 interface LobbyViewProps {
   meetingCode: string;
@@ -42,6 +43,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const {
     user,
     profile,
+    session,
     loading,
     isAuthenticated,
     joinAsGuest,
@@ -55,35 +57,23 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const [copiedLink, setCopiedLink] = useState(false);
   const [roomChecking, setRoomChecking] = useState(true);
   const [roomExists, setRoomExists] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (!meetingCode) {
-      setRoomExists(false);
-      setRoomChecking(false);
-      return;
-    }
-    dbClient.getRoom(meetingCode).then((r) => {
-      setRoomExists(Boolean(r && r.is_active));
-      setRoomChecking(false);
-    }).catch(() => {
-      setRoomChecking(false);
-    });
-  }, [meetingCode]);
+  const [isOwner, setIsOwner] = useState(false);
+  const isDemoRoom = meetingCode.startsWith("demo-") || Boolean(sessionStorage.getItem(`demo_token_${meetingCode}`));
 
   const isStudentAccount = profile?.role === "student";
   const isTutorOnly = !isStudentAccount && (isHostFromLanding || profile?.role === "tutor");
   const [selectedRole, setSelectedRole] = useState<"tutor" | "student">(
-    isStudentAccount ? "student" : isTutorOnly ? "tutor" : "student"
+    isStudentAccount ? "student" : isTutorOnly ? "tutor" : initialRole || "student"
   );
   const [showSignUpModal, setShowSignUpModal] = useState(false);
   const [showRoleSwitchModal, setShowRoleSwitchModal] = useState(false);
 
-  // Auto-prompt sign up / sign in modal when entering lobby unauthenticated
+  // Auto-prompt sign up / sign in modal when entering lobby unauthenticated (unless demo room)
   useEffect(() => {
-    if (!loading && !isAuthenticated) {
+    if (!loading && !isAuthenticated && !isDemoRoom) {
       setShowSignUpModal(true);
     }
-  }, [loading, isAuthenticated]);
+  }, [loading, isAuthenticated, isDemoRoom]);
 
   useEffect(() => {
     if (isStudentAccount) {
@@ -98,6 +88,29 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
       }
     }
   }, [isStudentAccount, isTutorOnly, profile?.role]);
+
+  // Check room existence with backend
+  useEffect(() => {
+    if (!meetingCode) {
+      setRoomExists(false);
+      setRoomChecking(false);
+      return;
+    }
+    if (isDemoRoom) {
+      setRoomExists(true);
+      setRoomChecking(false);
+      return;
+    }
+    dbClient.getRoom(meetingCode).then((r) => {
+      setRoomExists(Boolean(r && r.is_active));
+      setRoomChecking(false);
+      if (r && profile?.id && r.tutor_id === profile.id) {
+        setIsOwner(true);
+      }
+    }).catch(() => {
+      setRoomChecking(false);
+    });
+  }, [meetingCode, isDemoRoom, profile?.id]);
 
   // Students join muted by default to honor speaking permission policy
   const [isMicMuted, setIsMicMuted] = useState(() => {
@@ -193,7 +206,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   };
 
   const handleJoinWithRole = (role: "tutor" | "student", present = false) => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated && !isDemoRoom) {
       toast.error("Please sign in or create an account with Google to enter this class.");
       localStorage.setItem("mathsy_meet_redirect_url", `/meet/${meetingCode}`);
       setShowSignUpModal(true);
@@ -202,6 +215,10 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
     const fallbackPrefix = role === "tutor" ? "Tutor" : "Student";
     const finalName = displayName.trim() || profile?.name || `${fallbackPrefix} ${Math.floor(100 + Math.random() * 900)}`;
+
+    if (!profile && isDemoRoom) {
+      joinAsGuest(finalName);
+    }
 
     // Stop lobby preview tracks before transferring to in-call engine
     if (stream) {
@@ -278,7 +295,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             <div className="flex items-center gap-2">
               <button
                 onClick={() => signInWithGoogle()}
-                title="Sign in directly (no role prompt for existing users)"
+                title="Sign in directly"
                 className="flex items-center gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#f3eee6] transition cursor-pointer"
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
@@ -352,12 +369,12 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
               {selectedRole === "tutor" ? (
                 <>
                   <GraduationCap className="w-3.5 h-3.5 text-[#f59e0b]" />
-                  <span className="text-[#f59e0b] font-semibold text-xs font-mono">Tutor Role</span>
+                  <span className="text-[#f59e0b] font-semibold text-xs font-mono">Tutor (Host)</span>
                 </>
               ) : (
                 <>
                   <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400 font-semibold text-xs font-mono">Student Role</span>
+                  <span className="text-emerald-400 font-semibold text-xs font-mono">Student</span>
                 </>
               )}
             </div>
@@ -394,7 +411,9 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
         {/* Right: Join Action Panel */}
         <div className="w-full max-w-md flex flex-col items-center lg:items-start text-center lg:text-left space-y-5">
           <div>
-            <span className="section-label mb-2">LOBBY CHECK-IN</span>
+            <span className="section-label mb-2">
+              {isDemoRoom ? "🌟 DEMO ROOM (30 MIN LIMIT)" : "LOBBY CHECK-IN"}
+            </span>
             <h1 className="font-serif text-3xl md:text-4xl font-normal text-[#f3eee6] mb-1">
               Ready to enter class?
             </h1>
@@ -504,7 +523,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             )}
           </div>
 
-          {!isAuthenticated ? (
+          {!isAuthenticated && !isDemoRoom ? (
             <div className="w-full bg-[#1a1814] border border-[#f59e0b]/30 rounded-2xl p-5 shadow-2xl text-left space-y-4 animate-in fade-in duration-300">
               <div className="flex items-start gap-3">
                 <div className="p-2.5 rounded-xl bg-[#f59e0b]/15 text-[#f59e0b] shrink-0 mt-0.5">

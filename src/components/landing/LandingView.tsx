@@ -24,9 +24,10 @@ import {
   BookOpen,
   ArrowUpRight
 } from "lucide-react";
-import { generateMeetingCode, sanitizeRoomId } from "../../lib/utils";
+import { sanitizeRoomId, generateMeetingCode } from "../../lib/utils";
 import { useAuth } from "../../auth/authContext";
 import { AuthRoleModal } from "../auth/AuthRoleModal";
+import { createDemoRoom } from "../../services/roomService";
 import { toast } from "sonner";
 import { dbClient } from "../../lib/dbClient";
 
@@ -55,8 +56,25 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
   const [showCheckoutModal, setShowCheckoutModal] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
 
   const isStudent = profile?.role === "student";
+
+  const handleStartDemo = async () => {
+    setShowNewMeetingDropdown(false);
+    setIsCreatingRoom(true);
+    try {
+      toast.info("Launching instant 30-minute demo room...");
+      const { code, token } = await createDemoRoom();
+      sessionStorage.setItem(`demo_token_${code}`, token);
+      window.history.pushState({}, "", `/meet/${code}?demo=1`);
+      onStartMeeting(code, "tutor");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to start demo room");
+    } finally {
+      setIsCreatingRoom(false);
+    }
+  };
 
   const handleStartInstant = async () => {
     if (!isAuthenticated) {
@@ -392,6 +410,18 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
                   </form>
                 </div>
               )}
+            </div>
+
+            {/* Quick Demo CTA */}
+            <div>
+              <button
+                onClick={handleStartDemo}
+                disabled={isCreatingRoom}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition shadow-sm"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Try Instant 30-Minute Demo (No Sign-in)</span>
+              </button>
             </div>
 
             {/* Sub-bullets in Geist Mono style */}

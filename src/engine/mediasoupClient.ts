@@ -148,7 +148,6 @@ function sanitizeTransportData(data: any, signalingUrl: string) {
 
   return data;
 }
-
 export class MathsyMediasoupEngine {
   public socket: Socket | null = null;
   public device: Device | null = null;
@@ -172,19 +171,45 @@ export class MathsyMediasoupEngine {
   private isEnablingAudio: boolean = false;
   private processedControlIds = new Set<string>();
 
+  public serverRole: "tutor" | "student" = "student";
+  public isServerOwner: boolean = false;
+  public isDemo: boolean = false;
+  public demoRemainingSec: number | null = null;
+  public onDemoRoomEnded?: () => void;
+  public getAuthToken(): string {
+    return this.activeToken;
+  }
+
   // Listeners
+  public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean, roomData?: any) => void;
   public onParticipantsChange?: (participants: RemoteParticipant[]) => void;
   public onPeerLeft?: (peerId: string) => void;
   public onChatMessage?: (message: ChatMessage) => void;
   public onPollsChange?: (polls: Poll[]) => void;
   public onReaction?: (reaction: ReactionEvent) => void;
   public onWhiteboardData?: (data: any) => void;
-  public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed") => void;
+  public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed", errorMessage?: string) => void;
   public onUnmuteRequest?: (request: MicRequestEvent) => void;
   public onControlMessage?: (msg: ControlMessageEvent) => void;
   public onChatLockChange?: (locked: boolean) => void;
   public onPinnedMessageChange?: (message: { text: string; senderName: string } | null) => void;
   public onClassEnded?: () => void;
+
+  public activeToken: string = "";
+  public isChatLocked: boolean = false;
+  public pinnedMessage: any = null;
+  public letStudentsDraw: boolean = false;
+  public whiteboardSnapshot: any = null;
+
+  // Section 3 Listeners
+  public onForceMute?: (reason: string) => void;
+  public onExpelled?: (reason: string) => void;
+  public onHandLowered?: (studentId?: string) => void;
+  public onHandLowerAll?: () => void;
+  public onChatPinChange?: (pinnedMessage: any) => void;
+  public onDrawingPermissionChange?: (allowed: boolean) => void;
+  public onCameraOffRequest?: (data: { studentId: string; studentName: string; reason?: string }) => void;
+  public onCameraOffResponse?: (data: { studentId: string; approved: boolean; reason?: string }) => void;
 
   public getCurrentUserId(): string {
     return this.currentUserId;
@@ -205,7 +230,10 @@ export class MathsyMediasoupEngine {
   private signalingUrl: string;
 
   constructor() {
-    this.signalingUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in";
+    this.signalingUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "";
+    if (!this.signalingUrl) {
+      console.error("[MathsyMeet Engine] Critical: VITE_MEDIASOUP_SERVER_URL is not configured.");
+    }
   }
 
   public async connect({
@@ -221,6 +249,13 @@ export class MathsyMediasoupEngine {
     token?: string;
     role?: "host" | "tutor" | "student" | "guest";
   }): Promise<void> {
+    if (!this.signalingUrl) {
+      const errMsg = "Server not configured: VITE_MEDIASOUP_SERVER_URL is missing.";
+      console.error(`[MathsyMeet Engine] ${errMsg}`);
+      this.onConnectionStateChange?.("failed", errMsg);
+      throw new Error(errMsg);
+    }
+
     this.onConnectionStateChange?.("connecting");
     this.roomId = (roomId || "").toLowerCase().trim();
     this.isHostUser = role === "host" || role === "tutor";
@@ -229,7 +264,27 @@ export class MathsyMediasoupEngine {
     const sanitizedUserId = userId.replace(/_/g, "-");
     this.currentUserId = sanitizedUserId;
 
-    const effectiveToken = getEffectiveToken(token, sanitizedUserId, role, userName);
+    let effectiveToken = token && token.trim().length > 0 ? token.trim() : "";
+    if (!effectiveToken) {
+      try {
+        const guestRes = await fetch(`${this.signalingUrl.replace(/\/$/, "")}/api/guest-token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: userName, guestId: sanitizedUserId })
+        });
+        if (guestRes.ok) {
+          const guestData = await guestRes.json();
+          effectiveToken = guestData.token;
+        }
+      } catch (err: any) {
+        console.warn("[MathsyMeet Engine] Fallback guest token generator used:", err.message);
+      }
+    }
+
+    if (!effectiveToken) {
+      effectiveToken = getEffectiveToken(token, sanitizedUserId, role, userName);
+    }
+    this.activeToken = effectiveToken;
 
     return new Promise<void>((resolve) => {
       let resolved = false;
@@ -258,6 +313,18 @@ export class MathsyMediasoupEngine {
         reconnectionDelay: 2000,
       });
 
+      this.socket.on("error", (err: any) => {
+        console.error("[MathsyMeet Engine] Server error notification:", err);
+        if (err?.code === "ROOM_FULL") {
+          this.onConnectionStateChange?.("failed", err.message || "Room is full (max participants reached)");
+        }
+      });
+
+      this.socket.on("demoRoomEnded", () => {
+        console.log("[MathsyMeet Engine] Received demoRoomEnded from server");
+        this.onDemoRoomEnded?.();
+      });
+
       this.socket.on("connect", () => {
         console.log("[MathsyMeet Engine] Socket connected to Mediasoup server:", this.signalingUrl);
         this.onConnectionStateChange?.("connected");
@@ -277,6 +344,19 @@ export class MathsyMediasoupEngine {
       // Handle roomJoined (Server returns routerRtpCapabilities and list of existing peers)
       this.socket.on("roomJoined", async (data: any) => {
         console.log("[MathsyMeet Engine] roomJoined received. Existing peers:", data?.peers?.length || 0);
+
+        if (data?.role) {
+          this.serverRole = data.role === "tutor" ? "tutor" : "student";
+          this.isServerOwner = Boolean(data.isOwner);
+          this.isDemo = Boolean(data.isDemo);
+          this.demoRemainingSec = typeof data.remainingSec === "number" ? data.remainingSec : null;
+          if (data.whiteboardSnapshot) this.whiteboardSnapshot = data.whiteboardSnapshot;
+          if (typeof data.letStudentsDraw === "boolean") this.letStudentsDraw = data.letStudentsDraw;
+          if (data.pinnedMessage) this.pinnedMessage = data.pinnedMessage;
+          if (typeof data.isChatLocked === "boolean") this.isChatLocked = data.isChatLocked;
+          console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}, isDemo: ${this.isDemo}`);
+          this.onRoleAssigned?.(this.serverRole, this.isServerOwner, data);
+        }
         
         // Initialize Mediasoup device with router capabilities
         if (data?.routerRtpCapabilities && !this.device?.loaded) {
@@ -343,6 +423,66 @@ export class MathsyMediasoupEngine {
       };
       this.socket.on("peerJoined", handlePeerJoined);
       this.socket.on("peer-joined", handlePeerJoined);
+
+      this.socket.on("forceMute", (payload: any) => {
+        console.log("[MathsyMeet Engine] Received forceMute from tutor:", payload);
+        this.disableAudio();
+        this.onForceMute?.(payload?.reason || "You were muted by the tutor");
+      });
+
+      this.socket.on("expelled", (payload: any) => {
+        console.log("[MathsyMeet Engine] Received expelled from tutor:", payload);
+        this.disconnect();
+        this.onExpelled?.(payload?.reason || "Removed by tutor");
+      });
+
+      this.socket.on("hand:lowered", (payload: any) => {
+        console.log("[MathsyMeet Engine] Received hand:lowered:", payload);
+        const studentId = payload?.studentId;
+        if (studentId) {
+          const p = this.participants.get(studentId);
+          if (p) p.isHandRaised = false;
+          this.notifyParticipants();
+        }
+        this.onHandLowered?.(studentId);
+      });
+
+      this.socket.on("hand:lowerAll", () => {
+        console.log("[MathsyMeet Engine] Received hand:lowerAll");
+        for (const p of this.participants.values()) {
+          p.isHandRaised = false;
+        }
+        this.notifyParticipants();
+        this.onHandLowerAll?.();
+      });
+
+      this.socket.on("chatLock", (payload: any) => {
+        this.isChatLocked = Boolean(payload?.locked);
+        console.log("[MathsyMeet Engine] Received chatLock:", this.isChatLocked);
+        this.onChatLockChange?.(this.isChatLocked);
+      });
+
+      this.socket.on("chatPin", (payload: any) => {
+        this.pinnedMessage = payload?.message || null;
+        console.log("[MathsyMeet Engine] Received chatPin:", this.pinnedMessage);
+        this.onChatPinChange?.(this.pinnedMessage);
+      });
+
+      this.socket.on("whiteboard:drawingPermission", (payload: any) => {
+        this.letStudentsDraw = Boolean(payload?.allowed);
+        console.log("[MathsyMeet Engine] Received whiteboard:drawingPermission:", this.letStudentsDraw);
+        this.onDrawingPermissionChange?.(this.letStudentsDraw);
+      });
+
+      this.socket.on("cameraOffRequest", (payload: any) => {
+        console.log("[MathsyMeet Engine] Received cameraOffRequest:", payload);
+        this.onCameraOffRequest?.(payload);
+      });
+
+      this.socket.on("cameraOffResponse", (payload: any) => {
+        console.log("[MathsyMeet Engine] Received cameraOffResponse:", payload);
+        this.onCameraOffResponse?.(payload);
+      });
 
       // Handle peer left events (peerLeft / peer-left)
       const handlePeerLeft = (data: any) => {
@@ -1206,6 +1346,7 @@ export class MathsyMediasoupEngine {
     };
     this.socket?.emit("chatMessage", payload);
     this.socket?.emit("peerMuteForce", payload);
+    this.socket?.emit("forceMuteAll");
   }
 
   public broadcastWhiteboard(data: any) {
@@ -1227,6 +1368,45 @@ export class MathsyMediasoupEngine {
     };
     this.socket?.emit("chatMessage", payload);
     this.socket?.emit("whiteboard:state", payload);
+  }
+
+  public toggleWhiteboardDrawing(allowed: boolean) {
+    this.letStudentsDraw = allowed;
+    this.socket?.emit("whiteboard:toggleDrawing", { allowed });
+  }
+
+  public forceMuteStudent(studentId: string) {
+    this.socket?.emit("forceMute", { studentId });
+  }
+
+  public expelStudent(studentId: string, reason?: string) {
+    this.socket?.emit("expelStudent", { studentId, reason });
+  }
+
+  public lowerStudentHand(studentId?: string) {
+    this.socket?.emit("hand:lower", { studentId });
+  }
+
+  public lowerAllHands() {
+    this.socket?.emit("hand:lowerAll");
+  }
+
+  public setChatLock(locked: boolean) {
+    this.isChatLocked = locked;
+    this.socket?.emit("chatLock", { locked });
+  }
+
+  public setChatPin(message: any) {
+    this.pinnedMessage = message;
+    this.socket?.emit("chatPin", { message });
+  }
+
+  public requestCameraOff(reason?: string) {
+    this.socket?.emit("cameraOffRequest", { reason });
+  }
+
+  public respondCameraOff(studentId: string, approved: boolean) {
+    this.socket?.emit("cameraOffResponse", { studentId, approved });
   }
 
   public createPoll(question: string, options: string[], creatorName: string) {
@@ -1259,9 +1439,13 @@ export class MathsyMediasoupEngine {
     this.onPollsChange?.(this.activePolls);
   }
 
-  public emitSignal(event: string, payload: any): void {
+  public emitSignal(event: string, payload: any, ack?: (res: any) => void): void {
     if (this.socket) {
-      this.socket.emit(event, payload);
+      if (ack) {
+        this.socket.emit(event, payload, ack);
+      } else {
+        this.socket.emit(event, payload);
+      }
     }
   }
 
