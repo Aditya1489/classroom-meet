@@ -9,7 +9,8 @@
     "server:dev": "tsx watch server/index.ts",
     "dev:all": "concurrently \"npm run server:dev\" \"npm run dev\"",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsx --test 'tests/**/*.test.ts'"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.23",
