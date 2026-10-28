@@ -74,20 +74,6 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
     assert.equal(res.status, 200);
   });
 
-  after(async () => {
-    try {
-      const chatCol = getChatCollection()!;
-      const sessCol = getSessionsCollection()!;
-      await chatCol.deleteMany({ roomCode: loadRoomCode });
-      await sessCol.deleteMany({ roomCode: loadRoomCode });
-    } catch (e) {}
-
-    await query("DELETE FROM live_classes WHERE room_code = $1", [loadRoomCode]);
-    await query("DELETE FROM users WHERE id = $1", [tutorId]);
-    await closeMongo();
-    await pool.end();
-  });
-
   it("Stage 1: Baseline Load (10 requests)", async () => {
     const latencies: number[] = [];
     const startTime = Date.now();
@@ -157,14 +143,19 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
     const batchSize = 100;
     const totalBatches = 10; // 10 x 100 = 1,000 total requests
 
+    // Pre-generate tokens so synchronous HMAC signing does not distort HTTP I/O latency
+    const studentTokens = Array.from({ length: 1000 }, (_, i) =>
+      generateToken({
+        id: `student-vu-${i}`,
+        role: "student",
+        name: `VU Student ${i}`,
+      })
+    );
+
     for (let b = 0; b < totalBatches; b++) {
       const batchTasks = Array.from({ length: batchSize }, async (_, idx) => {
         const globalIdx = b * batchSize + idx;
-        const studentToken = generateToken({
-          id: `student-vu-${globalIdx}`,
-          role: "student",
-          name: `VU Student ${globalIdx}`,
-        });
+        const studentToken = studentTokens[globalIdx];
         const t0 = performance.now();
 
         // 80% writes, 20% reads to simulate classroom chat workload
@@ -235,5 +226,20 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
     assert.equal(recoveryRes.status, 200);
     console.log("    [Stage 5 Recovery Latency]:", Math.round(recoveryLatency * 10) / 10, "ms");
     assert.ok(recoveryLatency < 100, "Recovery request latency must be back to baseline (< 100ms)");
+  });
+
+  after(async () => {
+    try {
+      const chatCol = getChatCollection()!;
+      const sessCol = getSessionsCollection()!;
+      if (chatCol) await chatCol.deleteMany({ roomCode: loadRoomCode });
+      if (sessCol) await sessCol.deleteMany({ roomCode: loadRoomCode });
+    } catch (e) {}
+
+    await query("DELETE FROM live_classes WHERE room_code = $1", [loadRoomCode]);
+    await query("DELETE FROM users WHERE id = $1", [tutorId]);
+    await closeMongo();
+    await pool.end();
+    setTimeout(() => process.exit(0), 500);
   });
 });

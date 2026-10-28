@@ -3,7 +3,9 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017";
+const isProduction = process.env.NODE_ENV === "production";
+const getEffectiveMongoUri = () =>
+  process.env.MONGODB_URI || (isProduction ? "" : "mongodb://localhost:27017");
 const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || "mathsy_meet_chat";
 
 export interface MongoChatMessage {
@@ -47,6 +49,18 @@ let isConnecting = false;
  */
 export async function connectMongo(): Promise<Db | null> {
   if (db) return db;
+
+  if (process.env.DISABLE_MONGODB === "true") {
+    console.log("[MongoDB] Chat persistence is explicitly disabled via DISABLE_MONGODB=true.");
+    return null;
+  }
+
+  const effectiveUri = getEffectiveMongoUri();
+  if (!effectiveUri) {
+    console.warn("⚠️  [MongoDB Connection Warning]: MONGODB_URI is unset in production. In-class chat persistence is disabled.");
+    return null;
+  }
+
   if (isConnecting) {
     while (isConnecting) {
       await new Promise((r) => setTimeout(r, 50));
@@ -56,10 +70,10 @@ export async function connectMongo(): Promise<Db | null> {
 
   isConnecting = true;
   try {
-    const maskedUri = MONGODB_URI.replace(/:[^:@]+@/, ":****@");
+    const maskedUri = effectiveUri.replace(/:[^:@]+@/, ":****@");
     console.log(`[MongoDB] Connecting to temporary chat database at: ${maskedUri}`);
 
-    client = new MongoClient(MONGODB_URI, {
+    client = new MongoClient(effectiveUri, {
       maxPoolSize: 20,
       minPoolSize: 5,
       serverSelectionTimeoutMS: 5000,

@@ -37,12 +37,23 @@ export const TabletPairingModal: React.FC<TabletPairingModalProps> = ({
   useEffect(() => {
     if (open && classId) {
       setIsLoading(true);
+      const authToken = localStorage.getItem("mathsy_meet_token") || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
       fetch(`${serverUrl}/api/pair/create`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ classId }),
       })
-        .then((res) => res.json())
+        .then(async (res) => {
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${res.status}`);
+          }
+          return res.json();
+        })
         .then((data) => {
           if (data?.code) {
             setActiveCode(data.code);
@@ -50,7 +61,7 @@ export const TabletPairingModal: React.FC<TabletPairingModalProps> = ({
           }
         })
         .catch((err) => {
-          console.warn("[TabletPairing] Server pair create error:", err);
+          console.warn("[TabletPairing] Server pair create error:", err.message);
         })
         .finally(() => {
           setIsLoading(false);

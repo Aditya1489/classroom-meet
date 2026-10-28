@@ -112,6 +112,18 @@ export async function createApiKey({
     throw new Error("Cannot create API keys for a suspended organization");
   }
 
+  // SEC-GAP-02: Check for existing active key with same name in this organization
+  const existingKey = await query(
+    "SELECT id FROM api_keys WHERE organization_id = $1 AND name = $2 AND is_active = TRUE;",
+    [organizationId, name.trim()]
+  );
+  if (existingKey.rows.length > 0) {
+    const conflictErr: any = new Error(`An active API key with name '${name.trim()}' already exists`);
+    conflictErr.code = "KEY_NAME_EXISTS";
+    conflictErr.statusCode = 409;
+    throw conflictErr;
+  }
+
   const { rawKey, prefix, hash } = generateKeyMaterial(environment);
 
   const insertSql = `
@@ -120,15 +132,26 @@ export async function createApiKey({
     RETURNING id, organization_id, name, key_prefix, environment, is_active, permissions, last_used_at, expires_at, created_at;
   `;
 
-  const keyRes = await query(insertSql, [
-    organizationId,
-    name.trim(),
-    prefix,
-    hash,
-    environment,
-    JSON.stringify(permissions),
-    expiresAt,
-  ]);
+  let keyRes;
+  try {
+    keyRes = await query(insertSql, [
+      organizationId,
+      name.trim(),
+      prefix,
+      hash,
+      environment,
+      JSON.stringify(permissions),
+      expiresAt,
+    ]);
+  } catch (err: any) {
+    if (err.code === "23505" || err.message?.includes("idx_api_keys_active_org_name")) {
+      const conflictErr: any = new Error(`An active API key with name '${name.trim()}' already exists`);
+      conflictErr.code = "KEY_NAME_EXISTS";
+      conflictErr.statusCode = 409;
+      throw conflictErr;
+    }
+    throw err;
+  }
   const row = keyRes.rows[0];
 
   // Audit log entry (NEVER logs raw key or full hash)

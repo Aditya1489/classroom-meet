@@ -229,12 +229,18 @@ export class MathsyMediasoupEngine {
 
   private signalingUrl: string;
 
-  constructor() {
-    this.signalingUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "";
+  constructor(customSignalingUrl?: string) {
+    const defaultUrl = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL) || "https://rtc.mathsy.in";
+    this.signalingUrl = customSignalingUrl || defaultUrl;
     if (!this.signalingUrl) {
       console.error("[MathsyMeet Engine] Critical: VITE_MEDIASOUP_SERVER_URL is not configured.");
     }
   }
+
+  public setSignalingUrl(url: string) {
+    this.signalingUrl = url;
+  }
+
 
   public async connect({
     roomId,
@@ -286,14 +292,51 @@ export class MathsyMediasoupEngine {
     }
     this.activeToken = effectiveToken;
 
-    return new Promise<void>((resolve) => {
-      let resolved = false;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let connectTimer: any = null;
+
       const finishConnect = () => {
-        if (!resolved) {
-          resolved = true;
+        if (!settled) {
+          settled = true;
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+            connectTimer = null;
+          }
           resolve();
         }
       };
+
+      const failConnect = (err: any) => {
+        if (!settled) {
+          settled = true;
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+            connectTimer = null;
+          }
+          if (this.socket) {
+            this.socket.disconnect();
+            this.socket.close();
+          }
+          const errorObj = err instanceof Error ? err : new Error(err?.message || "Failed to connect to SFU");
+          this.onConnectionStateChange?.("failed", errorObj.message);
+          reject(errorObj);
+        }
+      };
+
+      // Disconnect any existing socket before opening a new one
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket.close();
+        this.socket = null;
+      }
+
+      this.onConnectionStateChange?.("connecting");
+
+      // Timeout after 15 seconds to prevent hung UI
+      connectTimer = setTimeout(() => {
+        failConnect(new Error("SFU connection timed out after 15000ms"));
+      }, 15000);
 
       // Establish WebSocket to Mediasoup signaling server
       this.socket = io(this.signalingUrl, {
@@ -308,15 +351,13 @@ export class MathsyMediasoupEngine {
           peerIdentity: sanitizedUserId,
         },
         transports: ["websocket"],
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 2000,
+        reconnection: false, // Let callers manage retry instead of endless silent loop
       });
 
       this.socket.on("error", (err: any) => {
         console.error("[MathsyMeet Engine] Server error notification:", err);
         if (err?.code === "ROOM_FULL") {
-          this.onConnectionStateChange?.("failed", err.message || "Room is full (max participants reached)");
+          failConnect(new Error(err.message || "Room is full (max participants reached)"));
         }
       });
 
@@ -328,18 +369,19 @@ export class MathsyMediasoupEngine {
       this.socket.on("connect", () => {
         console.log("[MathsyMeet Engine] Socket connected to Mediasoup server:", this.signalingUrl);
         this.onConnectionStateChange?.("connected");
-      });
-
-      this.socket.on("connect_error", (err) => {
-        console.warn("[MathsyMeet Engine] Socket connection warning:", err.message);
-        this.onConnectionStateChange?.("connected");
         finishConnect();
       });
 
-      this.socket.on("disconnect", () => {
-        console.log("[MathsyMeet Engine] Socket disconnected");
-        this.onConnectionStateChange?.("disconnected");
+      this.socket.on("connect_error", (err) => {
+        console.error("[MathsyMeet Engine] Socket connection error:", err.message);
+        failConnect(err);
       });
+
+      this.socket.on("disconnect", (reason) => {
+        console.log("[MathsyMeet Engine] Socket disconnected:", reason);
+        this.onConnectionStateChange?.("disconnected", reason);
+      });
+
 
       // Handle roomJoined (Server returns routerRtpCapabilities and list of existing peers)
       this.socket.on("roomJoined", async (data: any) => {
@@ -1465,6 +1507,7 @@ export class MathsyMediasoupEngine {
     this.stopScreenShare();
     if (this.socket) {
       this.socket.disconnect();
+      this.socket.close();
       this.socket = null;
     }
     this.participants.clear();

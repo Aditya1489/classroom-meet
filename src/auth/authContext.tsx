@@ -8,6 +8,7 @@ export interface UserProfile {
   avatarUrl?: string;
   isHost?: boolean;
   role?: "tutor" | "student";
+  isPlatformSuperadmin?: boolean;
 }
 
 interface AuthContextType {

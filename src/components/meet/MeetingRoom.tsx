@@ -73,6 +73,8 @@ interface MeetingRoomProps {
     displayName: string;
     presentImmediately: boolean;
     role?: "tutor" | "student";
+    userId?: string;
+    token?: string;
   };
   onLeaveMeeting: () => void;
 }
@@ -120,6 +122,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Persistent user identity: strictly maintained across renders to prevent ID desync with Mediasoup SFU & Tutor approvals
   const [myUserId] = useState<string>(() => {
+    if (initialOptions.userId) return initialOptions.userId.replace(/_/g, "-");
     if (profile?.id) return profile.id.replace(/_/g, "-");
     const sessionKey = `mathsy_uid_${meetingCode}`;
     if (typeof window !== "undefined") {
@@ -676,7 +679,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
 
-    const authToken = session?.access_token || localStorage.getItem("mathsy_meet_token") || "";
+    const authToken =
+      initialOptions.token ||
+      (typeof window !== "undefined"
+        ? window.sessionStorage.getItem(`mathsy_meet_embed_token_${meetingCode}`) ||
+          window.sessionStorage.getItem("mathsy_meet_embed_token")
+        : "") ||
+      session?.access_token ||
+      (typeof window !== "undefined" ? window.localStorage.getItem("mathsy_meet_token") : "") ||
+      "";
 
     // Connect to room session with verified server-issued session token
     engine

@@ -14,7 +14,7 @@ export const apiKeysRouter = Router({ mergeParams: true });
 /**
  * Middleware ensuring user has admin/owner/developer role within the specified organization
  */
-async function requireOrgRole(req: Request, res: Response, allowedRoles = ["owner", "admin", "developer"]) {
+export async function requireOrgRole(req: Request, res: Response, allowedRoles = ["owner", "admin", "developer"]): Promise<boolean> {
   const user = (req as any).user;
   const { orgId } = req.params;
 
@@ -23,8 +23,8 @@ async function requireOrgRole(req: Request, res: Response, allowedRoles = ["owne
     return false;
   }
 
-  // First-party system organization check: allow first-party tutors or admins
-  if (orgId === "00000000-0000-0000-0000-000000000001" && (user.role === "tutor" || user.role === "admin")) {
+  // First-party system organization check: allow system admins only (SEC-GAP-01)
+  if (orgId === "00000000-0000-0000-0000-000000000001" && user.role === "admin") {
     return true;
   }
 
@@ -35,7 +35,7 @@ async function requireOrgRole(req: Request, res: Response, allowedRoles = ["owne
 
   if (memberRes.rows.length === 0 || !allowedRoles.includes(memberRes.rows[0].role)) {
     res.status(403).json({
-      error: "Forbidden: You do not have permission to manage API keys for this organization",
+      error: "Forbidden: You do not have permission to manage this organization or its credentials",
       code: "ORG_ACCESS_DENIED",
     });
     return false;
@@ -80,6 +80,9 @@ apiKeysRouter.post("/:orgId/keys", requireAuth, async (req: Request, res: Respon
       apiKey: result.apiKey,
     });
   } catch (err: any) {
+    if (err.code === "KEY_NAME_EXISTS" || err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, code: "KEY_NAME_EXISTS" });
+    }
     console.error("[ApiKeys POST Error]:", err.message);
     return res.status(500).json({ error: "Failed to create API key", details: err.message });
   }

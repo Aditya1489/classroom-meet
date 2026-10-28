@@ -2,10 +2,23 @@ import { Router, Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import { query } from "../db";
+import { verifyParticipantToken } from "../services/participantTokenService";
+import { createRateLimiter, InMemorySlidingWindowStore } from "../middleware/rateLimiter";
+
+import { getJwtSecret } from "../services/envValidator";
+import { isPlatformSuperadmin } from "../middleware/superadminAuth";
 
 export const authRouter = Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || "mathsy_meet_jwt_secret_dev_key_2026";
+export const authRateLimitStore = new InMemorySlidingWindowStore();
+
+export const authRateLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 30,
+  store: authRateLimitStore,
+  errorCode: "AUTH_RATE_LIMIT_EXCEEDED",
+  errorMessage: "Too many authentication requests from this IP. Please try again shortly.",
+});
 
 // Supported Google OAuth Client IDs (env vars + client defaults)
 const GOOGLE_CLIENT_IDS = [
@@ -18,12 +31,13 @@ const GOOGLE_CLIENT_IDS = [
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_IDS[0]);
 
 export function generateToken(payload: { id: string; email?: string; role: string; name: string }) {
+  const secret = getJwtSecret();
   return jwt.sign(
     {
       sub: payload.id,
       ...payload,
     },
-    JWT_SECRET,
+    secret,
     { expiresIn: "7d" }
   );
 }
@@ -41,7 +55,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
   const token = authHeader.split(" ")[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const decoded = jwt.verify(token, getJwtSecret()) as any;
     if (!decoded || !decoded.id) {
       return res.status(401).json({ error: "Invalid token payload: missing user identifier" });
     }
@@ -50,7 +64,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (isUUID) {
       try {
         const userRes = await query(
-          "SELECT id, email, full_name, avatar_url, role, is_active FROM users WHERE id = $1",
+          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active FROM users WHERE id = $1",
           [decoded.id]
         );
         if (userRes.rows.length > 0) {
@@ -75,7 +89,25 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
     return next();
   } catch (err: any) {
-    return res.status(401).json({ error: "Invalid or expired session token" });
+    // Check if it's a signed SaaS participant token
+    try {
+      const pClaims = verifyParticipantToken(token);
+      (req as any).user = {
+        id: pClaims.sub,
+        email: "",
+        full_name: pClaims.name,
+        role: pClaims.role,
+        tenant_id: pClaims.tenant_id,
+        room_code: pClaims.room_code,
+        room_id: pClaims.room_id,
+        permissions: pClaims.permissions,
+        isParticipantToken: true,
+      };
+      (req as any).participantClaims = pClaims;
+      return next();
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired session token" });
+    }
   }
 }
 
@@ -90,10 +122,27 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   }
   const token = authHeader.split(" ")[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const decoded = jwt.verify(token, getJwtSecret()) as any;
     (req as any).user = decoded;
+    return next();
   } catch {
-    // Expired or invalid token, proceed without req.user
+    // Check if it's a signed SaaS participant token
+    try {
+      const pClaims = verifyParticipantToken(token);
+      (req as any).user = {
+        id: pClaims.sub,
+        email: "",
+        full_name: pClaims.name,
+        role: pClaims.role,
+        tenant_id: pClaims.tenant_id,
+        room_code: pClaims.room_code,
+        permissions: pClaims.permissions,
+        isParticipantToken: true,
+      };
+      (req as any).participantClaims = pClaims;
+    } catch {
+      // Expired or invalid token, proceed without req.user
+    }
   }
   next();
 }
@@ -103,7 +152,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
  * Authenticates via verified Google ID token or Access token.
  * Never trusts client-supplied identity parameters (email, name, role) without server verification.
  */
-authRouter.post("/google", async (req: Request, res: Response) => {
+authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { idToken, accessToken, role: signupRole } = req.body;
 
@@ -159,7 +208,7 @@ authRouter.post("/google", async (req: Request, res: Response) => {
           return res.status(401).json({ error: "Failed to retrieve verified userinfo from Google" });
         }
 
-        const userInfo = await userInfoRes.json();
+        const userInfo: any = await userInfoRes.json();
         if (!userInfo.sub || !userInfo.email || userInfo.email_verified === false) {
           return res.status(401).json({ error: "Google account email is not verified" });
         }
@@ -300,6 +349,7 @@ authRouter.post("/guest", (_req: Request, res: Response) => {
 authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
   const user = (req as any).user;
   const token = req.headers.authorization!.split(" ")[1];
+  const isSuperadmin = await isPlatformSuperadmin(user.id);
 
   return res.json({
     user: {
@@ -309,6 +359,7 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
       avatarUrl: user.avatar_url || "",
       role: user.role,
       isHost: user.role === "tutor",
+      isPlatformSuperadmin: isSuperadmin,
     },
     token,
   });
@@ -325,6 +376,14 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
 
     if (role !== "tutor" && role !== "student") {
       return res.status(400).json({ error: "Invalid role. Must be 'tutor' or 'student'" });
+    }
+
+    // P0-4: Prevent self-service tutor privilege escalation
+    if (role === "tutor" && user.role !== "tutor" && user.role !== "admin") {
+      return res.status(403).json({
+        error: "Forbidden: Self-service role elevation to tutor is prohibited. Contact an administrator.",
+        code: "FORBIDDEN_ROLE_ELEVATION",
+      });
     }
 
     try {

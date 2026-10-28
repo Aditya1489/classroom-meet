@@ -15,7 +15,7 @@ export interface DemoRoomResponse {
 }
 
 const getServerUrl = (): string => {
-  const url = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "";
+  const url = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in";
   return url.replace(/\/$/, "");
 };
 

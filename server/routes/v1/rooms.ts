@@ -4,11 +4,31 @@ import { query } from "../../db";
 import { apiKeyAuth, requirePermission } from "../../middleware/apiKeyAuth";
 import { issueParticipantToken, ParticipantRole } from "../../services/participantTokenService";
 import { getChatCollection, getSessionsCollection } from "../../db/mongo";
+import { invalidateRoomCache } from "../../middleware/roomAuth";
+import { createRateLimiter } from "../../middleware/rateLimiter";
+import { dispatchWebhookEvent } from "../../services/webhookService";
+import { reconcileRoomSessions } from "../../services/meteringService";
 
 export const v1RoomsRouter = Router();
 
 // Apply API Key Authentication to all versioned B2B room routes
 v1RoomsRouter.use(apiKeyAuth());
+
+const roomCreateLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 30,
+  keyGenerator: (req) => `room_create:${(req as any).apiKey?.id || req.ip}`,
+  errorCode: "ROOM_CREATION_RATE_LIMIT",
+  errorMessage: "Room creation rate limit exceeded. Max 30 rooms per minute.",
+});
+
+const tokenMintLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 120,
+  keyGenerator: (req) => `token_mint:${(req as any).apiKey?.id || req.ip}`,
+  errorCode: "TOKEN_MINT_RATE_LIMIT",
+  errorMessage: "Token minting rate limit exceeded. Max 120 tokens per minute.",
+});
 
 /**
  * Generate a cryptographically secure random room code (ptq-rtvq-rox format)
@@ -31,7 +51,7 @@ function generateSecureRoomCode(): string {
  * Create a new tenant-scoped meeting room.
  * Required permission: rooms:write
  */
-v1RoomsRouter.post("/", requirePermission("rooms:write"), async (req: Request, res: Response) => {
+v1RoomsRouter.post("/", requirePermission("rooms:write"), roomCreateLimiter, async (req: Request, res: Response) => {
   try {
     const organization = (req as any).organization;
     const environment = (req as any).environment;
@@ -114,6 +134,16 @@ v1RoomsRouter.post("/", requirePermission("rooms:write"), async (req: Request, r
       );
     }
 
+    // Dispatch outbound webhook event asynchronously
+    dispatchWebhookEvent(organization.id, "room.created", {
+      roomId: row.id,
+      roomCode: row.room_code,
+      title: row.title,
+      environment,
+      createdAt: row.created_at,
+      startedAt: row.started_at,
+    }).catch(() => {});
+
     return res.status(201).json({
       room: {
         id: row.id,
@@ -123,6 +153,7 @@ v1RoomsRouter.post("/", requirePermission("rooms:write"), async (req: Request, r
         organizationId: row.organization_id,
         environment,
         settings: row.metadata?.settings || {},
+        metadata: row.metadata || {},
         createdAt: row.created_at,
         startedAt: row.started_at,
       },
@@ -179,6 +210,7 @@ v1RoomsRouter.get("/:roomId", requirePermission("rooms:read"), async (req: Reque
         organizationId: row.organization_id,
         environment: row.metadata?.environment || "live",
         settings: row.metadata?.settings || {},
+        metadata: row.metadata || {},
         activeParticipantsCount,
         createdAt: row.created_at,
         startedAt: row.started_at,
@@ -234,6 +266,7 @@ v1RoomsRouter.post("/:roomId/end", requirePermission("rooms:write"), async (req:
       "UPDATE live_classes SET is_active = FALSE, ended_at = NOW() WHERE id = $1;",
       [room.id]
     );
+    invalidateRoomCache(room.room_code);
 
     // Mark remaining participants as left
     await query(
@@ -255,6 +288,16 @@ v1RoomsRouter.post("/:roomId/end", requirePermission("rooms:write"), async (req:
         { $set: { status: "ended", endedAt: new Date() } }
       );
     }
+
+    // Reconcile participant sessions into the auditable organization usage ledger
+    await reconcileRoomSessions(room.organization_id, room.room_code, new Date(), room.id);
+
+    // Dispatch outbound webhook event asynchronously
+    dispatchWebhookEvent(room.organization_id, "room.ended", {
+      roomId: room.id,
+      roomCode: room.room_code,
+      endedAt: new Date().toISOString(),
+    }).catch(() => {});
 
     return res.json({
       success: true,
@@ -329,7 +372,7 @@ v1RoomsRouter.get("/:roomId/participants", requirePermission("rooms:read"), asyn
  * Mint a short-lived participant JWT for a verified room.
  * Required permission: tokens:write
  */
-v1RoomsRouter.post("/:roomId/tokens", requirePermission("tokens:write"), async (req: Request, res: Response) => {
+v1RoomsRouter.post("/:roomId/tokens", requirePermission("tokens:write"), tokenMintLimiter, async (req: Request, res: Response) => {
   try {
     const organization = (req as any).organization;
     const { roomId } = req.params;
@@ -354,6 +397,35 @@ v1RoomsRouter.post("/:roomId/tokens", requirePermission("tokens:write"), async (
         error: "Invalid role. Supported roles are 'tutor' and 'student'",
         code: "INVALID_ROLE",
       });
+    }
+
+    // Quota Groundwork: Check if organization is suspended
+    if (organization.status === "suspended") {
+      return res.status(403).json({
+        error: "Forbidden: Organization account is suspended",
+        code: "ORG_SUSPENDED",
+      });
+    }
+
+    // Quota Groundwork: Check monthly minute limit if configured and not on enterprise plan
+    if (organization.monthly_minute_limit && organization.plan_tier !== "enterprise") {
+      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+      const usageRes = await query(
+        `SELECT COALESCE(SUM(billed_minutes), 0)::int as total
+         FROM organization_usage_ledger
+         WHERE organization_id = $1 AND joined_at >= $2;`,
+        [organization.id, monthStart]
+      );
+      const totalBilled = usageRes.rows[0]?.total || 0;
+      const allowedCeiling = Math.floor(organization.monthly_minute_limit * 1.15); // 15% grace overdraft
+      if (totalBilled >= allowedCeiling) {
+        return res.status(402).json({
+          error: `Monthly quota of ${organization.monthly_minute_limit} minutes (including 15% grace overdraft) has been exhausted. Please upgrade your plan.`,
+          code: "QUOTA_EXCEEDED",
+          consumedMinutes: totalBilled,
+          limitMinutes: organization.monthly_minute_limit,
+        });
+      }
     }
 
     // Verify room exists and belongs to the authenticated organization

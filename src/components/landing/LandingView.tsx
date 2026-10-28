@@ -22,7 +22,8 @@ import {
   Check,
   GraduationCap,
   BookOpen,
-  ArrowUpRight
+  ArrowUpRight,
+  Key
 } from "lucide-react";
 import { sanitizeRoomId, generateMeetingCode } from "../../lib/utils";
 import { useAuth } from "../../auth/authContext";
@@ -33,9 +34,10 @@ import { dbClient } from "../../lib/dbClient";
 
 interface LandingViewProps {
   onStartMeeting: (code: string, role?: "tutor" | "student") => void;
+  onOpenDashboard?: () => void;
 }
 
-export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
+export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpenDashboard }) => {
   const {
     user,
     profile,
@@ -201,12 +203,26 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting }) => {
         </div>
 
         {/* Center Nav Links */}
-        <nav className="hidden md:flex items-center gap-8 text-xs font-medium text-[#a39e94]">
+        <nav className="hidden md:flex items-center gap-7 text-xs font-medium text-[#a39e94]">
           <a href="#how-it-works" className="hover:text-[#f3eee6] transition">How It Works</a>
           <a href="#features" className="hover:text-[#f3eee6] transition">Features</a>
           <a href="#comparison" className="hover:text-[#f3eee6] transition">Comparison</a>
           <a href="#pricing" className="hover:text-[#f3eee6] transition">Pricing</a>
           <a href="#faq" className="hover:text-[#f3eee6] transition">FAQ</a>
+          <button
+            onClick={() => {
+              if (onOpenDashboard) {
+                onOpenDashboard();
+              } else {
+                window.history.pushState({}, "", "/dashboard");
+                window.dispatchEvent(new PopStateEvent("popstate"));
+              }
+            }}
+            className="hover:text-[#f3eee6] text-[#f59e0b] font-semibold transition flex items-center gap-1.5 cursor-pointer bg-[#f59e0b]/10 hover:bg-[#f59e0b]/20 px-2.5 py-1 rounded-full border border-[#f59e0b]/20"
+          >
+            <Key className="w-3 h-3 text-[#f59e0b]" />
+            <span>Developer Console</span>
+          </button>
         </nav>
 
         {/* Auth / Action Button */}

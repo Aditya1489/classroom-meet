@@ -1,10 +1,9 @@
 import jwt from "jsonwebtoken";
+import { getParticipantJwtSecret } from "./envValidator";
 
-// Dedicated signing secret for participant tokens — NEVER use customer API keys or client secrets
-export const PARTICIPANT_JWT_SECRET =
-  process.env.PARTICIPANT_JWT_SECRET ||
-  process.env.JWT_SECRET ||
-  "mathsy_participant_token_signing_secret_dev_2026_at_least_32_chars";
+// Dedicated signing secret getter for participant tokens — NEVER use customer API keys or client secrets
+export const getSigningSecret = () => getParticipantJwtSecret();
+export const PARTICIPANT_JWT_SECRET = getParticipantJwtSecret();
 
 export const TOKEN_ISSUER = "mathsy-meet-saas";
 export const TOKEN_AUDIENCE = "mathsy-meet-sfu";
@@ -107,7 +106,8 @@ export function issueParticipantToken({
     permissions: authoritativePermissions,
   };
 
-  const token = jwt.sign(payload, PARTICIPANT_JWT_SECRET, {
+  const signingSecret = getParticipantJwtSecret();
+  const token = jwt.sign(payload, signingSecret, {
     algorithm: "HS256",
     expiresIn: boundedExpiry,
   });
@@ -125,7 +125,8 @@ export function issueParticipantToken({
  * Verify and decode a participant token (used by server verification & tests)
  */
 export function verifyParticipantToken(token: string): ParticipantTokenClaims {
-  const verified = jwt.verify(token, PARTICIPANT_JWT_SECRET, {
+  const signingSecret = getParticipantJwtSecret();
+  const verified = jwt.verify(token, signingSecret, {
     algorithms: ["HS256"],
     issuer: TOKEN_ISSUER,
     audience: TOKEN_AUDIENCE,

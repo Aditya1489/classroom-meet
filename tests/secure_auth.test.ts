@@ -1,15 +1,26 @@
-import { describe, it } from "node:test";
+import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
+import { authRateLimitStore } from "../server/routes/auth";
 
 const JWT_SECRET = process.env.JWT_SECRET || "mathsy_meet_jwt_secret_dev_key_2026";
 const API_BASE = process.env.API_BASE || "http://localhost:5001/api";
 
 describe("Phase 2 & 3: Secure Google Authentication & Session Authorization Test Suite", () => {
+  before(async () => {
+    // Ensure test isolation by clearing any residual rate-limit timestamps
+    if (authRateLimitStore && typeof authRateLimitStore.resetAll === "function") {
+      await authRateLimitStore.resetAll();
+    }
+  });
+
   it("TC-AUTH-01: Rejects arbitrary email submission without Google credentials", async () => {
     const res = await fetch(`${API_BASE}/auth/google`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-test-client-ip": "secure-auth-test-client",
+      },
       body: JSON.stringify({
         email: "victim@mathsy.in",
         name: "Victim User",
@@ -24,7 +35,10 @@ describe("Phase 2 & 3: Secure Google Authentication & Session Authorization Test
   it("TC-AUTH-02: Rejects invalid, forged, or malformed Google ID tokens", async () => {
     const res = await fetch(`${API_BASE}/auth/google`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-test-client-ip": "secure-auth-test-client",
+      },
       body: JSON.stringify({
         idToken: "header.invalid_payload_forged.signature",
       }),
@@ -44,7 +58,10 @@ describe("Phase 2 & 3: Secure Google Authentication & Session Authorization Test
 
     const res = await fetch(`${API_BASE}/auth/google`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-test-client-ip": "secure-auth-test-client",
+      },
       body: JSON.stringify({
         idToken: expiredFakeToken,
       }),

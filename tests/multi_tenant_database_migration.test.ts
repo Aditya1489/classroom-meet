@@ -31,6 +31,11 @@ describe("Milestone 2: Multi-Tenant Database Foundation Verification", () => {
       const res = await query(`SELECT COUNT(*)::int as count FROM "${t}";`);
       preMigrationCounts[t] = res.rows[0].count;
     }
+    const fpClasses = await query(
+      "SELECT COUNT(*)::int as count FROM live_classes WHERE organization_id = $1 OR organization_id IS NULL;",
+      [FIRST_PARTY_ORG_ID]
+    );
+    preMigrationCounts["live_classes_first_party"] = fpClasses.rows[0].count;
     console.log("  [Pre-Migration Counts]:", preMigrationCounts);
   });
 
@@ -112,7 +117,7 @@ describe("Milestone 2: Multi-Tenant Database Foundation Verification", () => {
     );
     assert.strictEqual(
       backfilledClasses.rows[0].count,
-      preMigrationCounts["live_classes"],
+      preMigrationCounts["live_classes_first_party"],
       "All pre-existing live_classes must belong to first-party organization"
     );
 

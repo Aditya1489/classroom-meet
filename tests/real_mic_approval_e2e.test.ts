@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { io, Socket } from "socket.io-client";
 
@@ -16,8 +16,14 @@ function makeToken(id: string, role: string, name: string) {
   return `${h}.${p}.sig`;
 }
 
-describe("Mathsy Meet — Real Multi-Peer Microphone Flow Integration Tests", () => {
-  const signalingUrl = "https://rtc.mathsy.in";
+const isRemoteSfuOptedIn = process.env.RUN_REMOTE_SFU_TESTS === "true";
+
+describe("Mathsy Meet — Real Multi-Peer Microphone Flow Integration Tests", {
+  skip: !isRemoteSfuOptedIn
+    ? "Opt-in only: Set RUN_REMOTE_SFU_TESTS=true to enable live tests connecting to production SFU (https://rtc.mathsy.in)"
+    : false,
+}, () => {
+  const signalingUrl = process.env.TEST_SFU_URL || "https://rtc.mathsy.in";
   const testRoomCode = "int-test-" + Math.random().toString(36).substring(2, 8);
   const otherRoomCode = "int-other-" + Math.random().toString(36).substring(2, 8);
 
@@ -390,9 +396,12 @@ describe("Mathsy Meet — Real Multi-Peer Microphone Flow Integration Tests", ()
     assert.equal(tutorUnmuteRequests.some((r) => r.userId === student2Id), true);
   });
 
-  it("Teardown sockets cleanly", () => {
+  after(() => {
     tutorSocket?.disconnect();
+    tutorSocket?.close();
     student1Socket?.disconnect();
+    student1Socket?.close();
     student2Socket?.disconnect();
+    student2Socket?.close();
   });
 });

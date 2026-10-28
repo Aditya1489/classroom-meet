@@ -29,8 +29,14 @@ function makeToken(id: string, role: string, name: string) {
   return `${h}.${p}.sig`;
 }
 
-describe("Step 2: Real Socket.IO Signaling Lifecycle & Room Isolation Suite", () => {
-  const serverUrl = process.env.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in";
+const isRemoteSfuOptedIn = process.env.RUN_REMOTE_SFU_TESTS === "true";
+
+describe("Step 2: Real Socket.IO Signaling Lifecycle & Room Isolation Suite", {
+  skip: !isRemoteSfuOptedIn
+    ? "Opt-in only: Set RUN_REMOTE_SFU_TESTS=true to enable live tests connecting to production SFU (https://rtc.mathsy.in)"
+    : false,
+}, () => {
+  const serverUrl = process.env.VITE_MEDIASOUP_SERVER_URL || process.env.TEST_SFU_URL || "https://rtc.mathsy.in";
   const roomA = `sig-room-a-${Math.random().toString(36).substring(2, 7)}`;
   const roomB = `sig-room-b-${Math.random().toString(36).substring(2, 7)}`;
 
@@ -304,9 +310,13 @@ describe("Step 2: Real Socket.IO Signaling Lifecycle & Room Isolation Suite", ()
 
   after(() => {
     tutorSocket?.disconnect();
+    tutorSocket?.close();
     student1Socket?.disconnect();
+    student1Socket?.close();
     student2Socket?.disconnect();
+    student2Socket?.close();
     studentBSocket?.disconnect();
+    studentBSocket?.close();
 
     const sorted = [...latencies].sort((a, b) => a - b);
     const p50 = sorted[Math.floor(sorted.length * 0.5)];

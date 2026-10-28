@@ -3,13 +3,16 @@ import { LandingView } from "./components/landing/LandingView";
 import { LobbyView } from "./components/lobby/LobbyView";
 import { MeetingRoom } from "./components/meet/MeetingRoom";
 import { PairTabletPage } from "./components/meet/PairTabletPage";
+import { EmbedMeetingView } from "./components/meet/EmbedMeetingView";
+import { DeveloperDashboardView } from "./components/dashboard/DeveloperDashboardView";
+import { PlatformAdminView } from "./components/admin/PlatformAdminView";
 import { sanitizeRoomId } from "./lib/utils";
 import { createDemoRoom } from "./services/roomService";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<"landing" | "lobby" | "room" | "left" | "pair">("landing");
+  const [currentView, setCurrentView] = useState<"landing" | "lobby" | "room" | "left" | "pair" | "embed" | "dashboard" | "admin">("landing");
   const [activeMeetingCode, setActiveMeetingCode] = useState<string>("");
   const [joinOptions, setJoinOptions] = useState<{
     micMuted: boolean;
@@ -34,6 +37,25 @@ export default function App() {
       const path = window.location.pathname;
       const urlParams = new URLSearchParams(window.location.search);
       const isDemoQuery = urlParams.get("demo") === "1";
+
+      if (path.startsWith("/embed/") || path.includes("/embed/")) {
+        const code = sanitizeRoomId(path.split("/embed/")[1]);
+        if (code) {
+          setActiveMeetingCode(code);
+          setCurrentView("embed");
+          return;
+        }
+      }
+
+      if (path === "/admin" || path.startsWith("/admin")) {
+        setCurrentView("admin");
+        return;
+      }
+
+      if (path === "/dashboard" || path.startsWith("/dashboard") || path === "/developer" || path.startsWith("/developer")) {
+        setCurrentView("dashboard");
+        return;
+      }
 
       if (path === "/pair" || path.startsWith("/pair")) {
         setCurrentView("pair");
@@ -170,8 +192,33 @@ export default function App() {
         />
       )}
 
+      {currentView === "embed" && (
+        <EmbedMeetingView
+          roomCode={activeMeetingCode}
+          onBackToHome={handleReturnToHome}
+        />
+      )}
+
+      {currentView === "admin" && (
+        <PlatformAdminView
+          onBackToHome={handleReturnToHome}
+        />
+      )}
+
+      {currentView === "dashboard" && (
+        <DeveloperDashboardView
+          onBackToHome={handleReturnToHome}
+        />
+      )}
+
       {currentView === "landing" && (
-        <LandingView onStartMeeting={handleStartMeeting} />
+        <LandingView
+          onStartMeeting={handleStartMeeting}
+          onOpenDashboard={() => {
+            window.history.pushState({}, "", "/dashboard");
+            setCurrentView("dashboard");
+          }}
+        />
       )}
 
       {currentView === "lobby" && (

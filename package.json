@@ -9,8 +9,12 @@
     "server:dev": "tsx watch server/index.ts",
     "dev:all": "concurrently \"npm run server:dev\" \"npm run dev\"",
     "build": "tsc && vite build",
+    "build:server": "esbuild server/index.ts --platform=node --format=esm --target=node20 --bundle --packages=external --outdir=dist-server && node -e \"const fs = require('fs'); fs.mkdirSync('dist-server/db/migrations', { recursive: true }); fs.copyFileSync('server/db/schema.sql', 'dist-server/db/schema.sql'); fs.readdirSync('server/db/migrations').forEach(f => fs.copyFileSync('server/db/migrations/' + f, 'dist-server/db/migrations/' + f));\"",
+    "build:all": "npm run build && npm run build:server",
+    "start:server": "node dist-server/index.js",
+    "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
     "preview": "vite preview",
-    "test": "tsx --test 'tests/**/*.test.ts'"
+    "test": "tsx --test --test-concurrency=1 'tests/**/*.test.ts'"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.23",
@@ -45,6 +49,7 @@
     "tldraw": "^5.0.1"
   },
   "devDependencies": {
+    "@mathsy/meet-sdk": "file:./sdk",
     "@types/canvas-confetti": "^1.9.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
@@ -57,10 +62,15 @@
     "@vitejs/plugin-react-swc": "^3.11.0",
     "autoprefixer": "^10.4.21",
     "concurrently": "^10.0.6",
+    "esbuild": "^0.21.5",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.23.15",
     "typescript": "^5.8.3",
     "vite": "^5.4.19"
+  },
+  "overrides": {
+    "body-parser": "^2.4.0",
+    "postcss-selector-parser": "^6.1.5"
   }
 }

@@ -5,8 +5,11 @@
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
 
-function getAuthHeaders(): HeadersInit {
-  const token = localStorage.getItem("mathsy_meet_token");
+function getAuthHeaders(customToken?: string): HeadersInit {
+  const token =
+    customToken ||
+    (typeof window !== "undefined" && window.sessionStorage.getItem("mathsy_meet_embed_token")) ||
+    localStorage.getItem("mathsy_meet_token");
   return {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),

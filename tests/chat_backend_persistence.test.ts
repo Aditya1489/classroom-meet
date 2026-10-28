@@ -68,21 +68,7 @@ describe("Temporary MongoDB Chat Backend & Security Verification", () => {
     assert.ok(sessionId, "Room creation must return unique sessionId");
   });
 
-  after(async () => {
-    // Cleanup MongoDB
-    try {
-      const chatCol = getChatCollection()!;
-      const sessCol = getSessionsCollection()!;
-      await chatCol.deleteMany({ roomCode });
-      await sessCol.deleteMany({ roomCode });
-    } catch (e) {}
 
-    // Cleanup PostgreSQL
-    await query("DELETE FROM live_classes WHERE room_code = $1", [roomCode]);
-    await query("DELETE FROM users WHERE id IN ($1, $2)", [tutorId, studentId]);
-    await closeMongo();
-    await pool.end();
-  });
 
   // ── 1. Authentication Security Gates ──
   it("TC-SEC-01: Rejects unauthenticated GET /:roomCode/chat with 401", async () => {
@@ -388,5 +374,22 @@ describe("Temporary MongoDB Chat Backend & Security Verification", () => {
     assert.equal(newHistoryRes.status, 200);
     const newHistoryJson = await newHistoryRes.json();
     assert.equal(newHistoryJson.messages.length, 0, "Reused roomCode must start with zero chat messages");
+  });
+
+  after(async () => {
+    // Cleanup MongoDB
+    try {
+      const chatCol = getChatCollection()!;
+      const sessCol = getSessionsCollection()!;
+      await chatCol.deleteMany({ roomCode });
+      await sessCol.deleteMany({ roomCode });
+    } catch (e) {}
+
+    // Cleanup PostgreSQL
+    await query("DELETE FROM live_classes WHERE room_code = $1", [roomCode]);
+    await query("DELETE FROM users WHERE id IN ($1, $2)", [tutorId, studentId]);
+    await closeMongo();
+    await pool.end();
+    setTimeout(() => process.exit(0), 500);
   });
 });

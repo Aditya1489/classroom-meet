@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { query } from "../db";
 import { requireAuth, authMiddleware } from "./auth";
 import { getChatCollection, getSessionsCollection } from "../db/mongo";
+import { invalidateRoomCache } from "../middleware/roomAuth";
 
 export const roomsRouter = Router();
 
@@ -208,9 +209,20 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
     const displayName = user.full_name || "Participant";
 
     // 3. Trustworthy Host check:
-    // A user is ONLY a tutor/host if their verified user ID matches the room's tutor_id.
+    // A user is ONLY a tutor/host if their verified user ID matches the room's tutor_id,
+    // or if they present a verified participant token with role: tutor and isHost: true.
     // Client-supplied role and display names containing 'tutor' or 'host' confer ZERO privileges.
+    if (user.isParticipantToken) {
+      if (user.room_code && user.room_code.toLowerCase() !== sanitizedCode) {
+        return res.status(403).json({ error: "Participant token is not valid for this room" });
+      }
+      if (user.tenant_id && room.organization_id && user.tenant_id !== room.organization_id) {
+        return res.status(403).json({ error: "Participant token tenant does not match room tenant" });
+      }
+    }
+
     const isHost = Boolean(
+      (user.isParticipantToken && user.role === "tutor" && user.permissions?.isHost) ||
       (room.tutor_id && String(room.tutor_id) === String(userId)) ||
       (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(userId))
     );
@@ -250,11 +262,11 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
       );
     }
 
-    // 5. Insert clean, verified participant record
+    // 5. Insert clean, verified participant record with organization_id
     const insertSql = `
-      INSERT INTO room_participants (room_code, user_id, display_name, role, camera_allowed, joined_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
-      RETURNING id, room_code, user_id, display_name, role, camera_allowed, joined_at;
+      INSERT INTO room_participants (room_code, user_id, display_name, role, camera_allowed, organization_id, joined_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      RETURNING id, room_code, user_id, display_name, role, camera_allowed, organization_id, joined_at;
     `;
 
     const result = await query(insertSql, [
@@ -263,6 +275,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
       displayName,
       role,
       isHost ? true : camera_allowed,
+      room.organization_id || null,
     ]);
 
     const sessionId = String(room.metadata?.session_id || room.id);
@@ -313,7 +326,8 @@ roomsRouter.post("/:roomCode/leave", authMiddleware, async (req: Request, res: R
     const userId = user?.id || req.body?.user_id;
     const displayName = req.body?.display_name;
 
-    if (userId) {
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
+    if (isUUID) {
       await query(
         `UPDATE room_participants
          SET left_at = NOW()
@@ -365,6 +379,7 @@ roomsRouter.post("/:roomCode/end", requireAuth, async (req: Request, res: Respon
       "UPDATE live_classes SET is_active = false, ended_at = NOW() WHERE room_code = $1",
       [sanitizedCode]
     );
+    invalidateRoomCache(sanitizedCode);
 
     // Mark all remaining participants as left
     await query(

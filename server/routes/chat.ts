@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
 import { requireAuth } from "./auth";
+import { authorizeRoomAccess, sanitizeRoomCode } from "../middleware/roomAuth";
 import { getChatCollection, getSessionsCollection, MongoChatMessage } from "../db/mongo";
 
 export const chatRouter = Router();
@@ -33,8 +34,25 @@ setInterval(() => {
   }
 }, 60000);
 
-function sanitizeCode(code: any): string {
-  return String(Array.isArray(code) ? code[0] : code || "").trim().toLowerCase();
+/**
+ * Helper to compute authoritative isHost status for a room.
+ * Removes generic `user.role === 'tutor'` wildcard to prevent privilege escalation.
+ */
+export function isRoomHost(user: any, room: any): boolean {
+  if (!user || !room) return false;
+
+  // 1. Participant token with explicit host permission bound to this room
+  if (user.isParticipantToken) {
+    return user.role === "tutor" && Boolean(user.permissions?.isHost);
+  }
+
+  // 2. Room owner matching room.tutor_id or metadata.tutor_id
+  const isOwner = Boolean(
+    (room.tutor_id && String(room.tutor_id) === String(user.id)) ||
+    (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(user.id))
+  );
+
+  return isOwner;
 }
 
 /**
@@ -42,25 +60,11 @@ function sanitizeCode(code: any): string {
  * Retrieves complete active-session chat history from MongoDB.
  * Strictly requires authentication and an active meeting session.
  */
-chatRouter.get("/:roomCode/chat", requireAuth, async (req: Request, res: Response) => {
+chatRouter.get("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req: Request, res: Response) => {
   try {
-    const { roomCode } = req.params;
-    const sanitizedCode = sanitizeCode(roomCode);
+    const room = (req as any).room;
+    const sanitizedCode = sanitizeRoomCode(room.room_code);
 
-    // 1. Verify that the room exists and is currently active in PostgreSQL
-    const roomRes = await query(
-      "SELECT id, room_code, tutor_id, is_active, metadata FROM live_classes WHERE room_code = $1",
-      [sanitizedCode]
-    );
-
-    if (roomRes.rows.length === 0) {
-      return res.status(404).json({ error: "Room not found" });
-    }
-
-    const room = roomRes.rows[0];
-    if (!room.is_active) {
-      return res.status(404).json({ error: "Class has ended", messages: [], isEnded: true });
-    }
 
     // 2. Derive authoritative session ID
     const sessionId = String(room.metadata?.session_id || room.id);
@@ -123,35 +127,16 @@ chatRouter.get("/:roomCode/chat", requireAuth, async (req: Request, res: Respons
  * Persists a new temporary message to MongoDB.
  * Strictly requires authentication; derives sender identity and role server-side.
  */
-chatRouter.post("/:roomCode/chat", requireAuth, async (req: Request, res: Response) => {
+chatRouter.post("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req: Request, res: Response) => {
   try {
-    const { roomCode } = req.params;
-    const sanitizedCode = sanitizeCode(roomCode);
+    const room = (req as any).room;
     const user = (req as any).user;
-
-    // 1. Verify active room in PostgreSQL
-    const roomRes = await query(
-      "SELECT id, room_code, tutor_id, is_active, metadata FROM live_classes WHERE room_code = $1",
-      [sanitizedCode]
-    );
-
-    if (roomRes.rows.length === 0) {
-      return res.status(404).json({ error: "Room not found" });
-    }
-
-    const room = roomRes.rows[0];
-    if (!room.is_active) {
-      return res.status(404).json({ error: "Class has ended. Messages can no longer be sent." });
-    }
+    const sanitizedCode = sanitizeRoomCode(room.room_code);
 
     const sessionId = String(room.metadata?.session_id || room.id);
 
-    // 2. Authoritative role & host check
-    const isHost = Boolean(
-      (room.tutor_id && String(room.tutor_id) === String(user.id)) ||
-      (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(user.id)) ||
-      user.role === "tutor"
-    );
+    // 2. Authoritative role & host check (no generic user.role === 'tutor' bypass)
+    const isHost = isRoomHost(user, room);
     const senderRole: "tutor" | "student" = isHost ? "tutor" : "student";
 
     // 3. Check Chat Lock
@@ -234,12 +219,14 @@ chatRouter.post("/:roomCode/chat", requireAuth, async (req: Request, res: Respon
     const insertResult = await chatCol.insertOne(doc);
     const canonicalId = insertResult.insertedId.toString();
 
-    // 8. Update session lastActivityAt
+    // 8. Update session lastActivityAt asynchronously to prevent blocking response path
     if (sessionsCol) {
-      await sessionsCol.updateOne(
+      sessionsCol.updateOne(
         { sessionId },
         { $set: { lastActivityAt: now } }
-      );
+      ).catch((err: any) => {
+        console.error("[Chat Session Activity Update Error]:", err.message);
+      });
     }
 
     return res.json({
@@ -269,29 +256,15 @@ chatRouter.post("/:roomCode/chat", requireAuth, async (req: Request, res: Respon
  * POST /api/rooms/:roomCode/chat/lock
  * Authoritative host lock/unlock toggle.
  */
-chatRouter.post("/:roomCode/chat/lock", requireAuth, async (req: Request, res: Response) => {
+chatRouter.post("/:roomCode/chat/lock", requireAuth, authorizeRoomAccess({ requireTutor: true }), async (req: Request, res: Response) => {
   try {
-    const { roomCode } = req.params;
-    const sanitizedCode = sanitizeCode(roomCode);
+    const room = (req as any).room;
     const user = (req as any).user;
+    const sanitizedCode = sanitizeRoomCode(room.room_code);
     const { locked } = req.body;
 
-    const roomRes = await query(
-      "SELECT id, tutor_id, is_active, metadata FROM live_classes WHERE room_code = $1",
-      [sanitizedCode]
-    );
-
-    if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
-      return res.status(404).json({ error: "Active class not found" });
-    }
-
-    const room = roomRes.rows[0];
-    const isOwner = Boolean(
-      (room.tutor_id && String(room.tutor_id) === String(user.id)) ||
-      (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(user.id))
-    );
-
-    if (!isOwner) {
+    const isHost = isRoomHost(user, room);
+    if (!isHost) {
       return res.status(403).json({ error: "Only the host can lock or unlock chat" });
     }
 
@@ -326,29 +299,15 @@ chatRouter.post("/:roomCode/chat/lock", requireAuth, async (req: Request, res: R
  * POST /api/rooms/:roomCode/chat/pin
  * Authoritative host notice pin/unpin handler.
  */
-chatRouter.post("/:roomCode/chat/pin", requireAuth, async (req: Request, res: Response) => {
+chatRouter.post("/:roomCode/chat/pin", requireAuth, authorizeRoomAccess({ requireTutor: true }), async (req: Request, res: Response) => {
   try {
-    const { roomCode } = req.params;
-    const sanitizedCode = sanitizeCode(roomCode);
+    const room = (req as any).room;
     const user = (req as any).user;
+    const sanitizedCode = sanitizeRoomCode(room.room_code);
     const { text } = req.body;
 
-    const roomRes = await query(
-      "SELECT id, tutor_id, is_active, metadata FROM live_classes WHERE room_code = $1",
-      [sanitizedCode]
-    );
-
-    if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
-      return res.status(404).json({ error: "Active class not found" });
-    }
-
-    const room = roomRes.rows[0];
-    const isOwner = Boolean(
-      (room.tutor_id && String(room.tutor_id) === String(user.id)) ||
-      (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(user.id))
-    );
-
-    if (!isOwner) {
+    const isHost = isRoomHost(user, room);
+    if (!isHost) {
       return res.status(403).json({ error: "Only the host can pin messages" });
     }
 
@@ -386,3 +345,4 @@ chatRouter.post("/:roomCode/chat/pin", requireAuth, async (req: Request, res: Re
     return res.status(500).json({ error: "Failed to update pinned message" });
   }
 });
+

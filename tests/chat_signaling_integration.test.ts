@@ -34,8 +34,14 @@ function waitForMessage(socket: Socket, filter: (msg: any) => boolean, timeoutMs
   });
 }
 
-describe("Signaling Server Real-Time Chat Integration (https://rtc.mathsy.in)", () => {
-  const serverUrl = "https://rtc.mathsy.in";
+const isRemoteSfuOptedIn = process.env.RUN_REMOTE_SFU_TESTS === "true";
+
+describe("Signaling Server Real-Time Chat Integration (https://rtc.mathsy.in)", {
+  skip: !isRemoteSfuOptedIn
+    ? "Opt-in only: Set RUN_REMOTE_SFU_TESTS=true to enable live tests connecting to production SFU (https://rtc.mathsy.in)"
+    : false,
+}, () => {
+  const serverUrl = process.env.TEST_SFU_URL || "https://rtc.mathsy.in";
   const roomA = "test-chat-roomA-" + Math.random().toString(36).substring(2, 7);
   const roomB = "test-chat-roomB-" + Math.random().toString(36).substring(2, 7);
 
@@ -91,9 +97,13 @@ describe("Signaling Server Real-Time Chat Integration (https://rtc.mathsy.in)", 
 
   after(() => {
     tutorA?.disconnect();
+    tutorA?.close();
     studentA1?.disconnect();
+    studentA1?.close();
     studentA2?.disconnect();
+    studentA2?.close();
     studentB?.disconnect();
+    studentB?.close();
   });
 
   // ── CHAT-001: Single message delivery (Tutor -> Student) ──
