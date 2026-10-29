@@ -26,10 +26,8 @@ interface AuthContextType {
   signOut: () => Promise<void>;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
-const GOOGLE_CLIENT_ID =
-  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-  "207248778617-3n7l8vp8cgqv8dhiqltnsnmoj9n8ain7.apps.googleusercontent.com";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -172,6 +170,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const triggerGoogleOAuth = (intent: "signin" | "signup", role?: "tutor" | "student") => {
     try {
+      if (!GOOGLE_CLIENT_ID) {
+        console.error("[Auth] Google Client ID is not configured (missing VITE_GOOGLE_CLIENT_ID in env)");
+        toast.error("Google Sign-In is not configured: missing VITE_GOOGLE_CLIENT_ID in environment.");
+        return;
+      }
       localStorage.setItem("mathsy_meet_auth_intent", intent);
       if (role) {
         localStorage.setItem("mathsy_meet_signup_role", role);

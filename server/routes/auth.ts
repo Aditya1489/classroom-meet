@@ -20,15 +20,18 @@ export const authRateLimiter = createRateLimiter({
   errorMessage: "Too many authentication requests from this IP. Please try again shortly.",
 });
 
-// Supported Google OAuth Client IDs (env vars + client defaults)
-const GOOGLE_CLIENT_IDS = [
-  process.env.VITE_GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_ID,
-  "207248778617-3n7l8vp8cgqv8dhiqltnsnmoj9n8ain7.apps.googleusercontent.com",
-  "624389472912-jb3ji3bklfi2frmb9nuhc3n9alnfpdqm.apps.googleusercontent.com",
-].filter(Boolean) as string[];
+// Supported Google OAuth Client IDs (strictly loaded from environment variables)
+export function getGoogleClientIds(): string[] {
+  return [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.VITE_GOOGLE_CLIENT_ID,
+  ].filter(Boolean) as string[];
+}
 
-const googleClient = new OAuth2Client(GOOGLE_CLIENT_IDS[0]);
+export function getGoogleClient(): OAuth2Client {
+  const ids = getGoogleClientIds();
+  return new OAuth2Client(ids[0] || undefined);
+}
 
 export function generateToken(payload: { id: string; email?: string; role: string; name: string }) {
   const secret = getJwtSecret();
@@ -168,12 +171,15 @@ authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) 
     let verifiedName = "";
     let verifiedPicture = "";
 
+    const configuredClientIds = getGoogleClientIds();
+    const googleClient = getGoogleClient();
+
     if (idToken) {
       // Verify cryptographically signed Google ID Token
       try {
         const ticket = await googleClient.verifyIdToken({
           idToken,
-          audience: GOOGLE_CLIENT_IDS,
+          audience: configuredClientIds.length > 0 ? configuredClientIds : undefined,
         });
         const payload = ticket.getPayload();
         if (!payload || !payload.sub) {
@@ -196,7 +202,7 @@ authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) 
       // Verify Google Access Token via Google tokeninfo + userinfo endpoints
       try {
         const tokenInfo = await googleClient.getTokenInfo(accessToken);
-        if (tokenInfo.aud && GOOGLE_CLIENT_IDS.length > 0 && !GOOGLE_CLIENT_IDS.includes(tokenInfo.aud)) {
+        if (tokenInfo.aud && configuredClientIds.length > 0 && !configuredClientIds.includes(tokenInfo.aud)) {
           return res.status(401).json({ error: "Google token audience mismatch" });
         }
 
