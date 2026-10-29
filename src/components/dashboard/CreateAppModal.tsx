@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Globe, X, Plus, Trash2, Palette } from "lucide-react";
 import { toast } from "sonner";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface CreateAppModalProps {
   orgId: string;
@@ -34,7 +35,7 @@ export const CreateAppModal: React.FC<CreateAppModalProps> = ({
     setSubmitting(true);
     try {
       const token = localStorage.getItem("mathsy_meet_token");
-      const res = await fetch(`/api/organizations/${orgId}/apps`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/apps`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -50,12 +51,18 @@ export const CreateAppModal: React.FC<CreateAppModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback for non-JSON errors
+      }
+
       if (!res.ok) {
         if (data.code === "APP_NAME_EXISTS") {
           toast.error(`An application with name "${appName.trim()}" already exists in this organization.`);
         } else {
-          toast.error(data.error || "Failed to register customer app");
+          toast.error(data.error || `Failed to register customer app (${res.status})`);
         }
         setSubmitting(false);
         return;

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Webhook, X, Shield, Info, Check } from "lucide-react";
 import { toast } from "sonner";
+import { API_BASE } from "../../lib/apiConfig";
 
 export interface WebhookEndpoint {
   id: string;
@@ -88,7 +89,7 @@ export const CreateWebhookModal: React.FC<CreateWebhookModalProps> = ({
     try {
       if (isEditing && endpointToEdit) {
         // PATCH existing endpoint
-        const res = await fetch(`/api/organizations/${orgId}/webhooks/${endpointToEdit.id}`, {
+        const res = await fetch(`${API_BASE}/organizations/${orgId}/webhooks/${endpointToEdit.id}`, {
           method: "PATCH",
           headers: getHeaders(),
           body: JSON.stringify({
@@ -99,9 +100,15 @@ export const CreateWebhookModal: React.FC<CreateWebhookModalProps> = ({
           }),
         });
 
-        const data = await res.json();
+        let data: any = {};
+        try {
+          data = await res.json();
+        } catch {
+          // Safe fallback for non-JSON errors
+        }
+
         if (!res.ok) {
-          toast.error(data.error || "Failed to update webhook endpoint");
+          toast.error(data.error || `Failed to update webhook endpoint (${res.status})`);
           return;
         }
 
@@ -109,7 +116,7 @@ export const CreateWebhookModal: React.FC<CreateWebhookModalProps> = ({
         onSuccess();
       } else {
         // POST new endpoint
-        const res = await fetch(`/api/organizations/${orgId}/webhooks`, {
+        const res = await fetch(`${API_BASE}/organizations/${orgId}/webhooks`, {
           method: "POST",
           headers: getHeaders(),
           body: JSON.stringify({
@@ -119,9 +126,15 @@ export const CreateWebhookModal: React.FC<CreateWebhookModalProps> = ({
           }),
         });
 
-        const data = await res.json();
+        let data: any = {};
+        try {
+          data = await res.json();
+        } catch {
+          // Safe fallback for non-JSON errors
+        }
+
         if (!res.ok) {
-          toast.error(data.error || "Failed to register webhook endpoint");
+          toast.error(data.error || `Failed to register webhook endpoint (${res.status})`);
           return;
         }
 

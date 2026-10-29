@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ApiKeyRevealModal } from "../dashboard/ApiKeyRevealModal";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface AdminOrganization {
   id: string;
@@ -142,7 +143,7 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
     const checkSuperadmin = async () => {
       try {
         setLoading(true);
-        const res = await fetch("/api/admin/check", { headers: getHeaders() });
+        const res = await fetch(`${API_BASE}/admin/check`, { headers: getHeaders() });
         if (!res.ok) {
           setIsSuperadmin(false);
           setLoading(false);
@@ -167,7 +168,7 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
   // 2. Fetch Organizations across platform
   const loadOrganizations = async (search = "") => {
     try {
-      const url = search ? `/api/admin/organizations?q=${encodeURIComponent(search)}` : "/api/admin/organizations";
+      const url = search ? `${API_BASE}/admin/organizations?q=${encodeURIComponent(search)}` : `${API_BASE}/admin/organizations`;
       const res = await fetch(url, { headers: getHeaders() });
       if (!res.ok) {
         throw new Error("Failed to load organizations");
@@ -187,7 +188,7 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
   const loadOrgDetails = async (orgId: string) => {
     try {
       setDetailsLoading(true);
-      const res = await fetch(`/api/admin/organizations/${orgId}`, { headers: getHeaders() });
+      const res = await fetch(`${API_BASE}/admin/organizations/${orgId}`, { headers: getHeaders() });
       if (!res.ok) {
         throw new Error("Failed to load organization profile");
       }
@@ -222,7 +223,7 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
 
     setCreatingOrg(true);
     try {
-      const res = await fetch("/api/admin/organizations", {
+      const res = await fetch(`${API_BASE}/admin/organizations`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({
@@ -233,9 +234,15 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
         }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback for non-JSON errors
+      }
+
       if (!res.ok) {
-        toast.error(data.error || "Failed to create customer organization");
+        toast.error(data.error || `Failed to create customer organization (${res.status})`);
         return;
       }
 
@@ -277,7 +284,7 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
         expiresAt = d.toISOString();
       }
 
-      const res = await fetch(`/api/admin/organizations/${selectedOrg.id}/keys`, {
+      const res = await fetch(`${API_BASE}/admin/organizations/${selectedOrg.id}/keys`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({
@@ -288,9 +295,15 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
         }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback for non-JSON errors
+      }
+
       if (!res.ok) {
-        toast.error(data.error || "Failed to issue API key");
+        toast.error(data.error || `Failed to issue API key (${res.status})`);
         return;
       }
 
@@ -322,14 +335,20 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
 
     setActionLoadingId(key.id);
     try {
-      const res = await fetch(`/api/admin/organizations/${selectedOrg.id}/keys/${key.id}/rotate`, {
+      const res = await fetch(`${API_BASE}/admin/organizations/${selectedOrg.id}/keys/${key.id}/rotate`, {
         method: "POST",
         headers: getHeaders(),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback for non-JSON errors
+      }
+
       if (!res.ok) {
-        toast.error(data.error || "Failed to rotate API key");
+        toast.error(data.error || `Failed to rotate API key (${res.status})`);
         return;
       }
 
@@ -358,14 +377,18 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
 
     setActionLoadingId(key.id);
     try {
-      const res = await fetch(`/api/admin/organizations/${selectedOrg.id}/keys/${key.id}`, {
+      const res = await fetch(`${API_BASE}/admin/organizations/${selectedOrg.id}/keys/${key.id}`, {
         method: "DELETE",
         headers: getHeaders(),
       });
 
       if (!res.ok) {
-        const data = await res.json();
-        toast.error(data.error || "Failed to revoke API key");
+        let errorMsg = `Failed to revoke API key (${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) errorMsg = data.error;
+        } catch {}
+        toast.error(errorMsg);
         return;
       }
 

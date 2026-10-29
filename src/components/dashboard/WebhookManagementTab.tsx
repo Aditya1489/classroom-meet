@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { CreateWebhookModal, WebhookEndpoint } from "./CreateWebhookModal";
 import { WebhookSecretRevealModal } from "./WebhookSecretRevealModal";
 import { WebhookDeliveriesModal } from "./WebhookDeliveriesModal";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface WebhookManagementTabProps {
   orgId: string;
@@ -49,7 +50,7 @@ export const WebhookManagementTab: React.FC<WebhookManagementTabProps> = ({ orgI
   const fetchEndpoints = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/organizations/${orgId}/webhooks`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/webhooks`, {
         headers: getHeaders(),
       });
       if (!res.ok) {
@@ -82,7 +83,7 @@ export const WebhookManagementTab: React.FC<WebhookManagementTabProps> = ({ orgI
   const handleSendTestPing = async (endpoint: WebhookEndpoint) => {
     setTestingEndpointId(endpoint.id);
     try {
-      const res = await fetch(`/api/organizations/${orgId}/webhooks/${endpoint.id}/test`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/webhooks/${endpoint.id}/test`, {
         method: "POST",
         headers: getHeaders(),
       });
@@ -106,7 +107,7 @@ export const WebhookManagementTab: React.FC<WebhookManagementTabProps> = ({ orgI
 
     setDeletingEndpointId(endpoint.id);
     try {
-      const res = await fetch(`/api/organizations/${orgId}/webhooks/${endpoint.id}`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/webhooks/${endpoint.id}`, {
         method: "DELETE",
         headers: getHeaders(),
       });

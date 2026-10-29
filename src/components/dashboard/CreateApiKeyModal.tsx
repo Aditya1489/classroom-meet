@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Key, X, Shield, Lock, Calendar } from "lucide-react";
 import { toast } from "sonner";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface CreateApiKeyModalProps {
   orgId: string;
@@ -50,7 +51,7 @@ export const CreateApiKeyModal: React.FC<CreateApiKeyModalProps> = ({
         expiresAt = d.toISOString();
       }
 
-      const res = await fetch(`/api/organizations/${orgId}/keys`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/keys`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -64,12 +65,18 @@ export const CreateApiKeyModal: React.FC<CreateApiKeyModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback for non-JSON errors
+      }
+
       if (!res.ok) {
         if (data.code === "KEY_NAME_EXISTS") {
           toast.error(`An active key with the name "${name.trim()}" already exists.`);
         } else {
-          toast.error(data.error || "Failed to create API key");
+          toast.error(data.error || `Failed to create API key (${res.status})`);
         }
         setSubmitting(false);
         return;

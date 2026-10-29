@@ -30,6 +30,7 @@ import { CreateOrgModal } from "./CreateOrgModal";
 import { WebhookManagementTab } from "./WebhookManagementTab";
 import { UsageAnalyticsTab } from "./UsageAnalyticsTab";
 import { QuickstartDocsTab } from "./QuickstartDocsTab";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface Organization {
   id: string;
@@ -122,7 +123,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
   });
 
   useEffect(() => {
-    fetch("/api/admin/check", { headers: getHeaders() })
+    fetch(`${API_BASE}/admin/check`, { headers: getHeaders() })
       .then((res) => (res.ok ? res.json() : { isSuperadmin: false }))
       .then((data) => setIsSuperadmin(Boolean(data.isSuperadmin)))
       .catch(() => setIsSuperadmin(false));
@@ -132,7 +133,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
   const fetchOrganizations = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/organizations", { headers: getHeaders() });
+      const res = await fetch(`${API_BASE}/organizations`, { headers: getHeaders() });
       if (!res.ok) {
         throw new Error("Failed to load organizations");
       }
@@ -168,7 +169,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
     if (!selectedOrg) return;
     try {
       // Keys
-      const keysRes = await fetch(`/api/organizations/${selectedOrg.id}/keys`, {
+      const keysRes = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/keys`, {
         headers: getHeaders(),
       });
       if (keysRes.ok) {
@@ -177,7 +178,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
       }
 
       // Apps
-      const appsRes = await fetch(`/api/organizations/${selectedOrg.id}/apps`, {
+      const appsRes = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/apps`, {
         headers: getHeaders(),
       });
       if (appsRes.ok) {
@@ -186,7 +187,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
       }
 
       // Audit Logs
-      const auditRes = await fetch(`/api/organizations/${selectedOrg.id}/keys/audit`, {
+      const auditRes = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/keys/audit`, {
         headers: getHeaders(),
       });
       if (auditRes.ok) {
@@ -220,7 +221,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
 
     setActionLoadingId(key.id);
     try {
-      const res = await fetch(`/api/organizations/${selectedOrg.id}/keys/${key.id}/rotate`, {
+      const res = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/keys/${key.id}/rotate`, {
         method: "POST",
         headers: getHeaders(),
       });
@@ -251,7 +252,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
 
     setActionLoadingId(key.id);
     try {
-      const res = await fetch(`/api/organizations/${selectedOrg.id}/keys/${key.id}`, {
+      const res = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/keys/${key.id}`, {
         method: "DELETE",
         headers: getHeaders(),
       });
@@ -276,7 +277,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
     if (!confirmDelete) return;
 
     try {
-      const res = await fetch(`/api/organizations/${selectedOrg.id}/apps/${app.id}`, {
+      const res = await fetch(`${API_BASE}/organizations/${selectedOrg.id}/apps/${app.id}`, {
         method: "DELETE",
         headers: getHeaders(),
       });

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { WebhookEndpoint } from "./CreateWebhookModal";
+import { API_BASE } from "../../lib/apiConfig";
 
 export interface WebhookDelivery {
   id: string;
@@ -55,7 +56,7 @@ export const WebhookDeliveriesModal: React.FC<WebhookDeliveriesModalProps> = ({
     try {
       setLoading(true);
       const res = await fetch(
-        `/api/organizations/${orgId}/webhooks/${endpoint.id}/deliveries`,
+        `${API_BASE}/organizations/${orgId}/webhooks/${endpoint.id}/deliveries`,
         { headers: getHeaders() }
       );
       if (!res.ok) {

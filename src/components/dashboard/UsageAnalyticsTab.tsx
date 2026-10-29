@@ -11,6 +11,7 @@ import {
   Info,
 } from "lucide-react";
 import { toast } from "sonner";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface UsageSummary {
   organizationId: string;
@@ -69,7 +70,7 @@ export const UsageAnalyticsTab: React.FC<UsageAnalyticsTabProps> = ({ orgId }) =
       if (startDate) queryParams.set("startDate", startDate);
       if (endDate) queryParams.set("endDate", endDate);
 
-      const res = await fetch(`/api/organizations/${orgId}/usage?${queryParams.toString()}`, {
+      const res = await fetch(`${API_BASE}/organizations/${orgId}/usage?${queryParams.toString()}`, {
         headers: getHeaders(),
       });
 

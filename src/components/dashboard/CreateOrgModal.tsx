@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Building, X } from "lucide-react";
 import { toast } from "sonner";
+import { API_BASE } from "../../lib/apiConfig";
 
 interface CreateOrgModalProps {
   onSuccess: (newOrg: any) => void;
@@ -24,7 +25,7 @@ export const CreateOrgModal: React.FC<CreateOrgModalProps> = ({
     setSubmitting(true);
     try {
       const token = localStorage.getItem("mathsy_meet_token");
-      const res = await fetch("/api/organizations", {
+      const res = await fetch(`${API_BASE}/organizations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -33,9 +34,15 @@ export const CreateOrgModal: React.FC<CreateOrgModalProps> = ({
         body: JSON.stringify({ name: name.trim() }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Safe fallback if server returns non-JSON error
+      }
+
       if (!res.ok) {
-        toast.error(data.error || "Failed to create organization");
+        toast.error(data.error || `Failed to create organization (${res.status})`);
         setSubmitting(false);
         return;
       }
