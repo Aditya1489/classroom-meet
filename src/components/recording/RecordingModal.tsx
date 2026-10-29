@@ -108,57 +108,38 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
     "https://studio.youtube.com/channel/live";
 
   const copyLiveLink = () => {
-    navigator.clipboard.writeText(effectiveWatchUrl);
-    toast.success("Watch link copied to clipboard!");
-  };
-
-  const handleSaveCustomWatchUrl = () => {
-    const trimmed = customWatchInput.trim();
-    if (!trimmed) {
-      setSessionWatchUrl("");
-      onSessionWatchUrlChange?.("");
-      setIsEditingWatchUrl(false);
-      return;
-    }
-
-    if (!isValidYouTubeWatchUrl(trimmed)) {
-      toast.error("Invalid URL. Enter https://www.youtube.com/watch?v=... or https://youtu.be/...");
-      return;
-    }
-
-    setSessionWatchUrl(trimmed);
-    onSessionWatchUrlChange?.(trimmed);
-    setIsEditingWatchUrl(false);
-    toast.success("Custom watch link set for this live session!");
-  };
-
-  // Speed Badge (B4: green ≥ 0.95, amber 0.8–0.95, red < 0.8)
-  const getSpeedBadge = () => {
-    if (!streamStats || streamStats.speed === undefined || !isLiveStreaming) return null;
-    const speed = streamStats.speed;
-    let colorClass = "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
-    let label = `${speed.toFixed(2)}x (Real-time)`;
-
-    if (speed < 0.8) {
-      colorClass = "bg-red-500/15 text-red-400 border-red-500/30 animate-pulse";
-      label = `${speed.toFixed(2)}x (Slow)`;
-    } else if (speed < 0.95) {
-      colorClass = "bg-amber-500/15 text-amber-400 border-amber-500/30";
-      label = `${speed.toFixed(2)}x (Slight delay)`;
-    }
-
-    return (
-      <div
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono border ${colorClass}`}
-        title="YouTube is receiving video slower than real time if speed < 1.0x"
-      >
-        <Activity className="w-3 h-3" />
-        <span>Speed: {label}</span>
-      </div>
-    );
+    const targetUrl = liveStreamUrl || connectedChannel?.liveUrl || `${window.location.origin}/meet/${meetingCode}`;
+    navigator.clipboard.writeText(targetUrl);
+    toast.success("YouTube Live Link copied to clipboard!");
   };
 
   const isWarmupComplete = secondsSinceActive >= 30;
+
+  // Save the custom watch URL input to session state (B8)
+  const handleSaveCustomWatchUrl = () => {
+    setSessionWatchUrl(customWatchInput.trim());
+    setIsEditingWatchUrl(false);
+    if (onSessionWatchUrlChange) {
+      onSessionWatchUrlChange(customWatchInput.trim());
+    }
+  };
+
+  // Render a speed/quality badge based on current stream stats (B4)
+  const getSpeedBadge = () => {
+    if (!streamStats) return null;
+    const { bitrateKbps, fps } = streamStats;
+    const isGood = bitrateKbps >= 2500 && fps >= 24;
+    const isFair = bitrateKbps >= 1000;
+    const color = isGood ? "text-green-400 border-green-500/40 bg-green-500/10"
+      : isFair ? "text-yellow-400 border-yellow-500/40 bg-yellow-500/10"
+      : "text-red-400 border-red-500/40 bg-red-500/10";
+    const label = isGood ? "Good" : isFair ? "Fair" : "Poor";
+    return (
+      <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-mono font-semibold ${color}`}>
+        {label} · {bitrateKbps} kbps · {fps} fps
+      </span>
+    );
+  };
 
   return (
     <>
@@ -187,11 +168,10 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
           <div className="flex border-b border-[#f3eee6]/[0.08] bg-[#16130f] px-6 pt-2 gap-4">
             <button
               onClick={() => setActiveTab("youtube")}
-              className={`pb-2.5 text-xs font-semibold font-mono uppercase tracking-wider transition border-b-2 flex items-center gap-1.5 ${
-                activeTab === "youtube"
-                  ? "border-[#f59e0b] text-[#f59e0b]"
-                  : "border-transparent text-[#a39e94] hover:text-[#f3eee6]"
-              }`}
+              className={`pb-2.5 text-xs font-semibold font-mono uppercase tracking-wider transition border-b-2 flex items-center gap-1.5 ${activeTab === "youtube"
+                ? "border-[#f59e0b] text-[#f59e0b]"
+                : "border-transparent text-[#a39e94] hover:text-[#f3eee6]"
+                }`}
             >
               <Youtube className="w-4 h-4 text-red-500" />
               Go Live on YouTube
@@ -201,11 +181,10 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
             </button>
             <button
               onClick={() => setActiveTab("local")}
-              className={`pb-2.5 text-xs font-semibold font-mono uppercase tracking-wider transition border-b-2 flex items-center gap-1.5 ${
-                activeTab === "local"
-                  ? "border-[#f59e0b] text-[#f59e0b]"
-                  : "border-transparent text-[#a39e94] hover:text-[#f3eee6]"
-              }`}
+              className={`pb-2.5 text-xs font-semibold font-mono uppercase tracking-wider transition border-b-2 flex items-center gap-1.5 ${activeTab === "local"
+                ? "border-[#f59e0b] text-[#f59e0b]"
+                : "border-transparent text-[#a39e94] hover:text-[#f3eee6]"
+                }`}
             >
               <Download className="w-4 h-4" />
               Local HD Recording
@@ -351,11 +330,10 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
                         <button
                           onClick={() => window.open(effectiveWatchUrl, "_blank")}
                           disabled={!isWarmupComplete}
-                          className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-semibold transition ${
-                            isWarmupComplete
-                              ? "bg-red-600 hover:bg-red-500 text-white"
-                              : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
-                          }`}
+                          className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-semibold transition ${isWarmupComplete
+                            ? "bg-red-600 hover:bg-red-500 text-white"
+                            : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+                            }`}
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                           {isWarmupComplete
@@ -396,11 +374,10 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
                     <button
                       onClick={onStartYouTubeLive}
                       disabled={!connectedChannel?.streamKey}
-                      className={`w-full py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition ${
-                        connectedChannel?.streamKey
-                          ? "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/20"
-                          : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
-                      }`}
+                      className={`w-full py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition ${connectedChannel?.streamKey
+                        ? "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/20"
+                        : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+                        }`}
                     >
                       <Radio className="w-4 h-4" />
                       Start YouTube Live Stream
