@@ -15,7 +15,22 @@ export interface DemoRoomResponse {
 }
 
 const getServerUrl = (): string => {
-  const url = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "https://rtc.mathsy.in";
+  const envMediasoupUrl = import.meta.env.VITE_MEDIASOUP_SERVER_URL || "";
+  const envApiBase = import.meta.env.VITE_API_BASE_URL || "";
+  let derivedFromApi = "";
+  try {
+    if (envApiBase) {
+      derivedFromApi = new URL(
+        envApiBase,
+        typeof window !== "undefined" && window.location ? window.location.origin : "http://localhost:5001"
+      ).origin;
+    }
+  } catch {}
+
+  const url =
+    envMediasoupUrl ||
+    derivedFromApi ||
+    (typeof window !== "undefined" && window.location ? window.location.origin : "");
   return url.replace(/\/$/, "");
 };
 

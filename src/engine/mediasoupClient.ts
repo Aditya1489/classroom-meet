@@ -118,8 +118,13 @@ function getEffectiveToken(token: string | undefined, userId: string, role: stri
 function sanitizeTransportData(data: any, signalingUrl: string) {
   if (!data) return data;
 
-  const publicServerIp = "80.225.208.166";
-  const publicDomain = "rtc.mathsy.in";
+  let fallbackHost = "";
+  try {
+    if (signalingUrl) {
+      const parsed = new URL(signalingUrl);
+      fallbackHost = parsed.hostname;
+    }
+  } catch {}
 
   if (Array.isArray(data.iceCandidates)) {
     const sanitizedCandidates: any[] = [];
@@ -132,12 +137,12 @@ function sanitizeTransportData(data: any, signalingUrl: string) {
         rawIp === "localhost" ||
         /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(rawIp);
 
-      if (isPrivate) {
-        console.log(`[MathsyMeet Engine] Rewriting private ICE candidate IP: ${rawIp} -> ${publicServerIp}`);
+      if (isPrivate && fallbackHost) {
+        console.log(`[MathsyMeet Engine] Rewriting private ICE candidate IP: ${rawIp} -> ${fallbackHost}`);
         sanitizedCandidates.push({
           ...c,
-          ip: publicServerIp,
-          address: publicServerIp,
+          ip: fallbackHost,
+          address: fallbackHost,
         });
       } else {
         sanitizedCandidates.push(c);
@@ -230,7 +235,25 @@ export class MathsyMediasoupEngine {
   private signalingUrl: string;
 
   constructor(customSignalingUrl?: string) {
-    const defaultUrl = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL) || "https://rtc.mathsy.in";
+    const envMediasoupUrl =
+      typeof import.meta !== "undefined" ? (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL : "";
+    const envApiBase =
+      typeof import.meta !== "undefined" ? (import.meta as any).env?.VITE_API_BASE_URL : "";
+    let derivedFromApi = "";
+    try {
+      if (envApiBase) {
+        derivedFromApi = new URL(
+          envApiBase,
+          typeof window !== "undefined" && window.location ? window.location.origin : "http://localhost:5001"
+        ).origin;
+      }
+    } catch {}
+
+    const defaultUrl =
+      envMediasoupUrl ||
+      derivedFromApi ||
+      (typeof window !== "undefined" && window.location ? window.location.origin : "");
+
     this.signalingUrl = customSignalingUrl || defaultUrl;
     if (!this.signalingUrl) {
       console.error("[MathsyMeet Engine] Critical: VITE_MEDIASOUP_SERVER_URL is not configured.");

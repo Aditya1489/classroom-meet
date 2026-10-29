@@ -70,7 +70,7 @@ export async function checkSfuHealth(): Promise<ComponentHealth> {
     process.env.SFU_HEALTH_URL ||
     process.env.MEDIASOUP_SERVER_URL ||
     process.env.VITE_MEDIASOUP_SERVER_URL ||
-    "https://rtc.mathsy.in"
+    "http://127.0.0.1:8083"
   ).replace(/\/$/, "");
 
   // In test mode without network, if explicitly mocked:
