@@ -44,12 +44,16 @@ v1SsoRouter.post(
       const {
         roomCode,
         userId,
+        externalSubject,
         email,
         name,
         role,
         externalIssuer,
         permissions,
+        expiresInSeconds,
       } = req.body;
+
+      const effectiveUserId = (typeof userId === "string" ? userId : typeof externalSubject === "string" ? externalSubject : "").trim();
 
       if (!roomCode || typeof roomCode !== "string") {
         return res.status(400).json({
@@ -58,7 +62,7 @@ v1SsoRouter.post(
         });
       }
 
-      if (!userId || typeof userId !== "string") {
+      if (!effectiveUserId) {
         return res.status(400).json({
           error: "userId / externalSubject is required",
           code: "MISSING_USER_ID",
@@ -83,12 +87,13 @@ v1SsoRouter.post(
         organizationId: organization.id,
         apiKeyId: apiKey?.id,
         roomCode,
-        userId,
+        userId: effectiveUserId,
         email,
         name,
         role,
         externalIssuer,
         permissions,
+        expiresInSeconds,
       });
 
       return res.status(201).json(result);
