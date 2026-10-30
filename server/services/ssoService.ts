@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { query } from "../db";
 import { issueParticipantToken, ParticipantRole, ParticipantPermissions } from "./participantTokenService";
+import { invalidateOriginCache } from "./originValidationService";
 
 export interface SsoConfig {
   id: string;
@@ -45,6 +46,7 @@ export interface CreateLaunchTokenParams {
   role?: ParticipantRole;
   externalIssuer?: string;
   permissions?: Partial<ParticipantPermissions>;
+  expiresInSeconds?: number;
 }
 
 export interface SsoLaunchResult {
@@ -87,11 +89,16 @@ function generateSecureBase62(byteCount = 32): string {
   return result;
 }
 
-function normalizeDomain(rawDomain: string): string {
+export function normalizeDomain(rawDomain: string): string {
   if (!rawDomain || typeof rawDomain !== "string") {
     throw new Error("Invalid domain string");
   }
-  return rawDomain.trim().toLowerCase().replace(/^@+/, "").replace(/\/$/, "");
+  let cleaned = rawDomain.trim().toLowerCase();
+  cleaned = cleaned.replace(/^https?:\/\//, "");
+  cleaned = cleaned.replace(/^www\./, "");
+  cleaned = cleaned.replace(/^@+/, "");
+  cleaned = cleaned.replace(/\/.*$/, "");
+  return cleaned;
 }
 
 /**
@@ -237,6 +244,8 @@ export async function addSsoDomain(organizationId: string, rawDomain: string): P
     [organizationId, domain]
   );
 
+  invalidateOriginCache();
+
   const row = res.rows[0];
   return {
     id: row.id,
@@ -256,7 +265,11 @@ export async function removeSsoDomain(organizationId: string, domainId: string):
      WHERE id = $1 AND organization_id = $2;`,
     [domainId, organizationId]
   );
-  return (res.rowCount ?? 0) > 0;
+  if ((res.rowCount ?? 0) > 0) {
+    invalidateOriginCache();
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -563,15 +576,21 @@ export async function createSsoLaunchToken(params: CreateLaunchTokenParams): Pro
       throw error;
     }
 
-    const domain = email.split("@")[1]?.toLowerCase();
+    const emailDomain = email.split("@")[1]?.toLowerCase() || "";
+    const normalizedEmailDomain = normalizeDomain(emailDomain);
     const domainRes = await query(
-      `SELECT id FROM organization_sso_domains
-       WHERE organization_id = $1 AND domain = $2 AND is_verified = TRUE;`,
-      [organizationId, domain]
+      `SELECT id, domain FROM organization_sso_domains
+       WHERE organization_id = $1 AND is_verified = TRUE;`,
+      [organizationId]
     );
 
-    if (domainRes.rows.length === 0) {
-      const error: any = new Error(`Email domain '@${domain}' is not authorized for SSO under this organization`);
+    const isDomainVerified = domainRes.rows.some((row: any) => {
+      const dbDomain = normalizeDomain(row.domain);
+      return dbDomain === normalizedEmailDomain;
+    });
+
+    if (!isDomainVerified) {
+      const error: any = new Error(`Email domain '@${emailDomain}' is not authorized for SSO under this organization`);
       error.statusCode = 403;
       error.code = "SSO_DOMAIN_UNAUTHORIZED";
       throw error;
@@ -596,8 +615,11 @@ export async function createSsoLaunchToken(params: CreateLaunchTokenParams): Pro
   const rawToken = `sso_launch_${generateSecureBase62(32)}`;
   const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
 
-  // Expires in 5 minutes (300 seconds)
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  // Single-use launch token expiry (default 5 minutes, clamped between 60s and 3600s)
+  const ttlSeconds = params.expiresInSeconds && params.expiresInSeconds > 0
+    ? Math.min(Math.max(params.expiresInSeconds, 60), 3600)
+    : 300;
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
 
   await query(
     `INSERT INTO sso_launch_tokens (

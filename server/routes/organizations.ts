@@ -5,6 +5,7 @@ import { query } from "../db";
 import { requireOrgRole } from "./apiKeys";
 import { getOrganizationUsageSummary } from "../services/meteringService";
 import { logger } from "../services/logger";
+import { invalidateOriginCache } from "../services/originValidationService";
 
 export const organizationsRouter = Router();
 
@@ -348,6 +349,7 @@ organizationsRouter.post("/:orgId/apps", requireAuth, async (req: Request, res: 
       domains,
       JSON.stringify(brandingObj),
     ]);
+    invalidateOriginCache();
     const row = insertRes.rows[0];
 
     return res.status(201).json({
@@ -409,6 +411,7 @@ organizationsRouter.patch("/:orgId/apps/:appId", requireAuth, async (req: Reques
        RETURNING id, organization_id, app_name, allowed_domains, branding, created_at, updated_at;`,
       [updatedName, updatedDomains, JSON.stringify(updatedBranding), appId, orgId]
     );
+    invalidateOriginCache();
     const row = updateRes.rows[0];
 
     return res.json({
@@ -449,6 +452,8 @@ organizationsRouter.delete("/:orgId/apps/:appId", requireAuth, async (req: Reque
     if (deleteRes.rows.length === 0) {
       return res.status(404).json({ error: "Customer app not found" });
     }
+
+    invalidateOriginCache();
 
     return res.json({ success: true, message: "Customer app deleted successfully" });
   } catch (err: any) {

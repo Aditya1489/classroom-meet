@@ -40,10 +40,15 @@ setInterval(() => {
       rateLimitMap.set(keyId, recent);
     }
   }
-}, 60000);
+}, 60000).unref();
 
 export function apiKeyAuth(options?: { environment?: ApiKeyEnvironment }) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // Pass browser CORS preflight OPTIONS requests without requiring authentication
+    if (req.method === "OPTIONS") {
+      return next();
+    }
+
     try {
       let rawKey: string | null = null;
 

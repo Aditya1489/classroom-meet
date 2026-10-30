@@ -23,13 +23,15 @@ export async function handleEmbedHtmlDocument(req: Request, res: Response) {
       return res.status(400).type("html").send("<!DOCTYPE html><html><body><h3>Missing room code</h3></body></html>");
     }
 
-    // 1. Query room, tenant status, and customer app allowed domains
+    // 1. Query room, tenant status, and customer app / SSO allowed domains
     const roomRes = await query(
       `SELECT lc.id, lc.room_code, lc.organization_id, lc.is_active, org.status as org_status,
-              ca.allowed_domains
+              ca.allowed_domains,
+              sod.domain as sso_domain
        FROM live_classes lc
        JOIN organizations org ON org.id = lc.organization_id
        LEFT JOIN customer_apps ca ON ca.organization_id = lc.organization_id
+       LEFT JOIN organization_sso_domains sod ON sod.organization_id = lc.organization_id AND sod.is_verified = TRUE
        WHERE lc.room_code = $1;`,
       [roomCode]
     );
@@ -45,7 +47,7 @@ export async function handleEmbedHtmlDocument(req: Request, res: Response) {
       return res.status(403).type("html").send("<!DOCTYPE html><html><body><h3>Organization account suspended</h3></body></html>");
     }
 
-    // Collect all unique allowed domains across registered apps for this organization
+    // Collect all unique allowed domains across registered apps and SSO domains for this organization
     const allowedDomainsSet = new Set<string>();
     for (const r of roomRes.rows) {
       if (Array.isArray(r.allowed_domains)) {
@@ -53,6 +55,13 @@ export async function handleEmbedHtmlDocument(req: Request, res: Response) {
           if (typeof d === "string" && d.trim().length > 0) {
             allowedDomainsSet.add(d.trim());
           }
+        }
+      }
+      if (r.sso_domain && typeof r.sso_domain === "string") {
+        const cleanSso = r.sso_domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
+        if (cleanSso) {
+          allowedDomainsSet.add(`https://${cleanSso}`);
+          allowedDomainsSet.add(`https://www.${cleanSso}`);
         }
       }
     }
@@ -121,6 +130,18 @@ function isDomainAllowed(parentOrigin: string, allowedDomains: string[]): boolea
       return true;
     }
 
+    // Hostname match (handles apex vs www: e.g. https://www.mathsy.in === https://mathsy.in)
+    try {
+      const parentHost = new URL(normalizedParent).hostname.replace(/^www\./, "");
+      const allowedUrl = normalizedAllowed.startsWith("http://") || normalizedAllowed.startsWith("https://")
+        ? normalizedAllowed
+        : `https://${normalizedAllowed}`;
+      const allowedHost = new URL(allowedUrl).hostname.replace(/^www\./, "");
+      if (parentHost === allowedHost) {
+        return true;
+      }
+    } catch {}
+
     // Wildcard subdomain matching (*.portal.com)
     if (domain.includes("*.")) {
       const baseDomain = domain.replace(/^https?:\/\//, "").replace(/^\*\./, "").toLowerCase();
@@ -150,13 +171,15 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
       return res.status(400).json({ valid: false, error: "MISSING_ROOM_CODE" });
     }
 
-    // 1. Query room, tenant status, and customer app allowed domains
+    // 1. Query room, tenant status, and customer app / SSO allowed domains
     const roomRes = await query(
       `SELECT lc.id, lc.room_code, lc.organization_id, lc.is_active, org.status as org_status,
-              ca.allowed_domains, ca.branding
+              ca.allowed_domains, ca.branding,
+              sod.domain as sso_domain
        FROM live_classes lc
        JOIN organizations org ON org.id = lc.organization_id
        LEFT JOIN customer_apps ca ON ca.organization_id = lc.organization_id
+       LEFT JOIN organization_sso_domains sod ON sod.organization_id = lc.organization_id AND sod.is_verified = TRUE
        WHERE lc.room_code = $1;`,
       [roomCode]
     );
@@ -178,7 +201,7 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
       });
     }
 
-    // Collect all unique allowed domains across registered apps for this organization
+    // Collect all unique allowed domains across registered apps and SSO domains for this organization
     const allowedDomainsSet = new Set<string>();
     let brandingObj: any = {};
 
@@ -188,6 +211,13 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
           if (typeof d === "string" && d.trim().length > 0) {
             allowedDomainsSet.add(d.trim());
           }
+        }
+      }
+      if (r.sso_domain && typeof r.sso_domain === "string") {
+        const cleanSso = r.sso_domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
+        if (cleanSso) {
+          allowedDomainsSet.add(`https://${cleanSso}`);
+          allowedDomainsSet.add(`https://www.${cleanSso}`);
         }
       }
       if (r.branding && typeof r.branding === "object") {

@@ -24,6 +24,7 @@ import { logger } from "./services/logger";
 import { getSystemHealthReport, checkPostgresHealth } from "./services/healthService";
 import { sweepStaleSessions, reconcileAbandonedRooms } from "./services/meteringService";
 import { validateStartupEnvironment } from "./services/envValidator";
+import { isOriginAllowed } from "./services/originValidationService";
 
 dotenv.config();
 
@@ -92,24 +93,16 @@ app.use(
         return callback(null, true);
       }
 
-      const normalizedOrigin = origin.trim().replace(/\/$/, "");
-      const allowedOrigins = getAllowedCorsOrigins();
-
-      // Check exact match or localhost in dev mode
-      const isAllowed =
-        allowedOrigins.includes(normalizedOrigin) ||
-        (process.env.NODE_ENV !== "production" &&
-          (normalizedOrigin.startsWith("http://localhost:") ||
-           normalizedOrigin.startsWith("http://127.0.0.1:")));
-
-      if (isAllowed) {
-        callback(null, true);
-      } else {
-        // Reject cross-origin credentialed access from unauthorized domains
-        callback(null, false);
-      }
+      isOriginAllowed(origin)
+        .then((allowed) => {
+          callback(null, allowed);
+        })
+        .catch(() => {
+          callback(null, false);
+        });
     },
     credentials: true,
+    optionsSuccessStatus: 204,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID", "X-API-Key", "X-API-Secret"],
   })

@@ -1,6 +1,14 @@
 {
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://152-67-5-129.sslip.io/api/:path*"
+    },
+    {
+      "source": "/socket.io/:path*",
+      "destination": "https://152-67-5-129.sslip.io/socket.io/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

@@ -192,3 +192,4 @@ window.open(`https://classroom-meet.vercel.app/meet/${roomCode}#sso_token=${laun
 | `TOKEN_EXPIRED` | 401 | Launch token expired before being consumed. | Request a new launch token from your backend. |
 | `TOKEN_ALREADY_USED` | 401 | Launch token was already consumed (replay attack). | Tokens are single-use; request a fresh token on page refresh. |
 | `ORIGIN_NOT_ALLOWED` | 403 | Parent origin not registered in Allowed Domains. | Add your parent domain to Allowed Domains in Developer Console. |
+
