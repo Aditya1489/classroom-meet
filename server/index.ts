@@ -16,6 +16,8 @@ import { v1RoomsRouter } from "./routes/v1/rooms";
 import { embedRouter, handleEmbedHtmlDocument } from "./routes/v1/embed";
 import { webhooksRouter } from "./routes/webhooks";
 import { adminRouter } from "./routes/admin";
+import { v1SsoRouter } from "./routes/v1/sso";
+import { ssoManagementRouter } from "./routes/ssoManagement";
 import { apiKeyAuth, requirePermission } from "./middleware/apiKeyAuth";
 import { requestIdMiddleware } from "./middleware/requestId";
 import { logger } from "./services/logger";
@@ -25,7 +27,7 @@ import { validateStartupEnvironment } from "./services/envValidator";
 
 dotenv.config();
 
-const app = express();
+export const app = express();
 const PORT = process.env.PORT || 5001;
 
 // Attach correlation request ID to every inbound request
@@ -173,9 +175,12 @@ app.use("/api/tablet", tabletRouter);
 app.use("/api/organizations", organizationsRouter);
 app.use("/api/organizations", apiKeysRouter);
 app.use("/api/organizations", webhooksRouter);
+app.use("/api/organizations", ssoManagementRouter);
 app.use("/v1/organizations", webhooksRouter);
 app.use("/api/v1/rooms", v1RoomsRouter);
 app.use("/v1/rooms", v1RoomsRouter);
+app.use("/api/v1/sso", v1SsoRouter);
+app.use("/v1/sso", v1SsoRouter);
 app.use("/api/v1/embed", embedRouter);
 app.use("/v1/embed", embedRouter);
 app.use("/api/admin", adminRouter);
@@ -220,6 +225,7 @@ async function startServer() {
       logger.error("Periodic session reaper encountered error", { error: err.message });
     }
   }, 300000);
+  reaperInterval.unref();
 
   const server = app.listen(PORT, () => {
     console.log(`📡 Backend API Server running at: http://localhost:${PORT}`);
@@ -240,7 +246,9 @@ async function startServer() {
   process.on("SIGTERM", handleShutdown);
 }
 
-startServer().catch((err) => {
-  console.error("Fatal error during server startup:", err);
-  process.exit(1);
-});
+if (process.env.NODE_ENV !== "test") {
+  startServer().catch((err) => {
+    console.error("Fatal error during server startup:", err);
+    process.exit(1);
+  });
+}

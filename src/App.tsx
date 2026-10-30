@@ -7,6 +7,7 @@ import { EmbedMeetingView } from "./components/meet/EmbedMeetingView";
 import { DeveloperDashboardView } from "./components/dashboard/DeveloperDashboardView";
 import { PlatformAdminView } from "./components/admin/PlatformAdminView";
 import { sanitizeRoomId } from "./lib/utils";
+import { sanitizeUrlToken } from "./types/embedProtocol";
 import { createDemoRoom } from "./services/roomService";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
 import { Toaster, toast } from "sonner";
@@ -89,6 +90,43 @@ export default function App() {
       if (path.includes("/meet/")) {
         const code = sanitizeRoomId(path.split("/meet/")[1]);
         if (code) {
+          const currentUrl = window.location.href;
+          const { ssoToken, cleanUrl } = sanitizeUrlToken(currentUrl);
+          if (cleanUrl !== currentUrl) {
+            window.history.replaceState({}, document.title, cleanUrl);
+          }
+
+          if (ssoToken) {
+            const rawApiBase = import.meta.env.VITE_API_BASE_URL || "/api";
+            const apiBase = rawApiBase.replace(/\/api$/, "/api/v1");
+            fetch(`${apiBase}/sso/consume-token`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ launchToken: ssoToken, roomCode: code }),
+            })
+              .then(async (res) => {
+                if (res.ok) {
+                  const ssoData = await res.json();
+                  sessionStorage.setItem(`mathsy_sso_session_${code}`, JSON.stringify(ssoData));
+                  sessionStorage.setItem(`mathsy_token_${code}`, ssoData.participantToken);
+                  sessionStorage.setItem(`mathsy_role_${code}`, ssoData.user.role);
+                  setJoinOptions((prev) => ({
+                    ...prev,
+                    displayName: ssoData.user.name || prev.displayName,
+                    role: ssoData.user.role || prev.role,
+                  }));
+                  setInitialRole(ssoData.user.role);
+                  toast.success(`Signed in via SSO as ${ssoData.user.name}`);
+                } else {
+                  const errData = await res.json().catch(() => ({}));
+                  toast.error(errData.message || "SSO launch token invalid or expired");
+                }
+              })
+              .catch((err) => {
+                console.error("SSO consumption error:", err);
+              });
+          }
+
           setActiveMeetingCode(code);
           localStorage.setItem("mathsy_meet_redirect_url", `/meet/${code}`);
           const wasHost = sessionStorage.getItem(`mathsy_host_${code}`) === "true";

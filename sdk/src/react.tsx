@@ -8,7 +8,8 @@ import {
 
 export interface MathsyMeetingProps {
   roomCode: string;
-  token: string;
+  token?: string;
+  ssoToken?: string;
   embedBaseUrl?: string;
   parentOrigin?: string;
   width?: string | number;
@@ -30,7 +31,8 @@ export interface MathsyMeetingProps {
 export interface UseMathsyMeetingOptions {
   containerRef: React.RefObject<HTMLElement | null>;
   roomCode: string;
-  token: string;
+  token?: string;
+  ssoToken?: string;
   embedBaseUrl?: string;
   parentOrigin?: string;
   width?: string;
@@ -64,6 +66,7 @@ export function useMathsyMeeting({
   containerRef,
   roomCode,
   token,
+  ssoToken,
   embedBaseUrl,
   parentOrigin,
   width = "100%",
@@ -83,7 +86,8 @@ export function useMathsyMeeting({
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !roomCode || !token) {
+    const effectiveToken = (ssoToken || token || "").trim();
+    if (!container || !roomCode || !effectiveToken) {
       return;
     }
 
@@ -95,7 +99,8 @@ export function useMathsyMeeting({
       ctrl = embedMeeting({
         container,
         roomCode,
-        token,
+        token: token || undefined,
+        ssoToken: ssoToken || undefined,
         embedBaseUrl,
         parentOrigin,
         width,
@@ -140,7 +145,7 @@ export function useMathsyMeeting({
       setController(null);
       setIsReady(false);
     };
-  }, [roomCode, token, embedBaseUrl, parentOrigin]);
+  }, [roomCode, token, ssoToken, embedBaseUrl, parentOrigin]);
 
   const muteAudio = useCallback(() => controllerRef.current?.muteAudio(), []);
   const unmuteAudio = useCallback(() => controllerRef.current?.unmuteAudio(), []);
@@ -169,6 +174,7 @@ export function useMathsyMeeting({
 export const MathsyMeeting: React.FC<MathsyMeetingProps> = ({
   roomCode,
   token,
+  ssoToken,
   embedBaseUrl,
   parentOrigin,
   width = "100%",
@@ -190,6 +196,7 @@ export const MathsyMeeting: React.FC<MathsyMeetingProps> = ({
     containerRef,
     roomCode,
     token,
+    ssoToken,
     embedBaseUrl,
     parentOrigin,
     width: typeof width === "number" ? `${width}px` : width,

@@ -118,10 +118,12 @@ export function createEmbedEventMessage(type: EmbedEventType, payload: any): Emb
  */
 export function sanitizeUrlToken(urlOrString: string): {
   token: string | null;
+  ssoToken: string | null;
   cleanUrl: string;
   parentOrigin: string | null;
 } {
   let token: string | null = null;
+  let ssoToken: string | null = null;
   let parentOrigin: string | null = null;
 
   try {
@@ -129,7 +131,15 @@ export function sanitizeUrlToken(urlOrString: string): {
     const dummyBase = "https://meet.mathsy.in";
     const parsed = new URL(urlOrString, dummyBase);
 
-    // 1. Check query parameter `token`
+    // 1. Check query parameters
+    if (parsed.searchParams.has("sso_token")) {
+      ssoToken = parsed.searchParams.get("sso_token");
+      parsed.searchParams.delete("sso_token");
+    } else if (parsed.searchParams.has("ssoToken")) {
+      ssoToken = parsed.searchParams.get("ssoToken");
+      parsed.searchParams.delete("ssoToken");
+    }
+
     if (parsed.searchParams.has("token")) {
       token = parsed.searchParams.get("token");
       parsed.searchParams.delete("token");
@@ -139,21 +149,38 @@ export function sanitizeUrlToken(urlOrString: string): {
       parentOrigin = parsed.searchParams.get("parentOrigin");
     }
 
-    // 2. Check hash `#token=...` or `#...&token=...`
+    // 2. Check hash `#token=...` or `#sso_token=...`
     if (parsed.hash) {
       const hashContent = parsed.hash.replace(/^#/, "");
-      if (hashContent.startsWith("token=")) {
-        token = hashContent.substring(6);
-        parsed.hash = "";
-      } else if (hashContent.includes("token=")) {
-        const hashParams = new URLSearchParams(hashContent);
-        if (hashParams.has("token")) {
-          token = hashParams.get("token");
-          hashParams.delete("token");
-          const remainingHash = hashParams.toString();
-          parsed.hash = remainingHash ? `#${remainingHash}` : "";
-        }
+      const hashParams = new URLSearchParams(hashContent);
+
+      if (hashParams.has("sso_token")) {
+        ssoToken = hashParams.get("sso_token");
+        hashParams.delete("sso_token");
+      } else if (hashParams.has("ssoToken")) {
+        ssoToken = hashParams.get("ssoToken");
+        hashParams.delete("ssoToken");
       }
+
+      if (hashParams.has("token")) {
+        token = hashParams.get("token");
+        hashParams.delete("token");
+      } else if (hashContent.startsWith("token=")) {
+        token = hashContent.substring(6);
+        hashParams.delete("token");
+      } else if (hashContent.startsWith("sso_token=")) {
+        ssoToken = hashContent.substring(10);
+        hashParams.delete("sso_token");
+      }
+
+      const remainingHash = hashParams.toString();
+      parsed.hash = remainingHash ? `#${remainingHash}` : "";
+    }
+
+    // If token starts with sso_launch_, also treat as ssoToken
+    if (token && token.startsWith("sso_launch_") && !ssoToken) {
+      ssoToken = token;
+      token = null;
     }
 
     // Determine output clean URL format
@@ -162,8 +189,8 @@ export function sanitizeUrlToken(urlOrString: string): {
       ? `${parsed.pathname}${parsed.search}${parsed.hash}`
       : `${parsed.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
 
-    return { token, cleanUrl, parentOrigin };
+    return { token, ssoToken, cleanUrl, parentOrigin };
   } catch {
-    return { token: null, cleanUrl: urlOrString, parentOrigin: null };
+    return { token: null, ssoToken: null, cleanUrl: urlOrString, parentOrigin: null };
   }
 }

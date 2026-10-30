@@ -53,27 +53,36 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
     needsOnboardingRole,
     dismissOnboardingRole,
   } = useAuth();
-  const [displayName, setDisplayName] = useState(profile?.name || "");
+  const ssoSessionRaw = typeof window !== "undefined" ? sessionStorage.getItem(`mathsy_sso_session_${meetingCode}`) : null;
+  let ssoSessionUser: any = null;
+  try {
+    ssoSessionUser = ssoSessionRaw ? JSON.parse(ssoSessionRaw)?.user : null;
+  } catch (e) {
+    ssoSessionUser = null;
+  }
+  const isSsoRoom = Boolean(ssoSessionUser);
+
+  const [displayName, setDisplayName] = useState(profile?.name || ssoSessionUser?.name || "");
   const [copiedLink, setCopiedLink] = useState(false);
   const [roomChecking, setRoomChecking] = useState(true);
   const [roomExists, setRoomExists] = useState<boolean | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const isDemoRoom = meetingCode.startsWith("demo-") || Boolean(sessionStorage.getItem(`demo_token_${meetingCode}`));
 
-  const isStudentAccount = profile?.role === "student";
-  const isTutorOnly = !isStudentAccount && (isHostFromLanding || profile?.role === "tutor");
+  const isStudentAccount = profile?.role === "student" || ssoSessionUser?.role === "student";
+  const isTutorOnly = !isStudentAccount && (isHostFromLanding || profile?.role === "tutor" || ssoSessionUser?.role === "tutor");
   const [selectedRole, setSelectedRole] = useState<"tutor" | "student">(
-    isStudentAccount ? "student" : isTutorOnly ? "tutor" : initialRole || "student"
+    isStudentAccount ? "student" : isTutorOnly ? "tutor" : (ssoSessionUser?.role as any) || initialRole || "student"
   );
   const [showSignUpModal, setShowSignUpModal] = useState(false);
   const [showRoleSwitchModal, setShowRoleSwitchModal] = useState(false);
 
-  // Auto-prompt sign up / sign in modal when entering lobby unauthenticated (unless demo room)
+  // Auto-prompt sign up / sign in modal when entering lobby unauthenticated (unless demo room or SSO)
   useEffect(() => {
-    if (!loading && !isAuthenticated && !isDemoRoom) {
+    if (!loading && !isAuthenticated && !isDemoRoom && !isSsoRoom) {
       setShowSignUpModal(true);
     }
-  }, [loading, isAuthenticated, isDemoRoom]);
+  }, [loading, isAuthenticated, isDemoRoom, isSsoRoom]);
 
   useEffect(() => {
     if (isStudentAccount) {

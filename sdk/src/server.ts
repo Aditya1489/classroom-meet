@@ -7,6 +7,10 @@ import {
   ParticipantTokenResult,
   ParticipantList,
   ApiKeyVerification,
+  GenerateSsoLaunchTokenOptions,
+  SsoLaunchTokenResult,
+  ConsumeSsoLaunchTokenOptions,
+  ConsumeSsoLaunchTokenResult,
   MathsyMeetError,
   AuthenticationError,
   ForbiddenError,
@@ -303,5 +307,49 @@ export class MathsyMeetServerClient {
     } catch (err: any) {
       return { valid: false, error: err.message };
     }
+  }
+
+  /**
+   * Generates a short-lived single-use SSO launch token for an authorized user.
+   * Required API key scope: tokens:write
+   */
+  public async generateSsoLaunchToken(
+    options: GenerateSsoLaunchTokenOptions
+  ): Promise<SsoLaunchTokenResult> {
+    if (!options || !options.roomCode || !options.userId || !options.email || !options.name) {
+      throw new MathsyMeetError("roomCode, userId, email, and name are required", "INVALID_ARGUMENT", 400);
+    }
+
+    return this.request<SsoLaunchTokenResult>("/sso/launch-token", {
+      method: "POST",
+      body: JSON.stringify({
+        roomCode: options.roomCode,
+        userId: options.userId,
+        email: options.email,
+        name: options.name,
+        role: options.role,
+        externalIssuer: options.externalIssuer,
+        permissions: options.permissions,
+      }),
+    });
+  }
+
+  /**
+   * Consumes an SSO launch token directly from server.
+   */
+  public async consumeSsoLaunchToken(
+    options: ConsumeSsoLaunchTokenOptions
+  ): Promise<ConsumeSsoLaunchTokenResult> {
+    if (!options || !options.token) {
+      throw new MathsyMeetError("token is required", "INVALID_ARGUMENT", 400);
+    }
+
+    return this.request<ConsumeSsoLaunchTokenResult>("/sso/consume-token", {
+      method: "POST",
+      body: JSON.stringify({
+        token: options.token,
+        roomCode: options.roomCode,
+      }),
+    });
   }
 }

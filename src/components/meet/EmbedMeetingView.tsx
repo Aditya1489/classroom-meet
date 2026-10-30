@@ -64,7 +64,7 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
 
       // 1. Extract token & parentOrigin, then IMMEDIATELY scrub token from address bar
       const currentUrl = window.location.href;
-      const { token, cleanUrl, parentOrigin } = sanitizeUrlToken(currentUrl);
+      const { token, ssoToken, cleanUrl, parentOrigin } = sanitizeUrlToken(currentUrl);
 
       if (cleanUrl !== currentUrl) {
         window.history.replaceState({}, document.title, cleanUrl);
@@ -74,11 +74,58 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
         parentOriginRef.current = parentOrigin;
       }
 
-      if (!token) {
+      const rawApiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
+      const apiBase = rawApiBase.replace(/\/api$/, "/api/v1");
+
+      let resolvedToken = token;
+
+      // Handle SSO Launch Token exchange
+      if (ssoToken || (resolvedToken && resolvedToken.startsWith("sso_launch_"))) {
+        const launchToken = ssoToken || resolvedToken;
+        try {
+          const consumeRes = await fetch(`${apiBase}/sso/consume-token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              launchToken,
+              roomCode,
+            }),
+          });
+
+          if (isCancelled) return;
+
+          if (!consumeRes.ok) {
+            const errData = await consumeRes.json().catch(() => ({}));
+            const code = errData.code || "SSO_TOKEN_INVALID";
+            const message = errData.message || "The single sign-on launch token is invalid or expired.";
+            setError({
+              title: "SSO Authentication Failed",
+              message,
+              code,
+            });
+            setLoading(false);
+            postEventToParent("meeting.error", { code, message });
+            return;
+          }
+
+          const ssoData = await consumeRes.json();
+          resolvedToken = ssoData.participantToken;
+        } catch (err: any) {
+          setError({
+            title: "SSO Authentication Error",
+            message: err.message || "Failed to exchange SSO launch token.",
+            code: "SSO_EXCHANGE_ERROR",
+          });
+          setLoading(false);
+          return;
+        }
+      }
+
+      if (!resolvedToken) {
         // Check session storage as fallback (e.g. on iframe refresh)
         const savedToken = window.sessionStorage.getItem(`mathsy_meet_embed_token_${roomCode}`);
         if (savedToken) {
-          tokenRef.current = savedToken;
+          resolvedToken = savedToken;
         } else {
           setError({
             title: "Meeting Access Token Required",
@@ -88,16 +135,13 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
           setLoading(false);
           return;
         }
-      } else {
-        tokenRef.current = token;
-        window.sessionStorage.setItem("mathsy_meet_embed_token", token);
-        window.sessionStorage.setItem(`mathsy_meet_embed_token_${roomCode}`, token);
       }
 
-      try {
-        const rawApiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
-        const apiBase = rawApiBase.replace(/\/api$/, "/api/v1");
+      tokenRef.current = resolvedToken;
+      window.sessionStorage.setItem("mathsy_meet_embed_token", resolvedToken);
+      window.sessionStorage.setItem(`mathsy_meet_embed_token_${roomCode}`, resolvedToken);
 
+      try {
         // 2. Fetch authoritative embed configuration and verify domain restrictions
         const referrerOrigin = document.referrer ? new URL(document.referrer).origin : "";
         const effectiveParentOrigin = parentOriginRef.current || referrerOrigin;

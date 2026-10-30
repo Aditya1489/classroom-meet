@@ -136,6 +136,83 @@ export const ClassroomPage = ({ roomCode, token }: { roomCode: string; token: st
 
 ---
 
+## 🔐 Organization Single Sign-On (SSO) & Automatic Provisioning
+
+Mathsy Meet supports seamless, server-to-server Single Sign-On (SSO) with automatic user provisioning:
+
+### How It Works
+
+1. **User Authentication:** The student or teacher logs into your main web application (e.g. `mathsy.com` or your university portal).
+2. **Server-Side Launch Token:** Your backend requests a single-use, short-lived SSO launch token from Mathsy Meet using your private API key (`sec_live_...`).
+3. **Verification & Provisioning:** Mathsy Meet validates the organization, verifies the user's email against verified domains or manual allowlists, and provisions their account if allowed.
+4. **Zero-Login Launch:** Your frontend launches the Mathsy Meet iframe or opens the room passing the SSO launch token in `#sso_token=...`. The token is exchanged and immediately scrubbed from browser history.
+
+### Backend: Generate Single-Use SSO Launch Token (Node.js)
+
+```typescript
+import { MathsyMeetServerClient } from "@mathsy/meet-sdk/server";
+
+const client = new MathsyMeetServerClient({
+  apiKey: process.env.MATHSY_MEET_API_KEY!, // sec_live_...
+  apiBaseUrl: "https://152-67-5-129.sslip.io/api/v1",
+});
+
+// In your API route (e.g., POST /api/meetings/launch-token)
+app.post("/api/meetings/launch-token", async (req, res) => {
+  // 1. Authenticate user from your session or JWT
+  const user = req.user; // e.g. { id: "usr_4829", email: "student@school.edu", name: "Jane Smith", role: "student" }
+
+  // 2. Request SSO launch token
+  const launchData = await client.generateSsoLaunchToken({
+    roomCode: req.body.roomCode, // e.g. "math-101-session"
+    email: user.email,
+    name: user.name,
+    role: user.role, // "student" | "tutor"
+    externalIssuer: "my-school-portal",
+    externalSubject: user.id,
+    expiresInSeconds: 300, // 5 minutes
+  });
+
+  // 3. Return the launch token to frontend
+  res.json({
+    launchToken: launchData.launchToken,
+    embedUrl: launchData.embedUrl,
+    roomUrl: launchData.roomUrl,
+  });
+});
+```
+
+### Frontend: Launching via React (`@mathsy/meet-sdk/react`)
+
+```tsx
+import React from "react";
+import { MathsyMeeting } from "@mathsy/meet-sdk/react";
+
+export function ClassView({ roomCode, ssoToken }: { roomCode: string; ssoToken: string }) {
+  return (
+    <MathsyMeeting
+      roomCode={roomCode}
+      ssoToken={ssoToken}
+      embedBaseUrl="https://classroom-meet.vercel.app"
+      width="100%"
+      height="750px"
+      onReady={() => console.log("Joined via SSO seamlessly!")}
+      onError={(err) => console.error("SSO Join Error:", err)}
+    />
+  );
+}
+```
+
+### Direct Browser Redirect (Standalone Window)
+
+You can also redirect a user directly to the meeting in a full tab without embedding:
+
+```typescript
+window.location.href = `https://classroom-meet.vercel.app/meet/${roomCode}#sso_token=${launchToken}`;
+```
+
+---
+
 ## ⚙️ Configuration & Allowed Domains
 
 Before embedding in production:

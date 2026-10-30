@@ -21,6 +21,7 @@ import {
   Webhook,
   BarChart3,
   BookOpen,
+  ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import { CreateApiKeyModal } from "./CreateApiKeyModal";
@@ -30,6 +31,7 @@ import { CreateOrgModal } from "./CreateOrgModal";
 import { WebhookManagementTab } from "./WebhookManagementTab";
 import { UsageAnalyticsTab } from "./UsageAnalyticsTab";
 import { QuickstartDocsTab } from "./QuickstartDocsTab";
+import { SsoManagementTab } from "./SsoManagementTab";
 import { API_BASE } from "../../lib/apiConfig";
 
 interface Organization {
@@ -91,7 +93,7 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [selectedOrg, setSelectedOrg] = useState<Organization | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "keys" | "apps" | "webhooks" | "usage" | "quickstart" | "audit"
+    "keys" | "apps" | "webhooks" | "sso" | "usage" | "quickstart" | "audit"
   >("keys");
 
   // State collections
@@ -487,6 +489,18 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
                 </button>
 
                 <button
+                  onClick={() => setActiveTab("sso")}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-2 ${
+                    activeTab === "sso"
+                      ? "bg-[#f59e0b] text-[#0e0d0b] shadow-md shadow-[#f59e0b]/20"
+                      : "text-[#a39e94] hover:text-[#f3eee6]"
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  SSO & Provisioning
+                </button>
+
+                <button
                   onClick={() => setActiveTab("webhooks")}
                   className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-2 ${
                     activeTab === "webhooks"
@@ -815,6 +829,14 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
                   </div>
                 )}
               </div>
+            )}
+
+            {/* TAB: SSO & PROVISIONING */}
+            {activeTab === "sso" && selectedOrg && (
+              <SsoManagementTab
+                organizationId={selectedOrg.id}
+                organizationRole={selectedOrg.role}
+              />
             )}
 
             {/* TAB 4: WEBHOOKS */}

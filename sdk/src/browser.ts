@@ -31,14 +31,17 @@ export function embedMeeting(options: EmbedMeetingOptions): MathsyMeetEmbedContr
     throw new SecurityError("Options object is required for embedMeeting.");
   }
 
-  const { roomCode, token } = options;
+  const { roomCode, token, ssoToken } = options;
 
   if (!roomCode || typeof roomCode !== "string" || roomCode.trim().length === 0) {
     throw new SecurityError("roomCode is required to embed a meeting.");
   }
 
-  if (!token || typeof token !== "string" || token.trim().length === 0) {
-    throw new SecurityError("A valid participant token is required to embed a meeting.");
+  const rawToken = (token || "").trim();
+  const rawSsoToken = (ssoToken || "").trim();
+
+  if (!rawToken && !rawSsoToken) {
+    throw new SecurityError("A valid participant token or SSO launch token is required to embed a meeting.");
   }
 
   // 1. Resolve DOM container element
@@ -70,7 +73,11 @@ export function embedMeeting(options: EmbedMeetingOptions): MathsyMeetEmbedContr
   // We pass token in URL hash to prevent leakage in HTTP Referer headers
   const sanitizedRoom = encodeURIComponent(roomCode.trim().toLowerCase());
   const originParam = parentOrigin ? `?parentOrigin=${encodeURIComponent(parentOrigin)}` : "";
-  const embedUrl = `${embedBase}/embed/${sanitizedRoom}${originParam}#token=${encodeURIComponent(token.trim())}`;
+  const isSso = Boolean(rawSsoToken) || rawToken.startsWith("sso_launch_");
+  const tokenHashParam = isSso
+    ? `#sso_token=${encodeURIComponent(rawSsoToken || rawToken)}`
+    : `#token=${encodeURIComponent(rawToken)}`;
+  const embedUrl = `${embedBase}/embed/${sanitizedRoom}${originParam}${tokenHashParam}`;
 
   // 4. Create and configure iframe
   let iframe: HTMLIFrameElement;

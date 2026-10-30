@@ -136,6 +136,47 @@ export interface ApiKeyVerification {
   permissions: string[];
 }
 
+export interface GenerateSsoLaunchTokenOptions {
+  roomCode: string;
+  userId: string;
+  email: string;
+  name: string;
+  role?: ParticipantRole;
+  externalIssuer?: string;
+  permissions?: Partial<ParticipantPermissions>;
+}
+
+export interface SsoLaunchTokenResult {
+  launchToken: string;
+  roomCode: string;
+  launchUrl: string;
+  embedUrl: string;
+  expiresAt: string;
+  user: {
+    externalUserId: string;
+    email: string;
+    name: string;
+    role: ParticipantRole;
+    autoProvisioned: boolean;
+  };
+}
+
+export interface ConsumeSsoLaunchTokenOptions {
+  token: string;
+  roomCode?: string;
+}
+
+export interface ConsumeSsoLaunchTokenResult {
+  success: boolean;
+  participantToken: string;
+  roomCode: string;
+  role: ParticipantRole;
+  name: string;
+  participantId: string;
+  claims: any;
+  expiresAt: string;
+}
+
 // ============================================================================
 // Browser SDK & Embed Models
 // ============================================================================
@@ -150,7 +191,8 @@ export type EmbedEventType =
 export interface EmbedMeetingOptions {
   container: HTMLElement | string;
   roomCode: string;
-  token: string;
+  token?: string;
+  ssoToken?: string;
   embedBaseUrl?: string;
   parentOrigin?: string;
   width?: string;

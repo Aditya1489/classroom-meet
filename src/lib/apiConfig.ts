@@ -12,3 +12,4 @@ export const getApiBase = (): string => {
 };
 
 export const API_BASE = getApiBase();
+
