@@ -496,3 +496,37 @@ A successful build alone is not sufficient for PASS.
 - Prefer small, reviewable changes and reproducible verification.
 - Ask for clarification when a critical requirement is ambiguous.
 - If blocked, explain the precise blocker and provide the next actionable step.
+
+---
+
+# RULE 16 — CLIENT INTEGRATION STABILITY & ZERO-BREAKING-CHANGE CONTRACT
+
+Any change made to Mathsy Meet must preserve backward compatibility for all third-party and client applications integrating with it (such as Mathsy, educational portals, LMS platforms, or customer web apps).
+
+### 1. API Contract Immutability (`/api/v1/...`)
+- **Never rename, remove, or change types of existing fields** in API request bodies or response payloads (e.g. `roomCode`, `launchToken`, `launchUrl`, `embedUrl`, `userId`, `participantToken`, `role`).
+- All newly introduced request fields must be **optional** with safe, backwards-compatible defaults.
+- All newly introduced response fields must be additive; existing client parsers must never break.
+- Maintain the `/api/v1/` route prefix permanently for all public B2B REST endpoints.
+
+### 2. Route & Embed URL Stability
+- Never change the structure of meeting URLs:
+  - In-page embed URL: `/embed/:roomCode`
+  - Direct meeting launch URL: `/meet/:roomCode`
+- The hash-based launch token protocol (`#sso_token=...`) must always be supported, automatically extracted, and consumed on page load without forcing a second login prompt.
+- Never add scripts, redirects, or HTTP headers (e.g. `X-Frame-Options: DENY`) that break iframe embedding for authorized parent origins.
+
+### 3. Additive Database Migrations Only
+- All database migrations must be non-destructive and backward-compatible.
+- Never drop or rename active database tables or columns that currently running backend code or existing client queries rely on.
+- New columns must include a safe `DEFAULT` value or be nullable (`NULL`).
+
+### 4. Client-Safe Frontend Updates
+- UI enhancements (whiteboard canvas tools, participant layout grids, chat widgets, audio/video toggle controls, theme styling) delivered inside the meeting must automatically render inside client iframes without requiring client code changes.
+- Ensure `Content-Security-Policy: frame-ancestors` dynamically authorizes all active client domains from `customer_apps.allowed_domains` and verified `organization_sso_domains`.
+
+### 5. Server Restart & Deployment Safety
+- Never hard-restart the SFU mediasoup process (`mathsy-meet-server`) during active peak classroom hours, as this disconnects live WebRTC audio/video sessions.
+- Deploy during scheduled maintenance or off-peak hours using process managers with graceful zero-downtime reloads.
+- Run the full regression test suite (`npm test`, `tests/dynamic_cors_and_domain_sso.test.ts`, and SDK build/typecheck) before deploying any production release.
+

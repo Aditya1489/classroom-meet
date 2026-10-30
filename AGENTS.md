@@ -14,3 +14,4 @@ Please see [.agents/rules/permanent_development_rules.md](file:///.agents/rules/
 - Required 12-Step Post-Implementation Review
 - Required Final Report (A through G: Implementation, Test Results, Tester Findings, Security Findings, Load & Performance, Remaining Issues, Final Status)
 - Non-Negotiable Development Principles
+- Client Integration Stability & Zero-Breaking-Change Contract (Rule 16)
