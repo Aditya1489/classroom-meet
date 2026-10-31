@@ -6,6 +6,7 @@ import { VideoTrackPlayer } from "./VideoTrackPlayer";
 interface VideoTileProps {
   id: string;
   name: string;
+  avatarUrl?: string;
   videoTrack?: MediaStreamTrack | null;
   audioTrack?: MediaStreamTrack | null;
   isAudioMuted?: boolean;
@@ -29,6 +30,7 @@ interface VideoTileProps {
 export const VideoTile: React.FC<VideoTileProps> = ({
   id,
   name,
+  avatarUrl,
   videoTrack,
   audioTrack,
   isAudioMuted = false,
@@ -73,9 +75,18 @@ export const VideoTile: React.FC<VideoTileProps> = ({
       {/* Avatar Fallback (when camera is off) */}
       {!hasVideo && (
         <div className="flex flex-col items-center justify-center gap-3">
-          <div className="w-20 h-20 md:w-24 md:h-24 rounded-full bg-gradient-to-tr from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center text-2xl md:text-3xl font-bold shadow-xl border border-white/20">
-            {name.charAt(0).toUpperCase()}
-          </div>
+          {avatarUrl ? (
+            <img
+              src={avatarUrl}
+              alt={name}
+              className="w-20 h-20 md:w-24 md:h-24 rounded-full object-cover shadow-xl border-2 border-[#f59e0b]/40"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="w-20 h-20 md:w-24 md:h-24 rounded-full bg-gradient-to-tr from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center text-2xl md:text-3xl font-bold shadow-xl border border-white/20">
+              {name.charAt(0).toUpperCase()}
+            </div>
+          )}
           <span className="text-xs text-[#a39e94] font-medium">{name}</span>
           <div className="absolute bottom-3 right-3 bg-[#0e0d0b]/80 backdrop-blur-md p-1.5 rounded-full text-[#a39e94] border border-[#f3eee6]/10">
             <VideoOff className="w-3.5 h-3.5" />

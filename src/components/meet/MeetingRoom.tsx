@@ -1563,6 +1563,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       key={featured.id}
                       id={featured.id}
                       name={featured.name}
+                      avatarUrl={featured.id === myUserId ? profile?.avatarUrl : (featured as any).avatarUrl}
                       videoTrack={featured.videoTrack}
                       audioTrack={featured.audioTrack}
                       isAudioMuted={featured.isAudioMuted}
@@ -1602,6 +1603,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         key={p.id}
                         id={p.id}
                         name={p.name}
+                        avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
                         videoTrack={p.videoTrack}
                         audioTrack={p.audioTrack}
                         isAudioMuted={p.isAudioMuted}
@@ -1651,6 +1653,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   key={p.id}
                   id={p.id}
                   name={p.name}
+                  avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
                   videoTrack={p.videoTrack}
                   audioTrack={p.audioTrack}
                   isAudioMuted={p.isAudioMuted}

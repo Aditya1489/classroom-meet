@@ -4,7 +4,7 @@ import { Users, X, Mic, MicOff, Hand, Copy, Shield, VolumeX, Check } from "lucid
 import { toast } from "sonner";
 
 interface ParticipantsDrawerProps {
-  localUser: { name: string; isHost?: boolean; isAudioMuted?: boolean; isHandRaised?: boolean };
+  localUser: { name: string; isHost?: boolean; isAudioMuted?: boolean; isHandRaised?: boolean; avatarUrl?: string };
   participants: RemoteParticipant[];
   onClose: () => void;
   meetingCode: string;
@@ -64,9 +64,18 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
         {/* Local User */}
         <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/5 border border-white/5">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-[#1a73e8] flex items-center justify-center font-semibold text-xs">
-              {localUser.name.charAt(0).toUpperCase()}
-            </div>
+            {localUser.avatarUrl ? (
+              <img
+                src={localUser.avatarUrl}
+                alt={localUser.name}
+                className="w-8 h-8 rounded-full object-cover border border-white/10"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-full bg-[#1a73e8] flex items-center justify-center font-semibold text-xs">
+                {localUser.name.charAt(0).toUpperCase()}
+              </div>
+            )}
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-medium">{localUser.name} (You)</span>

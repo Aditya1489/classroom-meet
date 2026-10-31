@@ -367,9 +367,18 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
           <div className="flex items-center gap-3">
             {user ? (
               <div className="flex items-center gap-2.5 bg-[#1a1814] border border-[#f3eee6]/10 px-3 py-1.5 rounded-full text-xs">
-                <div className="w-5 h-5 rounded-full bg-[#f59e0b] text-[#0e0d0b] flex items-center justify-center font-bold text-[10px]">
-                  {profile?.name?.charAt(0).toUpperCase()}
-                </div>
+                {profile?.avatarUrl ? (
+                  <img
+                    src={profile.avatarUrl}
+                    alt={profile?.name || "User"}
+                    className="w-5 h-5 rounded-full object-cover border border-[#f59e0b]/40 shadow-sm"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="w-5 h-5 rounded-full bg-[#f59e0b] text-[#0e0d0b] flex items-center justify-center font-bold text-[10px]">
+                    {profile?.name?.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <span className="text-[#f3eee6] hidden sm:inline text-xs">{profile?.name}</span>
                 <button
                   onClick={() => setShowRoleSwitchModal(true)}
@@ -608,9 +617,18 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
         <div className="flex items-center gap-3">
           {user ? (
             <div className="flex items-center gap-2.5 bg-[#1a1814] border border-[#f3eee6]/10 px-3 py-1.5 rounded-full text-xs">
-              <div className="w-5 h-5 rounded-full bg-[#f59e0b] text-[#0e0d0b] flex items-center justify-center font-bold text-[10px]">
-                {profile?.name?.charAt(0).toUpperCase()}
-              </div>
+              {profile?.avatarUrl ? (
+                <img
+                  src={profile.avatarUrl}
+                  alt={profile?.name || "User"}
+                  className="w-5 h-5 rounded-full object-cover border border-[#f59e0b]/40 shadow-sm"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="w-5 h-5 rounded-full bg-[#f59e0b] text-[#0e0d0b] flex items-center justify-center font-bold text-[10px]">
+                  {profile?.name?.charAt(0).toUpperCase()}
+                </div>
+              )}
               <span className="text-[#f3eee6] hidden sm:inline text-xs">{profile?.name}</span>
               <button
                 onClick={() => setShowRoleSwitchModal(true)}
@@ -665,9 +683,18 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             {/* Avatar Fallback */}
             {isCamOff && (
               <div className="flex flex-col items-center gap-3">
-                <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center text-3xl font-bold shadow-xl border border-white/20">
-                  {displayName.charAt(0).toUpperCase() || (selectedRole === "tutor" ? "T" : "S")}
-                </div>
+                {profile?.avatarUrl ? (
+                  <img
+                    src={profile.avatarUrl}
+                    alt={displayName || "User"}
+                    className="w-20 h-20 rounded-full object-cover shadow-2xl border-2 border-[#f59e0b]/40"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center text-3xl font-bold shadow-xl border border-white/20">
+                    {displayName.charAt(0).toUpperCase() || (selectedRole === "tutor" ? "T" : "S")}
+                  </div>
+                )}
                 <span className="text-xs font-medium text-[#a39e94]">Camera is off</span>
               </div>
             )}
