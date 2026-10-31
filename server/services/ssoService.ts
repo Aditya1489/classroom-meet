@@ -523,13 +523,34 @@ export async function createSsoLaunchToken(params: CreateLaunchTokenParams): Pro
     [normalizedRoomCode, organizationId]
   );
 
-  if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
-    const error: any = new Error("Room not found, has ended, or belongs to a different organization");
+  if (roomRes.rows.length === 0) {
+    const error: any = new Error("Room not found or belongs to a different organization");
     error.statusCode = 404;
     error.code = "ROOM_NOT_FOUND";
     throw error;
   }
+
   const room = roomRes.rows[0];
+
+  // Self-healing: If an authorized tutor requests a launch token for an inactive/ended room, reactivate it
+  if (!room.is_active) {
+    if (requestedRole === "tutor") {
+      const newSessionId = crypto.randomUUID();
+      await query(
+        `UPDATE live_classes
+         SET is_active = TRUE, ended_at = NULL, started_at = NOW(),
+             metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{session_id}', to_jsonb($2::text))
+         WHERE id = $1;`,
+        [room.id, newSessionId]
+      );
+      room.is_active = true;
+    } else {
+      const error: any = new Error("This classroom session has ended and is waiting for the tutor to start");
+      error.statusCode = 404;
+      error.code = "ROOM_ENDED";
+      throw error;
+    }
+  }
 
   // 4. Verify Identity against Allowlist or Auto-Provision Domain
   const existingUserRes = await query(

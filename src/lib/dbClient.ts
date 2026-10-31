@@ -5,11 +5,13 @@
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
 
-function getAuthHeaders(customToken?: string): HeadersInit {
+function getAuthHeaders(customToken?: string, roomCode?: string): HeadersInit {
   const token =
     customToken ||
+    (typeof window !== "undefined" && roomCode && window.sessionStorage.getItem(`mathsy_token_${roomCode}`)) ||
     (typeof window !== "undefined" && window.sessionStorage.getItem("mathsy_meet_embed_token")) ||
-    localStorage.getItem("mathsy_meet_token");
+    (typeof window !== "undefined" && window.localStorage.getItem("mathsy_meet_token")) ||
+    "";
   return {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -87,10 +89,13 @@ export const dbClient = {
   async getRoom(roomCode: string): Promise<DbLiveClass | null> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}`, {
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, roomCode),
       });
       if (!res.ok) {
-        if (res.status === 404) return null;
+        if (res.status === 404) {
+          const data = await res.json().catch(() => ({}));
+          return data?.room || null;
+        }
         console.warn("[dbClient] Failed to fetch room, status:", res.status);
         return null;
       }
@@ -102,11 +107,26 @@ export const dbClient = {
     }
   },
 
+  async reactivateRoom(roomCode: string): Promise<DbLiveClass | null> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/reactivate`, {
+        method: "POST",
+        headers: getAuthHeaders(undefined, roomCode),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data?.room || null;
+    } catch (err) {
+      console.error("[dbClient] Error reactivating room:", err);
+      return null;
+    }
+  },
+
   async upsertRoom(room: Partial<DbLiveClass> & { room_code: string }): Promise<DbLiveClass | null> {
     try {
       const res = await fetch(`${API_BASE}/rooms`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, room.room_code),
         body: JSON.stringify({
           room_code: room.room_code,
           title: room.title || `Class ${room.room_code}`,

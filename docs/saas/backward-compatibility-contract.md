@@ -61,3 +61,4 @@ Mathsy Meet is architected as an embeddable SaaS platform. When you make changes
    - SSO & Automatic Provisioning suite (`tests/organization_sso_phase9.test.ts`)
    - Server & Frontend builds (`npm run build:server`, `npm run build`)
    - SDK typecheck (`npm --prefix sdk run typecheck`)
+

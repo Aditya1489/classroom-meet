@@ -39,3 +39,4 @@ dist-server
 docs/internal/
 .vercel
 .env*.local
+scratch/

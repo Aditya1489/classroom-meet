@@ -12,6 +12,11 @@ import {
   BookOpen,
   Sparkles,
   Check,
+  RefreshCw,
+  Play,
+  Clock,
+  Lock,
+  Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../auth/authContext";
@@ -66,6 +71,8 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const [copiedLink, setCopiedLink] = useState(false);
   const [roomChecking, setRoomChecking] = useState(true);
   const [roomExists, setRoomExists] = useState<boolean | null>(null);
+  const [roomRecord, setRoomRecord] = useState<any>(null);
+  const [isReactivating, setIsReactivating] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const isDemoRoom = meetingCode.startsWith("demo-") || Boolean(sessionStorage.getItem(`demo_token_${meetingCode}`));
 
@@ -111,15 +118,39 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
       return;
     }
     dbClient.getRoom(meetingCode).then((r) => {
+      setRoomRecord(r);
       setRoomExists(Boolean(r && r.is_active));
       setRoomChecking(false);
-      if (r && profile?.id && r.tutor_id === profile.id) {
+      if (r && profile?.id && (r.tutor_id === profile.id || profile.role === "tutor")) {
         setIsOwner(true);
       }
     }).catch(() => {
       setRoomChecking(false);
     });
   }, [meetingCode, isDemoRoom, profile?.id]);
+
+  // Periodic background check if room hasn't started yet (auto-enters student once tutor launches)
+  useEffect(() => {
+    if (roomExists !== false || !meetingCode || isDemoRoom) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const r = await dbClient.getRoom(meetingCode);
+        if (r && r.is_active) {
+          setRoomRecord(r);
+          setRoomExists(true);
+          if (profile?.id && (r.tutor_id === profile.id || profile.role === "tutor")) {
+            setIsOwner(true);
+          }
+          toast.success("Class has started! Preparing your classroom lobby...");
+        }
+      } catch {
+        // Silently retry on next tick
+      }
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [roomExists, meetingCode, isDemoRoom, profile?.id]);
 
   // Students join muted by default to honor speaking permission policy
   const [isMicMuted, setIsMicMuted] = useState(() => {
@@ -250,23 +281,312 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
     setTimeout(() => setCopiedLink(false), 2000);
   };
 
+  const handleStartOrReopenRoom = async () => {
+    if (!isAuthenticated) {
+      toast.error("Please sign in as a tutor to start this class.");
+      localStorage.setItem("mathsy_meet_redirect_url", `/meet/${meetingCode}`);
+      setShowSignUpModal(true);
+      return;
+    }
+
+    if (profile?.role !== "tutor") {
+      try {
+        await updateRole("tutor");
+        setSelectedRole("tutor");
+      } catch (e) {
+        toast.error("You need tutor privileges to start a class. Please switch to tutor role.");
+        return;
+      }
+    }
+
+    setIsReactivating(true);
+    try {
+      let activeRoom: any = null;
+      if (roomRecord && !roomRecord.is_active) {
+        activeRoom = await dbClient.reactivateRoom(meetingCode);
+      }
+      if (!activeRoom) {
+        activeRoom = await dbClient.upsertRoom({
+          room_code: meetingCode,
+          title: roomRecord?.title || `Class ${meetingCode}`,
+          is_active: true,
+        });
+      }
+
+      if (activeRoom) {
+        setRoomRecord(activeRoom);
+        setRoomExists(true);
+        setIsOwner(true);
+        toast.success("Class started successfully! Setting up your session...");
+      } else {
+        toast.error("Failed to start class. Please verify your tutor credentials.");
+      }
+    } catch (err: any) {
+      toast.error("Error starting class: " + (err.message || "Unknown error"));
+    } finally {
+      setIsReactivating(false);
+    }
+  };
+
+  const handleManualRefresh = async () => {
+    setRoomChecking(true);
+    try {
+      const r = await dbClient.getRoom(meetingCode);
+      setRoomRecord(r);
+      const active = Boolean(r && r.is_active);
+      setRoomExists(active);
+      if (active) {
+        toast.success("Class is live! Welcome.");
+      } else {
+        toast.info("Class has not started yet. Waiting for tutor...");
+      }
+    } catch {
+      toast.error("Could not check class status.");
+    } finally {
+      setRoomChecking(false);
+    }
+  };
+
   if (!roomChecking && roomExists === false) {
+    const isTutorUser = profile?.role === "tutor" || isHostFromLanding || selectedRole === "tutor";
+
     return (
-      <div className="min-h-screen bg-[#0e0d0b] text-[#f3eee6] flex flex-col items-center justify-center p-6 text-center selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#ef4444] to-[#f59e0b] text-white flex items-center justify-center mb-6 shadow-2xl">
-          <Video className="w-8 h-8" />
-        </div>
-        <div className="section-label mb-2 text-[#ef4444]">MEETING NOT FOUND</div>
-        <h1 className="font-serif text-3xl sm:text-4xl text-[#f3eee6] mb-3">Class Does Not Exist</h1>
-        <p className="text-sm text-[#a39e94] max-w-md mb-8 leading-relaxed">
-          The meeting code <code className="text-[#f59e0b] px-2 py-0.5 bg-[#1a1814] rounded">{meetingCode}</code> is invalid, inactive, or has already ended.
-        </p>
-        <button
-          onClick={onBackToHome}
-          className="px-6 py-3 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] font-bold text-sm transition shadow-lg shadow-[#f59e0b]/20 flex items-center gap-2"
-        >
-          Return to Home
-        </button>
+      <div className="min-h-screen bg-[#0e0d0b] text-[#f3eee6] flex flex-col justify-between selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
+        {/* Top Header */}
+        <header className="flex items-center justify-between px-6 md:px-12 py-4 border-b border-[#f3eee6]/[0.08] bg-[#0e0d0b]/85 backdrop-blur-md">
+          <div className="flex items-center gap-3 cursor-pointer" onClick={onBackToHome}>
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#1d4ed8] to-[#06b6d4] flex items-center justify-center shadow-md">
+              <Video className="w-4 h-4 text-white" />
+            </div>
+            <span className="text-lg font-bold tracking-tight text-[#f3eee6]">
+              Mathsy<span className="text-[#f59e0b]">Meet</span>
+            </span>
+          </div>
+
+          {/* User Status / Google Sign-in */}
+          <div className="flex items-center gap-3">
+            {user ? (
+              <div className="flex items-center gap-2.5 bg-[#1a1814] border border-[#f3eee6]/10 px-3 py-1.5 rounded-full text-xs">
+                <div className="w-5 h-5 rounded-full bg-[#f59e0b] text-[#0e0d0b] flex items-center justify-center font-bold text-[10px]">
+                  {profile?.name?.charAt(0).toUpperCase()}
+                </div>
+                <span className="text-[#f3eee6] hidden sm:inline text-xs">{profile?.name}</span>
+                <button
+                  onClick={() => setShowRoleSwitchModal(true)}
+                  title="Click to switch role"
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-[#f59e0b]/20 text-[#f59e0b] font-mono uppercase font-semibold hover:bg-[#f59e0b]/30 transition cursor-pointer"
+                >
+                  {profile?.role === "student" ? "Student" : "Tutor"}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => signInWithGoogle()}
+                  title="Sign in directly"
+                  className="flex items-center gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#f3eee6] transition cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                  <span>Sign in</span>
+                </button>
+                <button
+                  onClick={() => setShowSignUpModal(true)}
+                  className="px-3.5 py-1.5 rounded-lg bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold shadow-md shadow-[#f59e0b]/20 transition cursor-pointer"
+                >
+                  Sign up
+                </button>
+              </div>
+            )}
+          </div>
+        </header>
+
+        {/* Center Dynamic Content */}
+        <main className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-xl mx-auto w-full">
+          {isTutorUser ? (
+            /* TUTOR VIEW: Ready to start / Reopen */
+            <div className="w-full flex flex-col items-center">
+              <div className="w-16 h-16 rounded-2xl bg-[#f59e0b]/15 border border-[#f59e0b]/30 text-[#f59e0b] flex items-center justify-center mb-6 shadow-2xl">
+                <Play className="w-8 h-8 fill-current" />
+              </div>
+              <div className="section-label mb-2 text-[#f59e0b] tracking-widest font-mono text-xs">
+                {roomRecord ? "CLASS SESSION ENDED" : "CLASS READY TO START"}
+              </div>
+              <h1 className="font-serif text-3xl sm:text-4xl text-[#f3eee6] mb-3">
+                {roomRecord ? "Reopen Class Session" : "Start Class as Tutor"}
+              </h1>
+              <p className="text-sm text-[#a39e94] max-w-md mb-8 leading-relaxed">
+                {roomRecord ? (
+                  <>The classroom for <code className="text-[#f59e0b] px-2 py-0.5 bg-[#1a1814] rounded font-mono">{meetingCode}</code> was closed. As the tutor, you can reopen it now for your students.</>
+                ) : (
+                  <>Room code <code className="text-[#f59e0b] px-2 py-0.5 bg-[#1a1814] rounded font-mono">{meetingCode}</code> is assigned to you. Launch the classroom now so students can join.</>
+                )}
+              </p>
+
+              <div className="flex flex-col sm:flex-row items-center gap-3 w-full max-w-sm">
+                <button
+                  onClick={handleStartOrReopenRoom}
+                  disabled={isReactivating}
+                  className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-[#f59e0b] to-[#d97706] hover:brightness-110 text-[#0e0d0b] font-bold text-sm transition shadow-lg shadow-[#f59e0b]/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isReactivating ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Starting Class...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>{roomRecord ? "Reopen Class" : "Start Class Now"}</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={onBackToHome}
+                  className="w-full py-3.5 px-6 rounded-xl bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 text-[#f3eee6] font-medium text-sm transition cursor-pointer"
+                >
+                  Return to Home
+                </button>
+              </div>
+            </div>
+          ) : isAuthenticated ? (
+            /* STUDENT VIEW: Waiting for Tutor */
+            <div className="w-full flex flex-col items-center">
+              <div className="relative mb-6">
+                <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 flex items-center justify-center shadow-2xl">
+                  <Clock className="w-8 h-8" />
+                </div>
+                <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-cyan-500"></span>
+                </span>
+              </div>
+
+              <div className="section-label mb-2 text-cyan-400 tracking-widest font-mono text-xs">
+                WAITING ROOM
+              </div>
+              <h1 className="font-serif text-3xl sm:text-4xl text-[#f3eee6] mb-3">
+                Waiting for Tutor to Start
+              </h1>
+              <p className="text-sm text-[#a39e94] max-w-md mb-6 leading-relaxed">
+                The tutor hasn't started class <code className="text-cyan-400 px-2 py-0.5 bg-[#1a1814] rounded font-mono">{meetingCode}</code> yet. Please wait here — you will enter automatically when the tutor begins.
+              </p>
+
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#1a1814] border border-[#f3eee6]/10 text-xs text-[#a39e94] mb-8 font-mono">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                Listening for tutor broadcast...
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center gap-3 w-full max-w-sm">
+                <button
+                  onClick={handleManualRefresh}
+                  disabled={roomChecking}
+                  className="w-full py-3.5 px-6 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-sm transition shadow-lg shadow-cyan-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${roomChecking ? "animate-spin" : ""}`} />
+                  <span>Check Status</span>
+                </button>
+                <button
+                  onClick={onBackToHome}
+                  className="w-full py-3.5 px-6 rounded-xl bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 text-[#f3eee6] font-medium text-sm transition cursor-pointer"
+                >
+                  Return to Home
+                </button>
+              </div>
+
+              <div className="mt-8 text-xs text-[#716c61]">
+                Are you the tutor?{" "}
+                <button
+                  onClick={() => {
+                    updateRole("tutor");
+                    setSelectedRole("tutor");
+                  }}
+                  className="text-[#f59e0b] hover:underline font-medium cursor-pointer"
+                >
+                  Switch to Tutor Mode
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* UNAUTHENTICATED VIEW */
+            <div className="w-full flex flex-col items-center">
+              <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mb-6 shadow-2xl">
+                <Lock className="w-8 h-8" />
+              </div>
+
+              <div className="section-label mb-2 text-amber-400 tracking-widest font-mono text-xs">
+                CLASS NOT STARTED
+              </div>
+              <h1 className="font-serif text-3xl sm:text-4xl text-[#f3eee6] mb-3">
+                Class Has Not Started
+              </h1>
+              <p className="text-sm text-[#a39e94] max-w-md mb-8 leading-relaxed">
+                Class <code className="text-[#f59e0b] px-2 py-0.5 bg-[#1a1814] rounded font-mono">{meetingCode}</code> is waiting to begin. Sign in as a tutor to launch it, or sign in as a student to wait.
+              </p>
+
+              <div className="flex flex-col sm:flex-row items-center gap-3 w-full max-w-sm">
+                <button
+                  onClick={() => signInWithGoogle()}
+                  className="w-full py-3.5 px-6 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] font-bold text-sm transition shadow-lg shadow-[#f59e0b]/20 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                  <span>Sign In with Google</span>
+                </button>
+                <button
+                  onClick={onBackToHome}
+                  className="w-full py-3.5 px-6 rounded-xl bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 text-[#f3eee6] font-medium text-sm transition cursor-pointer"
+                >
+                  Return to Home
+                </button>
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Footer */}
+        <footer className="text-center py-4 text-xs text-[#716c61] border-t border-[#f3eee6]/[0.05]">
+          Mathsy Meet Secure Live Classroom &copy; {new Date().getFullYear()}
+        </footer>
+
+        {/* Modals */}
+        <AuthRoleModal
+          isOpen={showSignUpModal}
+          onClose={() => setShowSignUpModal(false)}
+          isLoggedIn={false}
+          title="Sign In to Join Class"
+          subtitle={`Please sign in with Google to enter or start class ${meetingCode}.`}
+          defaultRole="student"
+          onDirectSignIn={() => {
+            localStorage.setItem("mathsy_meet_redirect_url", `/meet/${meetingCode}`);
+            setShowSignUpModal(false);
+            signInWithGoogle();
+          }}
+          onContinueWithGoogle={(role) => {
+            localStorage.setItem("mathsy_meet_redirect_url", `/meet/${meetingCode}`);
+            setShowSignUpModal(false);
+            signUpWithGoogle(role);
+          }}
+        />
+        <AuthRoleModal
+          isOpen={showRoleSwitchModal}
+          onClose={() => setShowRoleSwitchModal(false)}
+          isLoggedIn={true}
+          defaultRole={profile?.role || selectedRole}
+          onUpdateRole={async (newRole) => {
+            setShowRoleSwitchModal(false);
+            await updateRole(newRole);
+            setSelectedRole(newRole);
+          }}
+        />
       </div>
     );
   }

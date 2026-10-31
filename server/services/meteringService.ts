@@ -15,12 +15,14 @@ import { dispatchWebhookEvent } from "./webhookService";
 // ============================================================================
 
 export const DEFAULT_ABANDONED_IDLE_MINUTES = 30;
+export const DEFAULT_UNSTARTED_EMPTY_ROOM_HOURS = 24;
 export const DEFAULT_MAX_ROOM_DURATION_HOURS = 24;
 export const FIRST_PARTY_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
 export interface ReconcileAbandonedRoomsOptions {
   idleMinutes?: number;
   maxDurationHours?: number;
+  unstartedGraceHours?: number;
 }
 
 export interface ReconcileAbandonedRoomsResult {
@@ -236,6 +238,12 @@ export async function reconcileAbandonedRooms(
 ): Promise<ReconcileAbandonedRoomsResult> {
   const idleMinutes = options.idleMinutes ?? DEFAULT_ABANDONED_IDLE_MINUTES;
   const maxDurationHours = options.maxDurationHours ?? DEFAULT_MAX_ROOM_DURATION_HOURS;
+  const unstartedGraceHours =
+    options.unstartedGraceHours !== undefined
+      ? options.unstartedGraceHours
+      : options.idleMinutes !== undefined
+      ? options.idleMinutes / 60
+      : DEFAULT_UNSTARTED_EMPTY_ROOM_HOURS;
 
   try {
     const candidateQuery = `
@@ -260,18 +268,18 @@ export async function reconcileAbandonedRooms(
         total_participants, active_participants, latest_left_at,
         CASE 
           WHEN started_at < NOW() - ($2 || ' hours')::interval THEN 'max_duration_exceeded'
-          WHEN total_participants = 0 AND created_at < NOW() - ($1 || ' minutes')::interval THEN 'idle_no_participants'
+          WHEN total_participants = 0 AND created_at < NOW() - ($3 || ' hours')::interval THEN 'idle_no_participants'
           WHEN total_participants > 0 AND active_participants = 0 AND latest_left_at < NOW() - ($1 || ' minutes')::interval THEN 'idle_all_left'
           ELSE NULL
         END as abandonment_reason
       FROM room_stats
       WHERE 
         (started_at < NOW() - ($2 || ' hours')::interval)
-        OR (total_participants = 0 AND created_at < NOW() - ($1 || ' minutes')::interval)
+        OR (total_participants = 0 AND created_at < NOW() - ($3 || ' hours')::interval)
         OR (total_participants > 0 AND active_participants = 0 AND latest_left_at < NOW() - ($1 || ' minutes')::interval);
     `;
 
-    const res = await query(candidateQuery, [idleMinutes, maxDurationHours]);
+    const res = await query(candidateQuery, [idleMinutes, maxDurationHours, unstartedGraceHours]);
     let sweptRooms = 0;
     let reconciledSessions = 0;
     const roomCodes: string[] = [];

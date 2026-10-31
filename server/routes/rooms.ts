@@ -50,13 +50,96 @@ roomsRouter.get("/:roomCode", async (req: Request, res: Response) => {
 
     const room = result.rows[0];
     if (!room.is_active) {
-      return res.status(404).json({ error: "Class has ended", room: null, isEnded: true });
+      return res.status(404).json({
+        error: "Class has ended",
+        room: {
+          id: room.id,
+          room_code: room.room_code,
+          title: room.title,
+          tutor_id: room.tutor_id,
+          tutor_name: room.tutor_name,
+          is_active: false,
+        },
+        isEnded: true,
+      });
     }
 
     return res.json({ room });
   } catch (err: any) {
     console.error("[Rooms GET Error]:", err.message);
     return res.status(500).json({ error: "Failed to get room", details: err.message });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomCode/reactivate
+ * Allows authenticated tutor/host to reopen an ended or reaped class they own.
+ */
+roomsRouter.post("/:roomCode/reactivate", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || user.role !== "tutor") {
+      return res.status(403).json({ error: "Only tutors are authorized to reactivate meetings", code: "FORBIDDEN" });
+    }
+
+    const { roomCode } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+
+    const roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, organization_id, metadata, is_active FROM live_classes WHERE room_code = $1;",
+      [sanitizedCode]
+    );
+
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+    }
+
+    const room = roomRes.rows[0];
+    const existingTutorId = room.tutor_id || room.metadata?.tutor_id;
+    if (existingTutorId && String(existingTutorId) !== String(user.id)) {
+      const userTenantId = user.tenant_id || user.organization_id;
+      if (!room.organization_id || !userTenantId || String(room.organization_id) !== String(userTenantId)) {
+        return res.status(403).json({ error: "Unauthorized: Only the room tutor or host organization can reactivate this meeting", code: "NOT_ROOM_OWNER" });
+      }
+    }
+
+    const newSessionId = crypto.randomUUID();
+    const updateRes = await query(
+      `UPDATE live_classes
+       SET is_active = TRUE, ended_at = NULL, started_at = NOW(),
+           tutor_id = COALESCE(tutor_id, $3),
+           tutor_name = COALESCE(tutor_name, $4),
+           metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{session_id}', to_jsonb($2::text))
+       WHERE id = $1
+       RETURNING id, room_code, title, tutor_id, tutor_name, is_active, metadata;`,
+      [room.id, newSessionId, user.id, user.full_name || user.name || "Tutor"]
+    );
+
+    // Initialize/sync active session in MongoDB
+    const sessionsCol = getSessionsCollection();
+    if (sessionsCol) {
+      const now = new Date();
+      await sessionsCol.updateOne(
+        { sessionId: newSessionId },
+        {
+          $set: {
+            sessionId: newSessionId,
+            roomCode: sanitizedCode,
+            tutorId: user.id,
+            status: "active",
+            isChatLocked: false,
+            pinnedMessage: null,
+            startedAt: now,
+            endedAt: null,
+          },
+        },
+        { upsert: true }
+      );
+    }
+
+    return res.json({ success: true, room: updateRes.rows[0] });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to reactivate room", details: err.message });
   }
 });
 
@@ -79,13 +162,20 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       ? reqCode.trim().toLowerCase()
       : generateSecureRoomCode();
 
+    if (!/^[a-z0-9-_]{3,50}$/.test(finalRoomCode)) {
+      return res.status(400).json({
+        error: "Invalid roomCode format. Must be 3-50 characters of lowercase letters, numbers, hyphens, or underscores.",
+        code: "INVALID_ROOM_CODE_FORMAT",
+      });
+    }
+
     const roomTitle = (title && typeof title === "string" && title.trim().length > 0)
       ? title.trim()
       : `Class ${finalRoomCode}`;
 
     // Verify ownership if room already exists
     const existingRoomRes = await query(
-      "SELECT id, tutor_id, metadata, is_active FROM live_classes WHERE room_code = $1",
+      "SELECT id, tutor_id, organization_id, metadata, is_active FROM live_classes WHERE room_code = $1",
       [finalRoomCode]
     );
 
@@ -93,7 +183,10 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       const existing = existingRoomRes.rows[0];
       const existingTutorId = existing.tutor_id || existing.metadata?.tutor_id;
       if (existingTutorId && String(existingTutorId) !== String(user.id)) {
-        return res.status(403).json({ error: "Unauthorized: only the room owner can update this meeting" });
+        const userTenantId = user.tenant_id || user.organization_id;
+        if (!existing.organization_id || !userTenantId || String(existing.organization_id) !== String(userTenantId)) {
+          return res.status(403).json({ error: "Unauthorized: only the room owner can update this meeting" });
+        }
       }
     }
 
@@ -107,7 +200,7 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
           `INSERT INTO users (id, email, full_name, role, auth_provider)
            VALUES ($1, $2, $3, 'tutor', 'google')
            ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name;`,
-          [user.id, user.email || `${user.id}@mathsy.in`, user.full_name || "Tutor"]
+          [user.id, user.email || `${user.id}@mathsy.in`, user.full_name || user.name || "Tutor"]
         );
         validTutorId = user.id;
       } catch (uErr) {
@@ -125,13 +218,15 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
     };
 
     const upsertSql = `
-      INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, is_live_streaming, metadata)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, is_live_streaming, metadata, started_at, ended_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL)
       ON CONFLICT (room_code) DO UPDATE SET
         title = EXCLUDED.title,
-        tutor_id = COALESCE(EXCLUDED.tutor_id, live_classes.tutor_id),
-        tutor_name = EXCLUDED.tutor_name,
+        tutor_id = COALESCE(live_classes.tutor_id, EXCLUDED.tutor_id),
+        tutor_name = COALESCE(live_classes.tutor_name, EXCLUDED.tutor_name),
         is_active = EXCLUDED.is_active,
+        ended_at = CASE WHEN EXCLUDED.is_active THEN NULL ELSE live_classes.ended_at END,
+        started_at = CASE WHEN EXCLUDED.is_active AND live_classes.is_active = FALSE THEN NOW() ELSE live_classes.started_at END,
         is_live_streaming = EXCLUDED.is_live_streaming,
         metadata = EXCLUDED.metadata
       RETURNING id, room_code, title, tutor_id, tutor_name, is_active, is_live_streaming, metadata, created_at;
@@ -141,7 +236,7 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       finalRoomCode,
       roomTitle,
       validTutorId,
-      user.full_name,
+      user.full_name || user.name || "Tutor",
       is_active,
       is_live_streaming,
       JSON.stringify(metaObj),
