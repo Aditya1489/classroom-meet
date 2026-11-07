@@ -147,13 +147,16 @@ export async function isOriginAllowed(origin: string): Promise<boolean> {
     }
   }
 
-  // 2. Localhost development environments in non-production
+  // 2. Localhost & development tunnel environments in non-production
   if (process.env.NODE_ENV !== "production") {
     if (
       trimmed.startsWith("http://localhost:") ||
       trimmed.startsWith("http://127.0.0.1:") ||
       trimmed === "http://localhost" ||
-      trimmed === "http://127.0.0.1"
+      trimmed === "http://127.0.0.1" ||
+      trimmed.includes(".ngrok-free.app") ||
+      trimmed.includes(".ngrok-free.dev") ||
+      trimmed.includes(".loca.lt")
     ) {
       return true;
     }

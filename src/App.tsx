@@ -10,7 +10,7 @@ import { sanitizeRoomId } from "./lib/utils";
 import { sanitizeUrlToken } from "./types/embedProtocol";
 import { createDemoRoom } from "./services/roomService";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
-import { Toaster, toast } from "sonner";
+import { toast } from "sonner";
 
 export default function App() {
   const [currentView, setCurrentView] = useState<"landing" | "lobby" | "room" | "left" | "pair" | "embed" | "dashboard" | "admin">("landing");
@@ -38,6 +38,16 @@ export default function App() {
       const path = window.location.pathname;
       const urlParams = new URLSearchParams(window.location.search);
       const isDemoQuery = urlParams.get("demo") === "1";
+
+      if (path === "/" || path === "") {
+        setActiveMeetingCode("");
+        setIsHostFromLanding(false);
+        setCurrentView("landing");
+        if (!window.location.hash.includes("access_token=") && !window.location.hash.includes("id_token=")) {
+          localStorage.removeItem("mathsy_meet_redirect_url");
+        }
+        return;
+      }
 
       if (path.startsWith("/embed/") || path.includes("/embed/")) {
         const code = sanitizeRoomId(path.split("/embed/")[1]);
@@ -128,7 +138,6 @@ export default function App() {
           }
 
           setActiveMeetingCode(code);
-          localStorage.setItem("mathsy_meet_redirect_url", `/meet/${code}`);
           const wasHost = sessionStorage.getItem(`mathsy_host_${code}`) === "true";
           setIsHostFromLanding(wasHost);
           setInitialRole(wasHost ? "tutor" : "student");
@@ -147,7 +156,16 @@ export default function App() {
           }
 
           setCurrentView("lobby");
+          return;
         }
+      }
+
+      // Default fallback: show normal home page and clear any stale meet code
+      setActiveMeetingCode("");
+      setIsHostFromLanding(false);
+      setCurrentView("landing");
+      if (!window.location.hash.includes("access_token=") && !window.location.hash.includes("id_token=")) {
+        localStorage.removeItem("mathsy_meet_redirect_url");
       }
     };
 
@@ -190,10 +208,16 @@ export default function App() {
     displayName: string;
     presentImmediately: boolean;
     role: "tutor" | "student";
+    isHost?: boolean;
   }) => {
     setJoinOptions(options);
     if (activeMeetingCode) {
       sessionStorage.setItem(`mathsy_active_meet_${activeMeetingCode}`, JSON.stringify(options));
+      if (options.isHost) {
+        sessionStorage.setItem(`mathsy_host_${activeMeetingCode}`, "true");
+      } else {
+        sessionStorage.removeItem(`mathsy_host_${activeMeetingCode}`);
+      }
     }
     setCurrentView("room");
   };
@@ -202,6 +226,7 @@ export default function App() {
     if (activeMeetingCode) {
       sessionStorage.removeItem(`mathsy_active_meet_${activeMeetingCode}`);
     }
+    localStorage.removeItem("mathsy_meet_redirect_url");
     setCurrentView("left");
   };
 
@@ -213,6 +238,7 @@ export default function App() {
     if (activeMeetingCode) {
       sessionStorage.removeItem(`mathsy_active_meet_${activeMeetingCode}`);
     }
+    localStorage.removeItem("mathsy_meet_redirect_url");
     window.history.pushState({}, "", "/");
     setActiveMeetingCode("");
     setIsHostFromLanding(false);
@@ -221,8 +247,6 @@ export default function App() {
 
   return (
     <div className="w-full min-h-screen bg-[#0e0d0b] text-[#f3eee6] selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
-      <Toaster position="bottom-left" toastOptions={{ duration: 3000 }} richColors closeButton />
-
       {currentView === "pair" && (
         <PairTabletPage
           onPaired={handleTabletPaired}

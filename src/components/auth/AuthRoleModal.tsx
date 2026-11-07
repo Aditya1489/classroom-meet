@@ -27,10 +27,33 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
   subtitle,
 }) => {
   const [selectedRole, setSelectedRole] = useState<"tutor" | "student">(defaultRole);
+  const [isSaving, setIsSaving] = useState(false);
 
   React.useEffect(() => {
     setSelectedRole(defaultRole);
   }, [defaultRole, isOpen]);
+
+  // Support closing modal on Escape key press
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !isSaving) {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, isSaving, onClose]);
+
+  const handleUpdate = async () => {
+    if (!onUpdateRole || isSaving) return;
+    setIsSaving(true);
+    try {
+      await onUpdateRole(selectedRole);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -51,28 +74,39 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
       : "Select your role to sign up. Once created, your role is saved permanently—when you log in next time, you will never be asked again.");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-      <div className="bg-[#1a1814] border border-[#f3eee6]/15 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl text-[#f3eee6]">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-role-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 sm:p-4 animate-in fade-in duration-200 cursor-pointer select-none"
+      onClick={() => {
+        if (!isSaving) onClose();
+      }}
+    >
+      <div
+        className="bg-[#1a1814] border border-[#f3eee6]/15 rounded-2xl w-full max-w-md max-h-[90dvh] overflow-y-auto shadow-2xl text-[#f3eee6] animate-in zoom-in-95 duration-200 cursor-default select-text"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#f3eee6]/[0.08]">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-[#f3eee6]/[0.08] sticky top-0 bg-[#1a1814] z-10">
           <div className="flex items-center gap-2">
-            <div className="w-2.5 h-2.5 rounded-full bg-[#f59e0b] shadow-[0_0_10px_rgba(245,158,11,0.5)]" />
-            <h2 className="font-serif text-xl font-normal text-[#f3eee6]">
+            <div className="w-2.5 h-2.5 rounded-full bg-[#f59e0b] shadow-[0_0_10px_rgba(245,158,11,0.5)] shrink-0" />
+            <h2 id="auth-role-modal-title" className="font-serif text-lg sm:text-xl font-normal text-[#f3eee6]">
               {modalTitle}
             </h2>
           </div>
-          {!isOnboarding && (
-            <button
-              onClick={onClose}
-              className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] rounded-full hover:bg-white/5 transition"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
+          <button
+            onClick={onClose}
+            disabled={isSaving}
+            className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] rounded-full hover:bg-white/5 transition cursor-pointer disabled:opacity-50"
+            aria-label="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         {/* Body */}
-        <div className="p-6 space-y-5">
+        <div className="p-4 sm:p-6 space-y-4 sm:space-y-5">
           <div className="text-center sm:text-left space-y-1">
             <span className="section-label">
               {isOnboarding ? "FIRST-TIME ONBOARDING" : isLoggedIn ? "ACCOUNT SETTINGS" : "SIGN UP · ONE-TIME ROLE SELECTION"}
@@ -157,12 +191,16 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
           {/* Action Button: Update Role if logged in/onboarding, or Continue with Google if signing up */}
           {(isLoggedIn || isOnboarding) && onUpdateRole ? (
             <button
-              onClick={() => onUpdateRole(selectedRole)}
-              className="w-full py-3.5 px-4 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] font-bold text-xs transition shadow-lg shadow-[#f59e0b]/25 flex items-center justify-center gap-2.5 cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
+              onClick={handleUpdate}
+              disabled={isSaving}
+              data-testid="complete-role-setup-btn"
+              className="w-full py-3.5 px-4 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] disabled:opacity-50 text-[#0e0d0b] font-bold text-xs transition shadow-lg shadow-[#f59e0b]/25 flex items-center justify-center gap-2.5 cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
             >
               <Check className="w-4 h-4 text-[#0e0d0b]" />
               <span>
-                {isOnboarding
+                {isSaving
+                  ? "Saving Role..."
+                  : isOnboarding
                   ? `Complete Setup as ${selectedRole === "tutor" ? "Tutor" : "Student"}`
                   : `Save Role as ${selectedRole === "tutor" ? "Tutor / Teacher" : "Student / Learner"}`}
               </span>

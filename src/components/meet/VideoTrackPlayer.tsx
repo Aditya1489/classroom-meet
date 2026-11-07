@@ -24,6 +24,14 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
       return;
     }
 
+    // Crucial for Safari / WebKit: set audio muting and inline playback attributes BEFORE attaching srcObject
+    el.muted = true;
+    el.defaultMuted = true;
+    el.playsInline = true;
+    el.setAttribute("playsinline", "true");
+    el.setAttribute("webkit-playsinline", "true");
+    el.setAttribute("muted", "true");
+
     // Only create and assign a new MediaStream if the track actually changed
     if (!streamRef.current || streamRef.current.getVideoTracks()[0] !== track) {
       const stream = new MediaStream([track]);
@@ -31,14 +39,17 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
       el.srcObject = stream;
     }
 
-    el.muted = true;
-    el.playsInline = true;
-
     const playVideo = () => {
-      if (el && el.paused) {
-        el.play().catch((err) => {
-          // Play interruption can happen during rapid mounting, safely ignore
-        });
+      if (el) {
+        const promise = el.play();
+        if (promise !== undefined) {
+          promise.catch(() => {
+            // Safari autoplay retry
+            setTimeout(() => {
+              if (el && el.paused) el.play().catch(() => {});
+            }, 300);
+          });
+        }
       }
     };
 
@@ -54,10 +65,12 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
 
     track.addEventListener("unmute", handleUnmute);
     el.addEventListener("canplay", handleCanPlay);
+    el.addEventListener("loadedmetadata", handleCanPlay);
 
     return () => {
       track.removeEventListener("unmute", handleUnmute);
       el.removeEventListener("canplay", handleCanPlay);
+      el.removeEventListener("loadedmetadata", handleCanPlay);
     };
   }, [track]);
 

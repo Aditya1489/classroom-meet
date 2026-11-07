@@ -18,6 +18,7 @@ import { webhooksRouter } from "./routes/webhooks";
 import { adminRouter } from "./routes/admin";
 import { v1SsoRouter } from "./routes/v1/sso";
 import { ssoManagementRouter } from "./routes/ssoManagement";
+import { schedulesRouter } from "./routes/schedules";
 import { apiKeyAuth, requirePermission } from "./middleware/apiKeyAuth";
 import { requestIdMiddleware } from "./middleware/requestId";
 import { logger } from "./services/logger";
@@ -26,7 +27,7 @@ import { sweepStaleSessions, reconcileAbandonedRooms } from "./services/metering
 import { validateStartupEnvironment } from "./services/envValidator";
 import { isOriginAllowed } from "./services/originValidationService";
 
-dotenv.config();
+dotenv.config({ path: [".env.local", ".env"] });
 
 export const app = express();
 const PORT = process.env.PORT || 5001;
@@ -177,6 +178,7 @@ app.use("/v1/sso", v1SsoRouter);
 app.use("/api/v1/embed", embedRouter);
 app.use("/v1/embed", embedRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/classes", schedulesRouter);
 
 // M2M API Key Verification Endpoint
 app.get("/api/v1/auth/verify", apiKeyAuth(), (req, res) => {

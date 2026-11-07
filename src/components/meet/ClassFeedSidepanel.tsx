@@ -27,6 +27,7 @@ import { Button } from "../ui/button";
 import { GoogleMeetAudioVisualizer } from "./GoogleMeetAudioVisualizer";
 import { VideoTrackPlayer } from "./VideoTrackPlayer";
 import { toast } from "sonner";
+import { DbRoomKnock } from "../../lib/dbClient";
 
 export interface ChatMsg {
   id: string;
@@ -108,6 +109,11 @@ interface ClassFeedSidepanelProps {
   unmuteRequests?: Array<{ userId: string; name: string }>;
   onApproveMic?: (userId: string, name: string) => void;
   onDenyMic?: (userId: string, name: string) => void;
+  // Knock admission props
+  pendingKnocks?: DbRoomKnock[];
+  onAdmitKnock?: (knockId: string, name: string) => void;
+  onDenyKnock?: (knockId: string, name: string) => void;
+  onAdmitAllKnocks?: () => void;
 }
 
 export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
@@ -141,6 +147,10 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
   unmuteRequests = [],
   onApproveMic,
   onDenyMic,
+  pendingKnocks = [],
+  onAdmitKnock,
+  onDenyKnock,
+  onAdmitAllKnocks,
 }) => {
   // Chat Input State
   const [inputText, setInputText] = useState("");
@@ -238,7 +248,7 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
   };
 
   return (
-    <aside className="w-80 md:w-96 h-full bg-[#1a1814] border-l border-[#f3eee6]/[0.08] flex flex-col z-30 shadow-2xl shrink-0 overflow-hidden font-sans">
+    <aside className="fixed inset-0 z-50 md:relative md:inset-auto md:w-80 lg:w-96 h-full bg-[#1a1814] border-l border-[#f3eee6]/[0.08] flex flex-col shadow-2xl shrink-0 overflow-hidden font-sans animate-in slide-in-from-right duration-200">
       {/* ── Top Tabs Header ── */}
       <div className="h-14 border-b border-[#f3eee6]/[0.08] flex items-center bg-[#16130f] px-2 shrink-0">
         <button
@@ -278,11 +288,16 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
         >
           <Users className="w-3.5 h-3.5" />
           Users ({participants.length})
+          {isHost && pendingKnocks.length > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-[#f59e0b] text-[#0e0d0b] text-[10px] font-black animate-pulse ml-0.5">
+              +{pendingKnocks.length}
+            </span>
+          )}
         </button>
 
         <button
           onClick={onClose}
-          className="p-2 hover:bg-white/10 text-[#a39e94] hover:text-[#f3eee6] rounded-lg ml-1 transition"
+          className="min-w-[40px] min-h-[40px] flex items-center justify-center hover:bg-white/10 text-[#a39e94] hover:text-[#f3eee6] rounded-xl ml-1 transition cursor-pointer"
           title="Close panel"
         >
           <X className="w-4 h-4" />
@@ -802,6 +817,70 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
             {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
             <span className={copiedLink ? "text-emerald-400" : ""}>{copiedLink ? "Link Copied!" : "Copy Meeting Link"}</span>
           </button>
+
+          {/* Google Meet Waiting to Join Section (Host only) */}
+          {isHost && pendingKnocks.length > 0 && (
+            <div className="bg-[#1e1c18] border border-[#f59e0b]/40 rounded-xl p-3 space-y-2.5 shadow-lg shadow-black/40">
+              <div className="flex items-center justify-between pb-2 border-b border-white/5">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-[#f59e0b] animate-ping" />
+                  <span className="text-[11px] font-bold text-[#f59e0b] uppercase tracking-wider font-mono">
+                    Waiting to join ({pendingKnocks.length})
+                  </span>
+                </div>
+                {pendingKnocks.length > 1 && onAdmitAllKnocks && (
+                  <button
+                    onClick={onAdmitAllKnocks}
+                    className="text-[10px] font-bold px-2.5 py-1 rounded bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] transition cursor-pointer shadow-sm active:scale-95"
+                  >
+                    Admit all
+                  </button>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                {pendingKnocks.map((k) => (
+                  <div
+                    key={k.id}
+                    className="flex items-center justify-between p-2 rounded-lg bg-[#25221d] border border-white/5 hover:border-white/10 transition"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-7 h-7 rounded-full bg-[#f59e0b]/20 border border-[#f59e0b]/30 flex items-center justify-center text-[11px] font-bold text-[#f59e0b] shrink-0 overflow-hidden">
+                        {k.avatar_url ? (
+                          <img src={k.avatar_url} alt={k.display_name} className="w-full h-full object-cover" />
+                        ) : (
+                          (k.display_name || "P")[0].toUpperCase()
+                        )}
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-semibold text-white truncate">{k.display_name}</span>
+                        <span className="text-[10px] text-[#a39e94] truncate">{k.email || "Waiting outside"}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                      {onDenyKnock && (
+                        <button
+                          onClick={() => onDenyKnock(k.id, k.display_name)}
+                          className="px-2 py-1 text-[11px] font-medium text-[#a39e94] hover:text-red-400 bg-white/5 hover:bg-white/10 rounded-md transition cursor-pointer active:scale-95"
+                        >
+                          Deny
+                        </button>
+                      )}
+                      {onAdmitKnock && (
+                        <button
+                          onClick={() => onAdmitKnock(k.id, k.display_name)}
+                          className="px-2.5 py-1 text-[11px] font-bold bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] rounded-md transition cursor-pointer shadow-sm active:scale-95"
+                        >
+                          Admit
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Dynamic 2-Column Video Grid for all Users (Matching CRM) */}
           <div

@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ path: [".env.local", ".env"] });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,17 +14,40 @@ const { Pool } = pg;
 
 const connectionString =
   process.env.DATABASE_URL ||
+  process.env.POSTGRES_PRISMA_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.POSTGRES_URL_NON_POOLING ||
   "postgresql://postgres:meet24@localhost:5432/mathsy_meet";
 
 const isLocalhost = connectionString.includes("localhost") || connectionString.includes("127.0.0.1");
 
+let cleanConnectionString = connectionString;
+if (!isLocalhost) {
+  try {
+    const u = new URL(connectionString);
+    u.searchParams.delete("sslmode");
+    cleanConnectionString = u.toString();
+  } catch {}
+}
+
 export const pool = new Pool({
-  connectionString,
-  max: 50,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionString: cleanConnectionString,
+  max: 15,
+  min: 2,
+  idleTimeoutMillis: 300000,
+  connectionTimeoutMillis: 15000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
   ssl: isLocalhost ? false : { rejectUnauthorized: false },
 });
+
+// Periodic background keep-alive to keep pooled connections warm
+if (!isLocalhost) {
+  const keepAliveTimer = setInterval(() => {
+    pool.query("SELECT 1").catch(() => {});
+  }, 45000);
+  keepAliveTimer.unref();
+}
 
 pool.on("error", (err) => {
   console.error("[PostgreSQL] Unexpected error on idle client:", err.message);

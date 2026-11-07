@@ -58,7 +58,7 @@ export interface MicRequestEvent {
 
 export interface ControlMessageEvent {
   isControl: boolean;
-  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED";
+  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE";
   userId?: string;
   targetUserId?: string;
   name?: string;
@@ -90,6 +90,12 @@ function generateClientJwt(userId: string, role: string, name: string): string {
       role: role === "host" ? "tutor" : role,
       name: name,
       exp: Math.floor(Date.now() / 1000) + 86400 * 7,
+      permissions: {
+        canPublishAudio: role === "host" || role === "tutor",
+        canPublishVideo: true,
+        canPublishScreen: role === "host" || role === "tutor",
+        isHost: role === "host" || role === "tutor",
+      },
     });
     return `${header}.${payload}.mathsySig`;
   } catch {
@@ -97,22 +103,26 @@ function generateClientJwt(userId: string, role: string, name: string): string {
   }
 }
 
-function getEffectiveToken(token: string | undefined, userId: string, role: string, userName: string): string {
-  if (token && token.trim().length > 0) {
-    try {
-      const parts = token.split(".");
-      if (parts.length === 3) {
-        const payloadStr = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
-        const payload = JSON.parse(payloadStr);
-        if (payload && payload.sub) {
-          return token;
-        }
-      }
-    } catch {
-      // Invalid format, fall back
-    }
+function isSupabaseES256Token(token: string | undefined): boolean {
+  if (!token || typeof token !== "string" || !token.trim()) return false;
+  try {
+    const parts = token.trim().split(".");
+    if (parts.length !== 3) return false;
+    let b64 = parts[0].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const headerStr = typeof atob === "function" ? atob(b64) : Buffer.from(b64, "base64").toString("utf8");
+    const header = JSON.parse(headerStr);
+    return header.alg === "ES256";
+  } catch {
+    return false;
   }
-  return generateClientJwt(userId, role, userName);
+}
+
+function getEffectiveToken(token: string | undefined, userId: string, role: string, userName: string): string {
+  if (isSupabaseES256Token(token)) {
+    return token!.trim();
+  }
+  return "";
 }
 
 function sanitizeTransportData(data: any, signalingUrl: string) {
@@ -120,11 +130,19 @@ function sanitizeTransportData(data: any, signalingUrl: string) {
 
   let fallbackHost = "";
   try {
-    if (signalingUrl) {
+    const envMediasoup = typeof import.meta !== "undefined" ? (import.meta as any).env?.VITE_MEDIASOUP_SERVER_URL : "";
+    if (envMediasoup) {
+      fallbackHost = new URL(envMediasoup).hostname;
+    } else if (signalingUrl) {
       const parsed = new URL(signalingUrl);
       fallbackHost = parsed.hostname;
     }
   } catch {}
+
+  // If host is localhost or ngrok tunnel, default candidate IP fallback to the known public SFU server
+  if (!fallbackHost || fallbackHost === "localhost" || fallbackHost === "127.0.0.1" || fallbackHost.includes("ngrok")) {
+    fallbackHost = "152.67.5.129";
+  }
 
   if (Array.isArray(data.iceCandidates)) {
     const sanitizedCandidates: any[] = [];
@@ -199,6 +217,7 @@ export class MathsyMediasoupEngine {
   public onChatLockChange?: (locked: boolean) => void;
   public onPinnedMessageChange?: (message: { text: string; senderName: string } | null) => void;
   public onClassEnded?: () => void;
+  public onScreenShareEnded?: () => void;
 
   public activeToken: string = "";
   public isChatLocked: boolean = false;
@@ -249,10 +268,17 @@ export class MathsyMediasoupEngine {
       }
     } catch {}
 
-    const defaultUrl =
-      envMediasoupUrl ||
-      derivedFromApi ||
-      (typeof window !== "undefined" && window.location ? window.location.origin : "");
+    const isBrowser = typeof window !== "undefined" && Boolean(window.location);
+    const isTunnelOrRemote = isBrowser && (
+      window.location.hostname.includes("ngrok") ||
+      (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1" && !window.location.hostname.includes("sslip.io"))
+    );
+
+    // If accessing via ngrok or tunnel, route signaling through window.location.origin (same-origin proxy)
+    // so Vite proxies /socket.io and rewrites the Origin header to http://localhost:5174, satisfying the SFU CORS whitelist.
+    const defaultUrl = isTunnelOrRemote
+      ? window.location.origin
+      : (envMediasoupUrl || derivedFromApi || (isBrowser ? window.location.origin : ""));
 
     this.signalingUrl = customSignalingUrl || defaultUrl;
     if (!this.signalingUrl) {
@@ -310,10 +336,11 @@ export class MathsyMediasoupEngine {
       }
     }
 
-    if (!effectiveToken) {
+    if (!effectiveToken || !isSupabaseES256Token(effectiveToken)) {
       effectiveToken = getEffectiveToken(token, sanitizedUserId, role, userName);
     }
-    this.activeToken = effectiveToken;
+    const isES256 = isSupabaseES256Token(effectiveToken);
+    this.activeToken = isES256 ? effectiveToken : "";
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -361,18 +388,21 @@ export class MathsyMediasoupEngine {
         failConnect(new Error("SFU connection timed out after 15000ms"));
       }, 15000);
 
+      const authPayload: any = isES256 ? { token: effectiveToken } : {};
+      const queryPayload: any = {
+        classId: roomId,
+        name: userName,
+        role: role === "host" ? "tutor" : "student",
+        peerIdentity: sanitizedUserId,
+      };
+      if (isES256) {
+        queryPayload.token = effectiveToken;
+      }
+
       // Establish WebSocket to Mediasoup signaling server
       this.socket = io(this.signalingUrl, {
-        auth: {
-          token: effectiveToken,
-        },
-        query: {
-          token: effectiveToken,
-          classId: roomId,
-          name: userName,
-          role: role === "host" ? "tutor" : "student",
-          peerIdentity: sanitizedUserId,
-        },
+        auth: authPayload,
+        query: queryPayload,
         transports: ["websocket"],
         reconnection: false, // Let callers manage retry instead of endless silent loop
       });
@@ -455,6 +485,11 @@ export class MathsyMediasoupEngine {
           this.notifyParticipants();
         }
 
+        if (Array.isArray(data?.producers) || Array.isArray(data?.activeProducers)) {
+          const prods = data.producers || data.activeProducers;
+          handleActiveProducers(prods);
+        }
+
         if (typeof data?.isChatLocked === "boolean") {
           this.onChatLockChange?.(data.isChatLocked);
         }
@@ -485,6 +520,14 @@ export class MathsyMediasoupEngine {
           isVideoMuted: true,
         });
         this.notifyParticipants();
+
+        // Broadcast current media producer states so newly joined peer syncs camera/mic immediately
+        if (this.producers.has("video") || this.localVideoTrack) {
+          this.broadcastMuteState(undefined, false);
+        }
+        if (this.producers.has("audio") || this.localAudioTrack) {
+          this.broadcastMuteState(false, undefined);
+        }
       };
       this.socket.on("peerJoined", handlePeerJoined);
       this.socket.on("peer-joined", handlePeerJoined);
@@ -571,10 +614,19 @@ export class MathsyMediasoupEngine {
         console.log("[MathsyMeet Engine] newProducer received:", data);
         if (!data || typeof data !== "object") return;
         const producerId = data.producerId || data.id;
-        const peerId = data.producerPeerId || data.peerId || data.producerBaseUserId || data.baseUserId;
+        const peerId =
+          data.producerPeerId ||
+          data.peerId ||
+          data.producerBaseUserId ||
+          data.baseUserId ||
+          data.userId ||
+          data.producerUserId ||
+          data.appData?.peerId ||
+          data.appData?.userId ||
+          "";
         const kind = data.kind;
-        const source = data.appData?.mediaType || data.source || data.mediaType;
-        if (producerId && peerId && kind) {
+        const source = data.appData?.mediaType || data.appData?.source || data.source || data.mediaType;
+        if (producerId && kind) {
           await this.consumeTrack(producerId, peerId, kind, source);
         }
       };
@@ -588,10 +640,19 @@ export class MathsyMediasoupEngine {
         for (const p of list) {
           if (!p || typeof p !== "object") continue;
           const producerId = p.producerId || p.id;
-          const peerId = p.producerPeerId || p.peerId || p.producerBaseUserId || p.baseUserId;
+          const peerId =
+            p.producerPeerId ||
+            p.peerId ||
+            p.producerBaseUserId ||
+            p.baseUserId ||
+            p.userId ||
+            p.producerUserId ||
+            p.appData?.peerId ||
+            p.appData?.userId ||
+            "";
           const kind = p.kind;
-          const source = p.appData?.mediaType || p.source || p.mediaType;
-          if (producerId && peerId && kind) {
+          const source = p.appData?.mediaType || p.appData?.source || p.source || p.mediaType;
+          if (producerId && kind) {
             await this.consumeTrack(producerId, peerId, kind, source);
           }
         }
@@ -635,16 +696,27 @@ export class MathsyMediasoupEngine {
           }
         }
         if (participant) {
-          if (consumer?.kind === "video" || participant.videoTrack?.id === consumer?.track?.id) {
+          const trackId = consumer?.track?.id;
+          if (trackId && participant.screenTrack?.id === trackId) {
+            participant.screenTrack = undefined;
+            console.log(`[MathsyMeet Engine] Cleared remote SCREEN track for peer:`, peerId);
+          } else if (trackId && participant.videoTrack?.id === trackId) {
             participant.videoTrack = undefined;
             participant.isVideoMuted = true;
-          }
-          if (consumer?.kind === "audio" || participant.audioTrack?.id === consumer?.track?.id) {
+            console.log(`[MathsyMeet Engine] Cleared remote VIDEO track for peer:`, peerId);
+          } else if (trackId && participant.audioTrack?.id === trackId) {
             participant.audioTrack = undefined;
             participant.isAudioMuted = true;
-          }
-          if (participant.screenTrack?.id === consumer?.track?.id) {
-            participant.screenTrack = undefined;
+          } else if (consumer?.kind === "video") {
+            if (participant.screenTrack) {
+              participant.screenTrack = undefined;
+            } else {
+              participant.videoTrack = undefined;
+              participant.isVideoMuted = true;
+            }
+          } else if (consumer?.kind === "audio") {
+            participant.audioTrack = undefined;
+            participant.isAudioMuted = true;
           }
           this.notifyParticipants();
         }
@@ -880,6 +952,15 @@ export class MathsyMediasoupEngine {
           });
         }
       });
+      this.socket.on("screenshare:state", (data: any) => {
+        if (data && typeof data === "object") {
+          this.onControlMessage?.({
+            isControl: true,
+            controlAction: "SCREENSHARE_STATE",
+            ...data,
+          });
+        }
+      });
 
       // In-meeting signaling: Raise Hand
       const handleRaiseHand = ({ peerId, id, raised, isHandRaised }: any) => {
@@ -953,6 +1034,7 @@ export class MathsyMediasoupEngine {
             });
             this.producers.set("video", prod);
             console.log("[MathsyMeet Engine] Auto-produced local video track:", prod.id);
+            this.broadcastMuteState(undefined, false);
           } catch (e: any) {
             console.warn("[MathsyMeet Engine] Auto-produce video note:", e.message);
           }
@@ -966,6 +1048,7 @@ export class MathsyMediasoupEngine {
             });
             this.producers.set("audio", prod);
             console.log("[MathsyMeet Engine] Auto-produced local audio track:", prod.id);
+            this.broadcastMuteState(false, undefined);
           } catch (e: any) {
             console.warn("[MathsyMeet Engine] Auto-produce audio note:", e.message);
           }
@@ -975,7 +1058,7 @@ export class MathsyMediasoupEngine {
           try {
             const prod = await this.sendTransport.produce({
               track: this.localScreenTrack,
-              appData: { mediaType: "screen" }
+              appData: { mediaType: "screen", source: "screen" }
             });
             this.producers.set("screen", prod);
             console.log("[MathsyMeet Engine] Auto-produced screen track:", prod.id);
@@ -1035,7 +1118,10 @@ export class MathsyMediasoupEngine {
       });
 
       const data = res?.params || res;
-      if (!data || !data.id) return;
+      if (!data || !data.id) {
+        console.warn("[MathsyMeet Engine] consume failed: server response missing consumer id:", res);
+        return;
+      }
 
       const consumer = await this.recvTransport.consume({
         id: data.id,
@@ -1050,42 +1136,89 @@ export class MathsyMediasoupEngine {
         consumer.resume();
       } catch {}
 
-      let participant = this.participants.get(peerId);
-      if (!participant) {
-        for (const [k, p] of this.participants.entries()) {
-          if (p.id === peerId || k === peerId) {
-            participant = p;
-            break;
+      let participant: RemoteParticipant | undefined = undefined;
+      if (peerId) {
+        participant = this.participants.get(peerId);
+        if (!participant) {
+          for (const [k, p] of this.participants.entries()) {
+            if (
+              p.id === peerId ||
+              k === peerId ||
+              p.userId === peerId ||
+              (p as any).peerId === peerId ||
+              (p as any).baseUserId === peerId ||
+              p.id.includes(peerId) ||
+              peerId.includes(p.id) ||
+              (p.userId && (p.userId.includes(peerId) || peerId.includes(p.userId)))
+            ) {
+              participant = p;
+              break;
+            }
           }
         }
       }
-      if (!participant) {
-        participant = {
-          id: peerId,
-          name: "Participant",
-          role: "student",
-        };
-        this.participants.set(peerId, participant);
+
+      // If still not matched by peerId, resolve logically:
+      // 1. If only 1 remote participant exists in the room, it MUST belong to them!
+      if (!participant && this.participants.size === 1) {
+        participant = Array.from(this.participants.values())[0];
       }
 
-      if (source === "screen") {
+      // 2. If student is consuming, and tutor/host exists, match tutor
+      if (!participant && !this.isHostUser) {
+        participant = Array.from(this.participants.values()).find((p) => p.role === "host" || p.role === "tutor");
+      }
+
+      // 3. Match any remote participant missing this kind of track
+      if (!participant) {
+        participant = Array.from(this.participants.values()).find((p) =>
+          kind === "video" ? !p.videoTrack : !p.audioTrack
+        );
+      }
+
+      if (!participant) {
+        const fallbackId = peerId || `peer-${Math.random().toString(36).substring(2, 7)}`;
+        participant = {
+          id: fallbackId,
+          name: this.isHostUser ? "Student" : "Tutor",
+          role: this.isHostUser ? "student" : "host",
+          isSpeaking: false,
+          isHandRaised: false,
+          isAudioMuted: kind !== "audio",
+          isVideoMuted: kind !== "video",
+        };
+        this.participants.set(fallbackId, participant);
+      }
+
+      const isScreenSource =
+        source === "screen" ||
+        data?.appData?.mediaType === "screen" ||
+        data?.appData?.source === "screen" ||
+        (kind === "video" && participant.videoTrack && participant.videoTrack.id !== consumer.track.id);
+
+      if (isScreenSource) {
         participant.screenTrack = consumer.track;
+        console.log(`[MathsyMeet Engine] Attached remote SCREEN track for peer:`, participant.id);
       } else if (kind === "video") {
         participant.videoTrack = consumer.track;
         participant.isVideoMuted = false;
+        console.log(`[MathsyMeet Engine] Attached remote VIDEO track for peer:`, participant.id);
       } else if (kind === "audio") {
         participant.audioTrack = consumer.track;
         participant.isAudioMuted = false;
+        console.log(`[MathsyMeet Engine] Attached remote AUDIO track for peer:`, participant.id);
       }
 
       consumer.track.addEventListener("unmute", () => {
-        console.log(`[MathsyMeet Engine] Remote ${kind} track UNMUTED from peer:`, peerId);
-        if (kind === "video") participant!.isVideoMuted = false;
-        if (kind === "audio") participant!.isAudioMuted = false;
-        this.notifyParticipants();
+        console.log(`[MathsyMeet Engine] Remote ${kind} track UNMUTED from peer:`, participant?.id);
+        if (participant) {
+          if (kind === "video") participant.isVideoMuted = false;
+          if (kind === "audio") participant.isAudioMuted = false;
+          this.notifyParticipants();
+        }
       });
 
-      console.log(`[MathsyMeet Engine] Consumed remote ${kind} track from peer:`, peerId);
+      console.log(`[MathsyMeet Engine] Consumed remote ${kind} track from peer:`, participant.id);
       this.notifyParticipants();
     } catch (err: any) {
       console.warn("[MathsyMeet Engine] consumeTrack error:", err.message);
@@ -1203,7 +1336,10 @@ export class MathsyMediasoupEngine {
       };
 
       if (this.sendTransport) {
-        const producer = await this.sendTransport.produce({ track, appData: { mediaType: "screen" } });
+        const producer = await this.sendTransport.produce({
+          track,
+          appData: { mediaType: "screen", source: "screen" }
+        });
         this.producers.set("screen", producer);
       }
       return track;
@@ -1226,6 +1362,23 @@ export class MathsyMediasoupEngine {
       this.request("closeProducer", { producerId: prodId }).catch(() => {});
       this.socket?.emit("producerClose", { producerId: prodId });
     }
+    this.broadcastScreenShareState(this.roomId, false, this.isHostUser);
+    this.onScreenShareEnded?.();
+  }
+
+  public broadcastScreenShareState(roomCode: string, isOpen: boolean, isHost: boolean = true) {
+    const payload: ControlMessageEvent = {
+      isControl: true,
+      controlAction: "SCREENSHARE_STATE",
+      roomCode: roomCode || this.roomId,
+      isOpen,
+      layoutMode: isOpen ? "screenshare" : "grid",
+      isHost,
+      senderId: this.currentUserId,
+      timestamp: Date.now(),
+    };
+    this.socket?.emit("chatMessage", payload);
+    this.socket?.emit("screenshare:state", payload);
   }
 
   public broadcastMuteState(isAudioMuted?: boolean, isVideoMuted?: boolean) {

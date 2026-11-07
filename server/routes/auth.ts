@@ -28,12 +28,24 @@ export function getGoogleClientIds(): string[] {
   ].filter(Boolean) as string[];
 }
 
+let cachedGoogleClient: OAuth2Client | null = null;
 export function getGoogleClient(): OAuth2Client {
-  const ids = getGoogleClientIds();
-  return new OAuth2Client(ids[0] || undefined);
+  if (!cachedGoogleClient) {
+    const ids = getGoogleClientIds();
+    cachedGoogleClient = new OAuth2Client(ids[0] || undefined);
+    // Pre-warm Google public key certificates in memory
+    cachedGoogleClient.getFederatedSignonCertsAsync().catch(() => {});
+  }
+  return cachedGoogleClient;
 }
 
-export function generateToken(payload: { id: string; email?: string; role: string; name: string }) {
+export function generateToken(payload: {
+  id: string;
+  email?: string;
+  role: string;
+  name: string;
+  needsRoleSelection?: boolean;
+}) {
   const secret = getJwtSecret();
   return jwt.sign(
     {
@@ -67,18 +79,77 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (isUUID) {
       try {
         const userRes = await query(
-          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active FROM users WHERE id = $1",
+          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed FROM users WHERE id = $1",
           [decoded.id]
         );
         if (userRes.rows.length > 0) {
           if (userRes.rows[0].is_active === false) {
             return res.status(403).json({ error: "User account is suspended" });
           }
-          (req as any).user = userRes.rows[0];
+          const userRow = userRes.rows[0];
+          const needsSelection = decoded.needsRoleSelection !== undefined
+            ? Boolean(decoded.needsRoleSelection)
+            : (userRow.onboarding_completed === false);
+          (req as any).user = {
+            ...userRow,
+            needsRoleSelection: needsSelection,
+          };
           return next();
         }
       } catch (dbErr: any) {
         // DB error or temporary network glitch
+      }
+    }
+
+    // Fallback: If not found by UUID, look up user by verified email (handles database reconnects/stale client tokens)
+    if (decoded.email) {
+      try {
+        const userByEmailRes = await query(
+          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed FROM users WHERE LOWER(email) = LOWER($1)",
+          [decoded.email]
+        );
+        if (userByEmailRes.rows.length > 0) {
+          if (userByEmailRes.rows[0].is_active === false) {
+            return res.status(403).json({ error: "User account is suspended" });
+          }
+          const userRow = userByEmailRes.rows[0];
+          const needsSelection = decoded.needsRoleSelection !== undefined
+            ? Boolean(decoded.needsRoleSelection)
+            : (userRow.onboarding_completed === false);
+          (req as any).user = {
+            ...userRow,
+            needsRoleSelection: needsSelection,
+          };
+          return next();
+        }
+
+        // Auto-provision verified user record if absent in table
+        const insertRes = await query(
+          `INSERT INTO users (email, full_name, role, auth_provider, onboarding_completed, created_at, updated_at)
+           VALUES ($1, $2, $3, 'google', $4, NOW(), NOW())
+           ON CONFLICT (email) DO UPDATE
+           SET updated_at = NOW()
+           RETURNING id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed;`,
+          [
+            decoded.email.toLowerCase(),
+            decoded.name || decoded.full_name || "User",
+            decoded.role || "student",
+            decoded.needsRoleSelection === false,
+          ]
+        );
+        if (insertRes.rows.length > 0) {
+          const userRow = insertRes.rows[0];
+          const needsSelection = decoded.needsRoleSelection !== undefined
+            ? Boolean(decoded.needsRoleSelection)
+            : (userRow.onboarding_completed === false);
+          (req as any).user = {
+            ...userRow,
+            needsRoleSelection: needsSelection,
+          };
+          return next();
+        }
+      } catch (dbErr: any) {
+        // DB error fallback
       }
     }
 
@@ -88,6 +159,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       email: decoded.email || "",
       full_name: decoded.name || decoded.full_name || "User",
       role: decoded.role || "student",
+      needsRoleSelection: Boolean(decoded.needsRoleSelection),
     };
 
     return next();
@@ -236,73 +308,45 @@ authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) 
     let needsRoleSelection = false;
 
     try {
-      // 1. Search for existing user by verified Google provider_user_id
-      const providerRes = await query(
-        "SELECT id, email, full_name, avatar_url, role FROM users WHERE auth_provider = 'google' AND provider_user_id = $1",
-        [verifiedSub]
+      const validRole = signupRole === "tutor" || signupRole === "student" ? signupRole : null;
+      const initialRole = validRole || "student";
+      const onboardingCompleted = Boolean(validRole);
+
+      // Single atomic UPSERT to authenticate or register user in 1 fast roundtrip
+      const upsertRes = await query(
+        `INSERT INTO users (email, full_name, avatar_url, role, auth_provider, provider_user_id, onboarding_completed, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'google', $5, $6, NOW(), NOW())
+         ON CONFLICT (email) DO UPDATE
+         SET provider_user_id = EXCLUDED.provider_user_id,
+             auth_provider = 'google',
+             full_name = COALESCE(users.full_name, EXCLUDED.full_name),
+             avatar_url = COALESCE(users.avatar_url, EXCLUDED.avatar_url),
+             updated_at = NOW()
+         RETURNING id, email, full_name, avatar_url, role, onboarding_completed, (xmax = 0) AS is_new_record;`,
+        [verifiedEmail, verifiedName, verifiedPicture || null, initialRole, verifiedSub, onboardingCompleted]
       );
 
-      if (providerRes.rows.length > 0) {
-        // Returning user with matched Google sub:
-        const existing = providerRes.rows[0];
-        isNewUser = false;
-        needsRoleSelection = false;
-
-        // Update profile fields safely without overwriting existing role
-        const updateRes = await query(
-          `UPDATE users
-           SET full_name = COALESCE($1, full_name),
-               avatar_url = COALESCE($2, avatar_url),
-               updated_at = NOW()
-           WHERE id = $3
-           RETURNING id, email, full_name, avatar_url, role;`,
-          [verifiedName, verifiedPicture || null, existing.id]
-        );
-        user = updateRes.rows[0] || existing;
-      } else {
-        // 2. Check if a user with this verified email already exists
-        const emailRes = await query(
-          "SELECT id, email, full_name, avatar_url, role FROM users WHERE LOWER(email) = LOWER($1)",
-          [verifiedEmail]
-        );
-
-        if (emailRes.rows.length > 0) {
-          // Link Google provider to existing verified email account safely
-          const existing = emailRes.rows[0];
-          isNewUser = false;
-          needsRoleSelection = false;
-
-          const updateRes = await query(
-            `UPDATE users
-             SET provider_user_id = $1,
-                 auth_provider = 'google',
-                 full_name = COALESCE($2, full_name),
-                 avatar_url = COALESCE($3, avatar_url),
-                 updated_at = NOW()
-             WHERE id = $4
-             RETURNING id, email, full_name, avatar_url, role;`,
-            [verifiedSub, verifiedName, verifiedPicture || null, existing.id]
-          );
-          user = updateRes.rows[0] || existing;
-        } else {
-          // 3. New user registration
-          isNewUser = true;
-          const validRole = signupRole === "tutor" || signupRole === "student" ? signupRole : null;
-          const initialRole = validRole || "student";
-          needsRoleSelection = !validRole;
-
-          const insertRes = await query(
-            `INSERT INTO users (email, full_name, avatar_url, role, auth_provider, provider_user_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, 'google', $5, NOW(), NOW())
-             RETURNING id, email, full_name, avatar_url, role;`,
-            [verifiedEmail, verifiedName, verifiedPicture || null, initialRole, verifiedSub]
-          );
-          user = insertRes.rows[0];
-        }
+      const row = upsertRes?.rows?.[0];
+      if (!row) {
+        throw new Error("No record returned from users upsert");
       }
+      user = {
+        id: row.id || `usr_${verifiedSub}`,
+        email: row.email || verifiedEmail,
+        full_name: row.full_name || verifiedName || "User",
+        avatar_url: row.avatar_url || verifiedPicture || null,
+        role: row.role || initialRole,
+        onboarding_completed: row.onboarding_completed,
+      };
+      const hasCompletedOnboarding = Boolean(row.onboarding_completed);
+      isNewUser = Boolean(row.is_new_record) || !hasCompletedOnboarding;
+      needsRoleSelection = !hasCompletedOnboarding;
     } catch (dbErr: any) {
       console.warn("[Auth /google DB Warning] PostgreSQL fallback:", dbErr.message);
-      const fallbackRole = signupRole === "tutor" || signupRole === "student" ? signupRole : "student";
+      const validRole = signupRole === "tutor" || signupRole === "student" ? signupRole : null;
+      const fallbackRole = validRole || "student";
+      needsRoleSelection = !validRole;
+      isNewUser = true;
       user = {
         id: `usr_${verifiedSub}`,
         email: verifiedEmail,
@@ -317,6 +361,7 @@ authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) 
       email: user.email,
       role: user.role,
       name: user.full_name,
+      needsRoleSelection,
     });
 
     return res.json({
@@ -327,6 +372,7 @@ authRouter.post("/google", authRateLimiter, async (req: Request, res: Response) 
         avatarUrl: user.avatar_url,
         role: user.role,
         isHost: user.role === "tutor",
+        needsRoleSelection,
       },
       token,
       isNewUser,
@@ -356,6 +402,7 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
   const user = (req as any).user;
   const token = req.headers.authorization!.split(" ")[1];
   const isSuperadmin = await isPlatformSuperadmin(user.id);
+  const needsRoleSelection = Boolean(user.needsRoleSelection) || user.onboarding_completed === false;
 
   return res.json({
     user: {
@@ -366,8 +413,11 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
       role: user.role,
       isHost: user.role === "tutor",
       isPlatformSuperadmin: isSuperadmin,
+      needsRoleSelection,
+      onboarding_completed: user.onboarding_completed !== false,
     },
     token,
+    needsRoleSelection,
   });
 });
 
@@ -384,8 +434,11 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Invalid role. Must be 'tutor' or 'student'" });
     }
 
-    // P0-4: Prevent self-service tutor privilege escalation
-    if (role === "tutor" && user.role !== "tutor" && user.role !== "admin") {
+    const isInitialOnboarding = Boolean(user.needsRoleSelection) || user.onboarding_completed === false;
+
+    // P0-4: Prevent self-service tutor privilege escalation for established accounts.
+    // Allow role selection when the user is completing initial onboarding.
+    if (!isInitialOnboarding && role === "tutor" && user.role !== "tutor" && user.role !== "admin") {
       return res.status(403).json({
         error: "Forbidden: Self-service role elevation to tutor is prohibited. Contact an administrator.",
         code: "FORBIDDEN_ROLE_ELEVATION",
@@ -393,7 +446,7 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
     }
 
     try {
-      await query("UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2", [role, user.id]);
+      await query("UPDATE users SET role = $1, onboarding_completed = TRUE, updated_at = NOW() WHERE id = $2", [role, user.id]);
     } catch (dbErr: any) {
       console.warn("[Auth /role DB Warning]:", dbErr.message);
     }
@@ -403,9 +456,23 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
       email: user.email,
       role,
       name: user.full_name,
+      needsRoleSelection: false,
     });
 
-    return res.json({ role, token });
+    return res.json({
+      role,
+      token,
+      user: {
+        id: user.id,
+        name: user.full_name,
+        email: user.email,
+        avatarUrl: user.avatar_url,
+        role,
+        isHost: role === "tutor",
+        needsRoleSelection: false,
+        onboarding_completed: true,
+      },
+    });
   } catch (err: any) {
     return res.status(500).json({ error: "Failed to update role", details: err.message });
   }

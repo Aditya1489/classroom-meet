@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     auth_provider VARCHAR(50) NOT NULL DEFAULT 'google' CHECK (auth_provider IN ('google', 'guest', 'email')),
     provider_user_id VARCHAR(255),
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -57,6 +58,24 @@ CREATE TABLE IF NOT EXISTS room_participants (
 CREATE INDEX IF NOT EXISTS idx_participants_room ON room_participants(room_code);
 CREATE INDEX IF NOT EXISTS idx_participants_user ON room_participants(user_id);
 
+-- 4b. Room Knocks (Google Meet-style Host Admission)
+CREATE TABLE IF NOT EXISTS room_knocks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    room_code VARCHAR(32) NOT NULL REFERENCES live_classes(room_code) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    display_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255),
+    avatar_url TEXT,
+    role VARCHAR(20) NOT NULL DEFAULT 'student' CHECK (role IN ('tutor', 'student')),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'admitted', 'denied', 'cancelled')),
+    responded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    responded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_room_knocks_room_status ON room_knocks(room_code, status);
+CREATE INDEX IF NOT EXISTS idx_room_knocks_user ON room_knocks(user_id);
+CREATE INDEX IF NOT EXISTS idx_room_knocks_created_at ON room_knocks(created_at DESC);
+
 -- 5. Chat Messages
 CREATE TABLE IF NOT EXISTS chat_messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -81,6 +100,7 @@ CREATE TABLE IF NOT EXISTS polls (
     correct_option_index INT,
     timer_seconds INT,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ
 );
@@ -204,4 +224,39 @@ CREATE TABLE IF NOT EXISTS sso_launch_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_sso_launch_token_hash ON sso_launch_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_sso_launch_token_exp ON sso_launch_tokens(expires_at);
+
+-- 16. Class Schedules Table
+CREATE TABLE IF NOT EXISTS class_schedules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    room_code VARCHAR(32) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    subject VARCHAR(100),
+    description TEXT,
+    tutor_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scheduled_at TIMESTAMPTZ NOT NULL,
+    duration_minutes INT NOT NULL DEFAULT 0 CHECK (duration_minutes >= 0), -- 0 = Unlimited Duration
+    status VARCHAR(30) NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'in_progress', 'completed', 'cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_class_schedules_tutor ON class_schedules(tutor_id);
+CREATE INDEX IF NOT EXISTS idx_class_schedules_scheduled_at ON class_schedules(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_class_schedules_room_code ON class_schedules(room_code);
+
+-- 17. Class Invitations Table
+CREATE TABLE IF NOT EXISTS class_invitations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    schedule_id UUID NOT NULL REFERENCES class_schedules(id) ON DELETE CASCADE,
+    email VARCHAR(255) NOT NULL,
+    invitee_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    rsvp_status VARCHAR(30) NOT NULL DEFAULT 'pending' CHECK (rsvp_status IN ('pending', 'accepted', 'declined')),
+    token VARCHAR(64) NOT NULL UNIQUE,
+    rsvp_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_invitations_schedule ON class_invitations(schedule_id);
+CREATE INDEX IF NOT EXISTS idx_invitations_email ON class_invitations(LOWER(email));
+CREATE INDEX IF NOT EXISTS idx_invitations_token ON class_invitations(token);
+CREATE INDEX IF NOT EXISTS idx_invitations_user ON class_invitations(invitee_user_id);
+
 

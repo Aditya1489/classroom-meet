@@ -3,7 +3,7 @@
  * Communicates with the PostgreSQL backend API (http://localhost:5001/api).
  */
 
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 function getAuthHeaders(customToken?: string, roomCode?: string): HeadersInit {
   const token =
@@ -72,6 +72,20 @@ export interface DbWhiteboardSnapshot {
   room_code: string;
   snapshot_json: any;
   updated_at?: string;
+}
+
+export interface DbRoomKnock {
+  id: string;
+  room_code: string;
+  user_id?: string | null;
+  display_name: string;
+  email?: string | null;
+  avatar_url?: string | null;
+  role: "tutor" | "student";
+  status: "waiting_for_host" | "pending" | "admitted" | "denied" | "cancelled";
+  responded_by?: string | null;
+  responded_at?: string | null;
+  created_at: string;
 }
 
 /**
@@ -406,6 +420,126 @@ export const dbClient = {
     } catch (err) {
       console.warn("[dbClient] Error voting on poll:", err);
       return false;
+    }
+  },
+
+  /**
+   * Google Meet Host Admission & Knocking
+   */
+  async submitKnock(
+    roomCode: string,
+    details?: { display_name?: string; email?: string; avatar_url?: string; role?: string }
+  ): Promise<{ status: "pending" | "admitted" | "host" | "waiting_for_host" | "denied"; knock?: DbRoomKnock; error?: string; code?: string; cooldownRemaining?: number }> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knock`, {
+        method: "POST",
+        headers: getAuthHeaders(undefined, roomCode),
+        body: JSON.stringify(details || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data.code === "ROOM_NOT_ACTIVE" || data.status === "waiting_for_host") {
+          return { status: "waiting_for_host", code: data.code, error: data.error };
+        }
+        return {
+          status: "denied",
+          error: data.error || "Failed to request admission",
+          code: data.code,
+          cooldownRemaining: data.cooldownRemaining,
+        };
+      }
+      return {
+        status: data.status || (data.isHost ? "host" : "pending"),
+        knock: data.knock,
+      };
+    } catch (err: any) {
+      console.warn("[dbClient] Error submitting knock:", err);
+      return { status: "waiting_for_host", error: err.message };
+    }
+  },
+
+  async getKnockStatus(
+    roomCode: string,
+    knockId: string
+  ): Promise<{ status: "pending" | "admitted" | "denied" | "cancelled"; knock?: DbRoomKnock } | null> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knock/${encodeURIComponent(knockId)}`,
+        { headers: getAuthHeaders(undefined, roomCode) }
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      return { status: data.status, knock: data.knock };
+    } catch (err) {
+      console.warn("[dbClient] Error fetching knock status:", err);
+      return null;
+    }
+  },
+
+  async cancelKnock(roomCode: string, knockId: string): Promise<boolean> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knock/${encodeURIComponent(knockId)}/cancel`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(undefined, roomCode),
+        }
+      );
+      return res.ok;
+    } catch (err) {
+      console.warn("[dbClient] Error cancelling knock:", err);
+      return false;
+    }
+  },
+
+  async getHostKnocks(roomCode: string): Promise<DbRoomKnock[]> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knocks`,
+        { headers: getAuthHeaders(undefined, roomCode) }
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.knocks || [];
+    } catch (err) {
+      console.warn("[dbClient] Error fetching host knocks:", err);
+      return [];
+    }
+  },
+
+  async respondKnock(roomCode: string, knockId: string, action: "admit" | "deny"): Promise<boolean> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knock/${encodeURIComponent(knockId)}/respond`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(undefined, roomCode),
+          body: JSON.stringify({ action }),
+        }
+      );
+      return res.ok;
+    } catch (err) {
+      console.warn("[dbClient] Error responding to knock:", err);
+      return false;
+    }
+  },
+
+  async respondAllKnocks(roomCode: string, action: "admit" | "deny"): Promise<{ success: boolean; updatedCount: number }> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/knocks/respond-all`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(undefined, roomCode),
+          body: JSON.stringify({ action }),
+        }
+      );
+      if (!res.ok) return { success: false, updatedCount: 0 };
+      const data = await res.json();
+      return { success: true, updatedCount: data.updatedCount || 0 };
+    } catch (err) {
+      console.warn("[dbClient] Error responding to all knocks:", err);
+      return { success: false, updatedCount: 0 };
     }
   },
 };

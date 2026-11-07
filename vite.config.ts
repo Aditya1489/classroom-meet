@@ -12,10 +12,28 @@ export default defineConfig({
   server: {
     port: 5174,
     host: true,
+    allowedHosts: true,
     proxy: {
       "/api": {
-        target: "http://localhost:5001",
+        target: "http://127.0.0.1:5001",
         changeOrigin: true,
+      },
+      "/socket.io": {
+        target: "https://152-67-5-129.sslip.io",
+        ws: true,
+        changeOrigin: true,
+        secure: false,
+        headers: {
+          Origin: "http://localhost:5174",
+        },
+        configure: (proxy) => {
+          proxy.on("proxyReqWs", (proxyReq) => {
+            proxyReq.setHeader("Origin", "http://localhost:5174");
+          });
+          proxy.on("proxyReq", (proxyReq) => {
+            proxyReq.setHeader("Origin", "http://localhost:5174");
+          });
+        },
       },
     },
   },

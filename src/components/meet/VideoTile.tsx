@@ -1,5 +1,5 @@
-import React, { useRef, useEffect } from "react";
-import { Mic, MicOff, Pin, PinOff, Hand, Shield, LogOut, VideoOff } from "lucide-react";
+import React, { useState, useRef, useEffect } from "react";
+import { Mic, MicOff, Pin, PinOff, Hand, Shield, LogOut, VideoOff, MoreVertical } from "lucide-react";
 import { GoogleMeetAudioVisualizer } from "./GoogleMeetAudioVisualizer";
 import { VideoTrackPlayer } from "./VideoTrackPlayer";
 
@@ -50,6 +50,7 @@ export const VideoTile: React.FC<VideoTileProps> = ({
   onExpel,
   className = "",
 }) => {
+  const [showTouchMenu, setShowTouchMenu] = useState(false);
   const hasVideo = Boolean(videoTrack) && !isVideoMuted;
 
   return (
@@ -163,16 +164,89 @@ export const VideoTile: React.FC<VideoTileProps> = ({
           <button
             onClick={onTogglePin}
             title={isPinned ? "Unpin tile" : "Pin tile to spotlight"}
-            className="opacity-0 group-hover:opacity-100 p-1.5 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/10 backdrop-blur-sm transition cursor-pointer"
+            className={`p-1.5 rounded-full transition cursor-pointer ${
+              isPinned
+                ? "bg-[#f59e0b] text-[#0e0d0b]"
+                : "opacity-80 md:opacity-0 md:group-hover:opacity-100 bg-black/60 hover:bg-black/90 text-white border border-white/10 backdrop-blur-sm"
+            }`}
           >
-            {isPinned ? <PinOff className="w-3.5 h-3.5 text-[#8ab4f8]" /> : <Pin className="w-3.5 h-3.5" />}
+            {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
           </button>
+        )}
+
+        {/* Mobile / Touch 3-Dot Moderation Menu for Tutors */}
+        {isViewerHost && !isHost && !isLocal && (
+          <div className="relative md:hidden">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowTouchMenu(!showTouchMenu);
+              }}
+              title="Student options"
+              className="p-1.5 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/10 backdrop-blur-sm transition cursor-pointer"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+            </button>
+
+            {showTouchMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowTouchMenu(false);
+                  }}
+                />
+                <div className="absolute right-0 top-8 w-36 bg-[#1a1814] border border-[#f3eee6]/15 rounded-xl shadow-2xl p-1 z-50 space-y-0.5 text-left backdrop-blur-xl">
+                  {onTogglePin && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTogglePin();
+                        setShowTouchMenu(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#f3eee6] hover:bg-white/10 cursor-pointer"
+                    >
+                      <Pin className="w-3.5 h-3.5 text-[#f59e0b]" />
+                      {isPinned ? "Unpin" : "Pin Tile"}
+                    </button>
+                  )}
+                  {onForceMute && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onForceMute();
+                        setShowTouchMenu(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-500/20 cursor-pointer"
+                    >
+                      <MicOff className="w-3.5 h-3.5" />
+                      Mute Audio
+                    </button>
+                  )}
+                  {onExpel && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onExpel();
+                        setShowTouchMenu(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-red-400 hover:bg-red-500/20 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      Expel Student
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         )}
       </div>
 
-      {/* Host Hover Action Overlay (Mute & Expel Student) */}
+      {/* Host Hover Action Overlay for Desktop Mouse Users */}
       {isViewerHost && !isHost && !isLocal && (
-        <div className="absolute inset-0 z-30 bg-zinc-950/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
+        <div className="hidden md:flex absolute inset-0 z-30 bg-zinc-950/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-200 items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
           {onForceMute && (
             <button
               onClick={(e) => {

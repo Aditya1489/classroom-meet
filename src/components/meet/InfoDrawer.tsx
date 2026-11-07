@@ -73,7 +73,7 @@ export const InfoDrawer: React.FC<InfoDrawerProps> = ({
   };
 
   return (
-    <aside className="w-80 md:w-96 h-full bg-[#1a1814] border-l border-[#f3eee6]/[0.08] flex flex-col z-30 shadow-2xl shrink-0 overflow-hidden font-sans animate-in slide-in-from-right duration-200">
+    <aside className="fixed inset-0 z-50 md:relative md:inset-auto md:w-80 lg:w-96 h-full bg-[#1a1814] border-l border-[#f3eee6]/[0.08] flex flex-col shadow-2xl shrink-0 overflow-hidden font-sans animate-in slide-in-from-right duration-200">
       {/* ── Top Header ── */}
       <div className="h-14 border-b border-[#f3eee6]/[0.08] flex items-center justify-between px-4 bg-[#16130f] shrink-0">
         <div className="flex items-center gap-2.5">
@@ -87,7 +87,7 @@ export const InfoDrawer: React.FC<InfoDrawerProps> = ({
         </div>
         <button
           onClick={onClose}
-          className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] rounded-full hover:bg-white/5 transition cursor-pointer"
+          className="min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-[#a39e94] hover:text-[#f3eee6] rounded-xl hover:bg-white/10 transition cursor-pointer"
           title="Close details"
         >
           <X className="w-4 h-4" />

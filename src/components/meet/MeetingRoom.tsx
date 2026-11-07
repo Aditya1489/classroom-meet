@@ -19,7 +19,7 @@ import { Whiteboard } from "../whiteboard/Whiteboard";
 import { RecordingModal } from "../recording/RecordingModal";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { useAuth } from "../../auth/authContext";
-import { dbClient } from "../../lib/dbClient";
+import { dbClient, DbRoomKnock } from "../../lib/dbClient";
 import { Button } from "../ui/button";
 import {
   Mic,
@@ -55,6 +55,9 @@ import {
   Info,
   Check,
   X,
+  MoreHorizontal,
+  ChevronDown,
+  SlidersHorizontal,
 } from "lucide-react";
 import { YouTubeConnectModal } from "../youtube/YouTubeConnectModal";
 import {
@@ -75,6 +78,7 @@ interface MeetingRoomProps {
     role?: "tutor" | "student";
     userId?: string;
     token?: string;
+    isHost?: boolean;
   };
   onLeaveMeeting: () => void;
 }
@@ -96,6 +100,41 @@ const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ part
   return <audio ref={audioRef} autoPlay playsInline />;
 };
 
+function playKnockChime() {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const now = ctx.currentTime;
+
+    // Tone 1: 520Hz (Ding)
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.type = "sine";
+    osc1.frequency.setValueAtTime(520, now);
+    gain1.gain.setValueAtTime(0.15, now);
+    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.35);
+
+    // Tone 2: 440Hz (Dong)
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.type = "sine";
+    osc2.frequency.setValueAtTime(440, now + 0.18);
+    gain2.gain.setValueAtTime(0.18, now + 0.18);
+    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.start(now + 0.18);
+    osc2.stop(now + 0.6);
+  } catch (err) {
+    console.warn("[Knock Chime] Audio synthesis error:", err);
+  }
+}
+
 export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   meetingCode,
   initialOptions,
@@ -108,11 +147,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // Host status is authorized server-side based on room ownership (live_classes.tutor_id === user.id)
   // Display names containing "tutor" or "host" confer ZERO privileges.
   const [grantedRole, setGrantedRole] = useState<"tutor" | "student">(
-    initialOptions.role === "tutor" ? "tutor" : "student"
+    initialOptions.isHost ? "tutor" : "student"
   );
   const [isHost, setIsHost] = useState<boolean>(() => {
     const fromSession = typeof window !== "undefined" && window.sessionStorage.getItem(`mathsy_host_${meetingCode}`) === "true";
-    return initialOptions.role === "tutor" || profile?.role === "tutor" || fromSession;
+    return Boolean(initialOptions.isHost && fromSession);
   });
 
   const isHostRef = useRef<boolean>(isHost);
@@ -122,17 +161,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Persistent user identity: strictly maintained across renders to prevent ID desync with Mediasoup SFU & Tutor approvals
   const [myUserId] = useState<string>(() => {
-    if (initialOptions.userId) return initialOptions.userId.replace(/_/g, "-");
-    if (profile?.id) return profile.id.replace(/_/g, "-");
     const sessionKey = `mathsy_uid_${meetingCode}`;
+    let tabId = "";
     if (typeof window !== "undefined") {
-      const saved = window.sessionStorage.getItem(sessionKey);
-      if (saved) return saved.replace(/_/g, "-");
-      const generated = "usr-" + Math.random().toString(36).substring(2, 9);
-      window.sessionStorage.setItem(sessionKey, generated);
-      return generated;
+      let saved = window.sessionStorage.getItem(sessionKey);
+      if (!saved) {
+        saved = Math.random().toString(36).substring(2, 7);
+        window.sessionStorage.setItem(sessionKey, saved);
+      }
+      tabId = saved;
+    } else {
+      tabId = Math.random().toString(36).substring(2, 7);
     }
-    return "usr-" + Math.random().toString(36).substring(2, 9);
+
+    if (initialOptions.userId) return `${initialOptions.userId.replace(/_/g, "-")}-${tabId}`;
+    if (profile?.id) return `${profile.id.replace(/_/g, "-")}-${tabId}`;
+    return `usr-${tabId}-${Math.random().toString(36).substring(2, 7)}`;
   });
 
   const myUserIdRef = useRef<string>(myUserId);
@@ -236,6 +280,76 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [unmuteRequestStatus, setUnmuteRequestStatus] = useState<"none" | "requesting" | "approved">(isHost ? "approved" : "none");
   const [unmuteRequests, setUnmuteRequests] = useState<Array<{ userId: string; name: string }>>([]);
 
+  // Google Meet Host Admission (Knocking) State
+  const [pendingKnocks, setPendingKnocks] = useState<DbRoomKnock[]>([]);
+  const seenKnockIdsRef = useRef<Set<string>>(new Set());
+
+  // Polling for waiting participants (host only)
+  useEffect(() => {
+    if (!isHost) return;
+
+    let isSubscribed = true;
+    const fetchKnocks = async () => {
+      try {
+        const knocks = await dbClient.getHostKnocks(meetingCode);
+        if (!isSubscribed) return;
+        setPendingKnocks(knocks);
+
+        // Check for newly arrived knocks to trigger chime
+        let hasNew = false;
+        knocks.forEach((k) => {
+          if (!seenKnockIdsRef.current.has(k.id)) {
+            seenKnockIdsRef.current.add(k.id);
+            hasNew = true;
+          }
+        });
+
+        if (hasNew) {
+          playKnockChime();
+        }
+      } catch (err) {
+        console.warn("[MeetingRoom] Error fetching pending knocks:", err);
+      }
+    };
+
+    fetchKnocks();
+    const interval = setInterval(fetchKnocks, 1500);
+    return () => {
+      isSubscribed = false;
+      clearInterval(interval);
+    };
+  }, [isHost, meetingCode]);
+
+  const handleAdmitKnock = async (knockId: string, name: string) => {
+    const success = await dbClient.respondKnock(meetingCode, knockId, "admit");
+    if (success) {
+      toast.success(`Admitted ${name} to the call`);
+      setPendingKnocks((prev) => prev.filter((k) => k.id !== knockId));
+    } else {
+      toast.error(`Failed to admit ${name}`);
+    }
+  };
+
+  const handleDenyKnock = async (knockId: string, name: string) => {
+    const success = await dbClient.respondKnock(meetingCode, knockId, "deny");
+    if (success) {
+      toast.info(`Denied entry for ${name}`);
+      setPendingKnocks((prev) => prev.filter((k) => k.id !== knockId));
+    } else {
+      toast.error(`Failed to deny ${name}`);
+    }
+  };
+
+  const handleAdmitAllKnocks = async () => {
+    const res = await dbClient.respondAllKnocks(meetingCode, "admit");
+    if (res.success) {
+      toast.success(`Admitted ${res.updatedCount} participant(s) to the call`);
+      setPendingKnocks([]);
+    } else {
+      toast.error("Failed to admit all participants");
+    }
+  };
+
   // Side Drawer State
   const [isSideDrawerOpen, setIsSideDrawerOpen] = useState(false);
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
@@ -254,6 +368,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // Floating Reactions State
   const [activeReactions, setActiveReactions] = useState<FloatingReaction[]>([]);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
+
+  // Mobile Responsive State
+  const [showMobileLayoutMenu, setShowMobileLayoutMenu] = useState(false);
+  const [showMobileMoreSheet, setShowMobileMoreSheet] = useState(false);
 
   // Recording State
   const [isRecordingModalOpen, setIsRecordingModalOpen] = useState(false);
@@ -413,7 +531,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
 
     engine.onRoleAssigned = (serverRole, isOwner, roomData) => {
-      setGrantedRole(serverRole);
+      if (isOwner) {
+        setIsHost(true);
+        isHostRef.current = true;
+        setGrantedRole("tutor");
+      } else if (!isHostRef.current) {
+        setIsHost(false);
+        isHostRef.current = false;
+        setGrantedRole("student");
+      }
       if (roomData?.isDemo) {
         setIsDemo(true);
         if (typeof roomData.remainingSec === "number") {
@@ -447,6 +573,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     engine.onParticipantsChange = (updated) => {
       setRemoteParticipants([...updated]);
+    };
+
+    engine.onScreenShareEnded = () => {
+      console.log("[MeetingRoom] Engine notified screen share ended");
+      setLocalScreenTrack(null);
+      setIsScreenSharing(false);
+      setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
     };
 
     engine.onPeerLeft = (peerId) => {
@@ -633,6 +766,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           setShowWhiteboard(shouldOpen);
           setLayoutMode(shouldOpen ? "whiteboard" : "grid");
         }
+      } else if (ctrl.controlAction === "SCREENSHARE_STATE") {
+        const ctrlRoom = (ctrl.roomCode || "").toLowerCase().trim();
+        const curRoom = meetingCode.toLowerCase().trim();
+        if (ctrlRoom && curRoom && ctrlRoom !== curRoom) return;
+        if (!isHostRef.current) {
+          const shouldOpen = Boolean(ctrl.isOpen);
+          if (shouldOpen) {
+            setShowWhiteboard(false);
+            setLayoutMode("screenshare");
+          } else {
+            setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
+          }
+        }
       }
     };
 
@@ -649,12 +795,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           if (joinRes.tutorId) {
             engine.setAuthorizedTutorId(String(joinRes.tutorId));
           }
-          if (joinRes.participant?.role === "tutor" || joinRes.isHost) {
-            setIsHost(true);
-            isHostRef.current = true;
+          const hostConfirmed = Boolean(joinRes.isHost);
+          setIsHost(hostConfirmed);
+          isHostRef.current = hostConfirmed;
+          engine.setIsHostUser(hostConfirmed);
+          if (hostConfirmed) {
+            setGrantedRole("tutor");
             setHasSpeakingPermission(true);
             setUnmuteRequestStatus("approved");
-            engine.setIsHostUser(true);
+            window.sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
+          } else {
+            setGrantedRole("student");
+            setHasSpeakingPermission(false);
+            setUnmuteRequestStatus("none");
+            window.sessionStorage.removeItem(`mathsy_host_${meetingCode}`);
           }
         }
       });
@@ -686,7 +840,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           window.sessionStorage.getItem("mathsy_meet_embed_token")
         : "") ||
       session?.access_token ||
-      (typeof window !== "undefined" ? window.localStorage.getItem("mathsy_meet_token") : "") ||
       "";
 
     // Connect to room session with verified server-issued session token
@@ -718,8 +871,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             setLocalScreenTrack(sTrack);
             setIsScreenSharing(true);
             setLayoutMode("screenshare");
+            engine.broadcastScreenShareState(meetingCode, true, true);
           }
         }
+      })
+      .catch((err) => {
+        console.warn("[MeetingRoom] Engine connect caught:", err);
       });
 
     return () => {
@@ -824,14 +981,71 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       engine.stopScreenShare();
       setLocalScreenTrack(null);
       setIsScreenSharing(false);
-      if (layoutMode === "screenshare") setLayoutMode("grid");
+      setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
     } else {
+      if (
+        typeof navigator === "undefined" ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getDisplayMedia !== "function"
+      ) {
+        toast.info(
+          "Screen sharing is not supported by your mobile browser. Please join from a desktop or laptop computer to share your screen.",
+          { duration: 5000 }
+        );
+        return;
+      }
+
+      // If whiteboard was active, close it first to keep presentation modes clean and consistent
+      if (showWhiteboard || layoutMode === "whiteboard") {
+        setShowWhiteboard(false);
+        engine.broadcastWhiteboardState(meetingCode, false, true);
+        dbClient.setWhiteboardState(meetingCode, false);
+      }
+
       const track = await engine.startScreenShare();
       if (track) {
         setLocalScreenTrack(track);
         setIsScreenSharing(true);
         setLayoutMode("screenshare");
+        engine.broadcastScreenShareState(meetingCode, true, true);
       }
+    }
+  };
+
+  // Unified Layout Switcher (used by desktop header, mobile header, and mobile more menu)
+  const switchToLayout = (mode: "grid" | "spotlight" | "whiteboard" | "screenshare") => {
+    if (mode === "whiteboard") {
+      if (!isHost && !showWhiteboard) return;
+      if (isScreenSharing) {
+        engineRef.current?.stopScreenShare();
+        setLocalScreenTrack(null);
+        setIsScreenSharing(false);
+      }
+      setShowWhiteboard(true);
+      setLayoutMode("whiteboard");
+      if (isHost) {
+        engineRef.current?.broadcastWhiteboardState(meetingCode, true, true);
+        dbClient.setWhiteboardState(meetingCode, true);
+      }
+    } else if (mode === "grid") {
+      const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
+      setShowWhiteboard(false);
+      setLayoutMode("grid");
+      if (isHost && wasWhiteboard) {
+        engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+        dbClient.setWhiteboardState(meetingCode, false);
+      }
+    } else if (mode === "spotlight") {
+      const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
+      setShowWhiteboard(false);
+      setLayoutMode("spotlight");
+      if (isHost && wasWhiteboard) {
+        engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+        dbClient.setWhiteboardState(meetingCode, false);
+      }
+    } else if (mode === "screenshare") {
+      setShowWhiteboard(false);
+      setLayoutMode("screenshare");
     }
   };
 
@@ -840,6 +1054,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const next = !showWhiteboard;
     setShowWhiteboard(next);
     if (next) {
+      if (isScreenSharing) {
+        engineRef.current?.stopScreenShare();
+        setLocalScreenTrack(null);
+        setIsScreenSharing(false);
+      }
       setLayoutMode("whiteboard");
     } else if (layoutMode === "whiteboard") {
       setLayoutMode("grid");
@@ -1204,12 +1423,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       role: isHost ? "host" : "student",
       audioTrack: localAudioTrack,
       videoTrack: localVideoTrack,
+      screenTrack: localScreenTrack,
       isAudioMuted: !isMicEnabled,
       isVideoMuted: !isCamEnabled,
       isHandRaised: isHandRaised,
     },
     ...remoteParticipants
-      .filter((p) => p.id !== myUserId && p.name.trim().toLowerCase() !== myName.trim().toLowerCase())
+      .filter((p) => p.id !== myUserId && (p as any).peerId !== myUserId)
       .map((p) => ({
         id: p.id,
         userId: (p as any).userId || p.id,
@@ -1217,18 +1437,37 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         role: p.role || "student",
         audioTrack: p.audioTrack || null,
         videoTrack: p.videoTrack || null,
-        isAudioMuted: p.isAudioMuted ?? !p.audioTrack,
-        isVideoMuted: p.isVideoMuted ?? !p.videoTrack,
+        screenTrack: p.screenTrack || null,
+        isAudioMuted: p.audioTrack ? Boolean(p.isAudioMuted && !p.audioTrack.enabled) : true,
+        isVideoMuted: p.videoTrack ? Boolean(p.isVideoMuted && !p.videoTrack.enabled) : true,
         isHandRaised: p.isHandRaised ?? false,
       })),
   ];
+
+  // Active Screen Share track (local presenter or remote peer)
+  const remoteScreenSharer = remoteParticipants.find((p) => Boolean(p.screenTrack));
+  const activeScreenTrack = localScreenTrack || remoteScreenSharer?.screenTrack || null;
+  const isAnyoneScreenSharing = Boolean(activeScreenTrack);
+
+  // Auto-switch layout mode for remote viewers when tutor starts/stops sharing
+  useEffect(() => {
+    if (!isHost) {
+      if (remoteScreenSharer?.screenTrack) {
+        if (!showWhiteboard) {
+          setLayoutMode("screenshare");
+        }
+      } else {
+        setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
+      }
+    }
+  }, [remoteScreenSharer?.screenTrack, isHost, showWhiteboard]);
 
   const totalRaisedHands = allParticipants.filter((p) => p.isHandRaised).length;
 
   return (
     <div
       ref={playerRef}
-      className="flex flex-col h-screen w-screen bg-[#0e0d0b] text-[#f3eee6] overflow-hidden select-none font-sans relative"
+      className="flex flex-col h-[100dvh] w-full min-h-0 bg-[#0e0d0b] text-[#f3eee6] overflow-hidden select-none font-sans relative"
     >
       {/* Persistent Audio Sink: Guarantees remote student/tutor audio is always played regardless of active view layout (Whiteboard, Screen Share, Spotlight, or Grid) */}
       <div className="hidden" aria-hidden="true">
@@ -1238,22 +1477,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       </div>
 
       {/* ── CLASSROOM HEADER ── */}
-      <header className="h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-4 flex items-center justify-between z-20 backdrop-blur-md">
+      <header className="h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between z-20 backdrop-blur-md gap-2">
         {/* Left: Room Badge & Duration */}
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0">
           <button
             onClick={() => {
               setIsInfoDrawerOpen(!isInfoDrawerOpen);
               if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
             }}
             title="Meeting details (Click to view code & link)"
-            className="flex items-center gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-3 py-1 rounded-full text-xs transition cursor-pointer group"
+            className="flex items-center gap-1.5 sm:gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-2.5 sm:px-3 py-1 rounded-full text-xs transition cursor-pointer group"
           >
-            <span className="w-2.5 h-2.5 rounded-full bg-[#10b981] animate-pulse shrink-0" />
-            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate group-hover:text-[#f59e0b] transition">
+            <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-[#10b981] animate-pulse shrink-0" />
+            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate group-hover:text-[#f59e0b] transition max-w-[100px] sm:max-w-none">
               {meetingCode}
             </span>
-            <Info className="w-3.5 h-3.5 text-[#a39e94] group-hover:text-[#f59e0b] transition ml-0.5" />
+            <Info className="w-3.5 h-3.5 text-[#a39e94] group-hover:text-[#f59e0b] transition ml-0.5 shrink-0" />
           </button>
 
           <div className="hidden sm:flex items-center gap-1.5 bg-[#1a1814] border border-[#f3eee6]/10 px-2.5 py-1 rounded-full text-xs font-mono text-[#a39e94]">
@@ -1276,7 +1515,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
           {/* Connection status indicator */}
           <div
-            className="w-2.5 h-2.5 rounded-full"
+            className="w-2.5 h-2.5 rounded-full shrink-0"
             style={{
               backgroundColor: connectionState === "connected" ? "#10b981" : "#f59e0b",
             }}
@@ -1285,26 +1524,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
           {/* Demo room countdown badge */}
           {isDemo && demoRemainingSec !== null && (
-            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold animate-pulse">
+            <div className="hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold animate-pulse">
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              Demo room — ends in {Math.floor(demoRemainingSec / 60).toString().padStart(2, "0")}:{(demoRemainingSec % 60).toString().padStart(2, "0")}
+              Demo: {Math.floor(demoRemainingSec / 60).toString().padStart(2, "0")}:{(demoRemainingSec % 60).toString().padStart(2, "0")}
             </div>
           )}
         </div>
 
-        {/* Center: Layout Selector */}
+        {/* Center: Desktop Layout Selector */}
         <div className="hidden md:flex items-center gap-1 bg-[#1a1814] border border-[#f3eee6]/10 p-1 rounded-xl">
           <button
-            onClick={() => {
-              const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
-              setShowWhiteboard(false);
-              setLayoutMode("grid");
-              if (isHost && wasWhiteboard) {
-                engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
-                dbClient.setWhiteboardState(meetingCode, false);
-              }
-            }}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+            onClick={() => switchToLayout("grid")}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
               layoutMode === "grid" && !showWhiteboard
                 ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
                 : "text-[#a39e94] hover:text-[#f3eee6]"
@@ -1315,16 +1546,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              const wasWhiteboard = showWhiteboard || layoutMode === "whiteboard";
-              setShowWhiteboard(false);
-              setLayoutMode("spotlight");
-              if (isHost && wasWhiteboard) {
-                engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
-                dbClient.setWhiteboardState(meetingCode, false);
-              }
-            }}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+            onClick={() => switchToLayout("spotlight")}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
               layoutMode === "spotlight" && !showWhiteboard
                 ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
                 : "text-[#a39e94] hover:text-[#f3eee6]"
@@ -1336,13 +1559,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
           {isHost && (
             <button
-              onClick={() => {
-                setShowWhiteboard(true);
-                setLayoutMode("whiteboard");
-                engineRef.current?.broadcastWhiteboardState(meetingCode, true, true);
-                dbClient.setWhiteboardState(meetingCode, true);
-              }}
-              className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+              onClick={() => switchToLayout("whiteboard")}
+              className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
                 showWhiteboard || layoutMode === "whiteboard"
                   ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
                   : "text-[#a39e94] hover:text-[#f3eee6]"
@@ -1353,11 +1571,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </button>
           )}
 
-          {isScreenSharing && (
+          {isAnyoneScreenSharing && (
             <button
-              onClick={() => setLayoutMode("screenshare")}
-              className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
-                layoutMode === "screenshare"
+              onClick={() => switchToLayout("screenshare")}
+              className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                layoutMode === "screenshare" && !showWhiteboard
                   ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
                   : "text-[#a39e94] hover:text-[#f3eee6]"
               }`}
@@ -1368,15 +1586,118 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           )}
         </div>
 
+        {/* Center: Mobile Layout Selector Dropdown */}
+        <div className="flex md:hidden items-center relative">
+          <button
+            onClick={() => setShowMobileLayoutMenu(!showMobileLayoutMenu)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-[#1a1814] border border-[#f3eee6]/10 text-[#f3eee6] hover:bg-[#221f1a] transition cursor-pointer"
+            title="Switch view layout"
+          >
+            {showWhiteboard || layoutMode === "whiteboard" ? (
+              <>
+                <Sparkles className="w-3.5 h-3.5 text-[#f59e0b]" />
+                <span>Board</span>
+              </>
+            ) : layoutMode === "spotlight" ? (
+              <>
+                <Radio className="w-3.5 h-3.5 text-[#f59e0b]" />
+                <span>Spotlight</span>
+              </>
+            ) : layoutMode === "screenshare" ? (
+              <>
+                <Monitor className="w-3.5 h-3.5 text-[#f59e0b]" />
+                <span>Screen</span>
+              </>
+            ) : (
+              <>
+                <LayoutGrid className="w-3.5 h-3.5 text-[#f59e0b]" />
+                <span>Grid</span>
+              </>
+            )}
+            <ChevronDown className={`w-3 h-3 text-[#a39e94] transition-transform ${showMobileLayoutMenu ? "rotate-180" : ""}`} />
+          </button>
+
+          {showMobileLayoutMenu && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setShowMobileLayoutMenu(false)} />
+              <div className="absolute top-10 left-1/2 -translate-x-1/2 w-48 bg-[#1a1814] border border-[#f3eee6]/15 rounded-xl shadow-2xl p-1.5 z-50 text-left backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100 space-y-1">
+                <button
+                  onClick={() => {
+                    switchToLayout("grid");
+                    setShowMobileLayoutMenu(false);
+                  }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                    layoutMode === "grid" && !showWhiteboard
+                      ? "bg-[#f59e0b] text-[#0e0d0b]"
+                      : "text-[#f3eee6] hover:bg-[#221f1a]"
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  Grid View
+                </button>
+
+                <button
+                  onClick={() => {
+                    switchToLayout("spotlight");
+                    setShowMobileLayoutMenu(false);
+                  }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                    layoutMode === "spotlight" && !showWhiteboard
+                      ? "bg-[#f59e0b] text-[#0e0d0b]"
+                      : "text-[#f3eee6] hover:bg-[#221f1a]"
+                  }`}
+                >
+                  <Radio className="w-3.5 h-3.5" />
+                  Spotlight View
+                </button>
+
+                {(isHost || showWhiteboard) && (
+                  <button
+                    onClick={() => {
+                      switchToLayout("whiteboard");
+                      setShowMobileLayoutMenu(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                      showWhiteboard || layoutMode === "whiteboard"
+                        ? "bg-[#f59e0b] text-[#0e0d0b]"
+                        : "text-[#f3eee6] hover:bg-[#221f1a]"
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Whiteboard
+                  </button>
+                )}
+
+                {isAnyoneScreenSharing && (
+                  <button
+                    onClick={() => {
+                      switchToLayout("screenshare");
+                      setShowMobileLayoutMenu(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                      layoutMode === "screenshare" && !showWhiteboard
+                        ? "bg-[#f59e0b] text-[#0e0d0b]"
+                        : "text-[#f3eee6] hover:bg-[#221f1a]"
+                    }`}
+                  >
+                    <Monitor className="w-3.5 h-3.5" />
+                    Screen Share
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Right: Companion Tablet, YouTube Connect, Recording & Fullscreen */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {/* Pair Tablet Companion button */}
           {isHost && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setShowTabletModal(true)}
-              className="h-8 px-2.5 rounded-xl border-[#f3eee6]/10 bg-[#1a1814] hover:bg-[#221f1a] text-[#f3eee6] text-xs font-semibold gap-1.5"
+              className="hidden sm:inline-flex h-8 px-2.5 rounded-xl border-[#f3eee6]/10 bg-[#1a1814] hover:bg-[#221f1a] text-[#f3eee6] text-xs font-semibold gap-1.5"
               title="Pair iPad or Android tablet to draw on live whiteboard"
             >
               <Tablet className="w-3.5 h-3.5 text-[#f59e0b]" />
@@ -1390,7 +1711,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               variant="outline"
               size="sm"
               onClick={() => setShowYouTubeConnectModal(true)}
-              className="h-8 px-2.5 rounded-xl border-[#f3eee6]/10 bg-[#1a1814] hover:bg-[#221f1a] text-[#f3eee6] text-xs font-semibold gap-1.5"
+              className="hidden sm:inline-flex h-8 px-2.5 rounded-xl border-[#f3eee6]/10 bg-[#1a1814] hover:bg-[#221f1a] text-[#f3eee6] text-xs font-semibold gap-1.5"
               title="Connect YouTube Channel & Stream Key"
             >
               <Youtube className="w-3.5 h-3.5 text-red-500" />
@@ -1405,7 +1726,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 variant="outline"
                 size="sm"
                 onClick={() => setIsRecordingModalOpen(true)}
-                className={`h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
+                className={`hidden sm:inline-flex h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
                   isYouTubeLive
                     ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
                     : isRecordingActive
@@ -1447,7 +1768,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           {/* Fullscreen toggle */}
           <button
             onClick={toggleFullscreen}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
             title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -1492,26 +1813,155 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </div>
         )}
 
+        {/* Floating Google Meet Host Admission Prompt */}
+        {isHost && pendingKnocks.length > 0 && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-[#1e1c18]/95 border border-[#f59e0b]/60 backdrop-blur-md rounded-2xl px-5 py-3.5 shadow-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4 duration-300 ring-1 ring-[#f59e0b]/20">
+            <div className="relative shrink-0">
+              <div className="w-10 h-10 rounded-full bg-[#f59e0b]/20 border border-[#f59e0b]/40 flex items-center justify-center text-[#f59e0b] overflow-hidden">
+                {pendingKnocks[0].avatar_url ? (
+                  <img src={pendingKnocks[0].avatar_url} alt={pendingKnocks[0].display_name} className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-sm font-bold text-[#f59e0b]">
+                    {(pendingKnocks[0].display_name || "P")[0].toUpperCase()}
+                  </span>
+                )}
+              </div>
+              <div className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-[#f59e0b] border-2 border-[#1e1c18] animate-pulse" />
+            </div>
+
+            <div className="flex flex-col min-w-0 max-w-[260px] sm:max-w-xs">
+              <span className="text-xs sm:text-sm font-semibold text-white truncate">
+                <span className="text-[#f59e0b] font-bold">{pendingKnocks[0].display_name}</span> wants to join this call
+              </span>
+              <span className="text-[11px] text-[#a39e94] truncate">
+                {pendingKnocks.length > 1
+                  ? `+${pendingKnocks.length - 1} more waiting to join`
+                  : (pendingKnocks[0].email || "Guest participant")}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 ml-1">
+              {pendingKnocks.length > 1 ? (
+                <>
+                  <button
+                    onClick={handleAdmitAllKnocks}
+                    className="bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Admit all ({pendingKnocks.length})
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsSideDrawerOpen(true);
+                      setActiveSideTab("participants");
+                    }}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-[#d4cfc5] text-xs font-medium px-2.5 py-1.5 rounded-lg border border-white/10 transition cursor-pointer active:scale-95"
+                  >
+                    View
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => handleDenyKnock(pendingKnocks[0].id, pendingKnocks[0].display_name)}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-[#d4cfc5] text-xs font-medium px-2.5 py-1.5 rounded-lg border border-white/10 transition cursor-pointer active:scale-95 hover:text-red-400"
+                  >
+                    Deny entry
+                  </button>
+                  <button
+                    onClick={() => handleAdmitKnock(pendingKnocks[0].id, pendingKnocks[0].display_name)}
+                    className="bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold px-3.5 py-1.5 rounded-lg transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Admit
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         <section className="flex-1 min-w-0 h-full relative p-3 flex flex-col justify-center items-center overflow-hidden">
           {/* SCREEN SHARE PRESENTATION MODE */}
-          {layoutMode === "screenshare" && localScreenTrack ? (
-            <div className="w-full h-full relative bg-black rounded-2xl overflow-hidden flex items-center justify-center border border-white/10">
-              <VideoTrackPlayer
-                track={localScreenTrack}
-                className="w-full h-full object-contain"
-              />
-              {/* Floating PIP Host Camera */}
-              {isCamEnabled && localVideoTrack && (
-                <div className="absolute bottom-4 right-4 w-48 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-20">
-                  <VideoTrackPlayer
-                    track={localVideoTrack}
-                    mirror={true}
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute bottom-1.5 left-1.5 bg-black/80 px-2 py-0.5 rounded text-[9px] font-bold text-white flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    Host
+          {layoutMode === "screenshare" && isAnyoneScreenSharing ? (
+            <div className="w-full h-full flex flex-col md:flex-row gap-3">
+              {/* Central Screen Presentation Canvas */}
+              <div className="flex-1 h-full min-h-0 relative bg-[#0e0d0b] rounded-2xl overflow-hidden flex items-center justify-center border border-white/10 shadow-2xl">
+                <VideoTrackPlayer
+                  track={activeScreenTrack}
+                  className="w-full h-full object-contain select-none"
+                />
+
+                {/* Top-Left Presenter Info Banner */}
+                <div className="absolute top-3 left-3 bg-[#0e0d0b]/85 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 text-xs text-[#f3eee6] flex items-center gap-2 shadow-lg z-20">
+                  <Monitor className="w-3.5 h-3.5 text-[#f59e0b]" />
+                  <span className="font-semibold text-[11px] text-[#f59e0b]">
+                    {localScreenTrack ? "You are presenting" : `${remoteScreenSharer?.name || "Tutor"} is presenting`}
+                  </span>
+                  {isHost && isScreenSharing && (
+                    <button
+                      onClick={handleToggleScreenShare}
+                      className="ml-2 text-[10px] bg-red-600 hover:bg-red-700 text-white font-medium px-2 py-0.5 rounded-md transition cursor-pointer active:scale-95 shadow-sm"
+                    >
+                      Stop Sharing
+                    </button>
+                  )}
+                </div>
+
+                {/* Floating PIP for Host/Presenter Camera (When alone or compact view) */}
+                {allParticipants.length === 1 && isCamEnabled && localVideoTrack && (
+                  <div className="absolute bottom-4 right-4 w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-20">
+                    <VideoTrackPlayer
+                      track={localVideoTrack}
+                      mirror={true}
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute bottom-1.5 left-1.5 bg-black/80 px-2 py-0.5 rounded text-[9px] font-bold text-white flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      Host (You)
+                    </div>
                   </div>
+                )}
+              </div>
+
+              {/* Sidebar Carousel of Participants (Tutor + Students) */}
+              {allParticipants.length > 1 && (
+                <div className="w-full md:w-56 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto shrink-0 pb-1 md:pb-0">
+                  {allParticipants.map((p) => (
+                    <VideoTile
+                      key={p.id}
+                      id={p.id}
+                      name={p.name}
+                      avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
+                      videoTrack={p.videoTrack}
+                      audioTrack={p.audioTrack}
+                      isAudioMuted={p.isAudioMuted}
+                      isVideoMuted={p.isVideoMuted}
+                      isLocal={p.id === myUserId}
+                      isHost={p.role === "host"}
+                      isViewerHost={isHost}
+                      isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
+                      isHandRaised={p.isHandRaised}
+                      isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
+                      onApproveMic={() => {
+                        const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                        handleApproveMic(m?.userId || p.id, p.name);
+                      }}
+                      onDenyMic={() => {
+                        const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                        handleDenyMic(m?.userId || p.id, p.name);
+                      }}
+                      isPinned={false}
+                      onTogglePin={() => {
+                        setLayoutMode("spotlight");
+                        setPinnedId(p.id);
+                      }}
+                      onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
+                      onForceMute={() => handleForceMuteStudent(p.id, p.name)}
+                      onExpel={() => handleExpelStudent(p.id, p.name)}
+                      className="w-48 md:w-full aspect-video shrink-0"
+                    />
+                  ))}
                 </div>
               )}
             </div>
@@ -1760,17 +2210,206 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           unmuteRequests={unmuteRequests}
           onApproveMic={handleApproveMic}
           onDenyMic={handleDenyMic}
+          pendingKnocks={pendingKnocks}
+          onAdmitKnock={handleAdmitKnock}
+          onDenyKnock={handleDenyKnock}
+          onAdmitAllKnocks={handleAdmitAllKnocks}
         />
       </main>
 
       {/* ── BOTTOM GOOGLE MEET CONTROLS BAR ── */}
-      <footer className="h-20 shrink-0 bg-[#18191c] border-t border-white/10 flex items-center justify-between px-4 md:px-8 z-30 select-none">
-        {/* Left Side: Mic, Camera, Raise Hand, Screen Share */}
-        <div className="flex items-center gap-2.5">
-          {/* Mic Button with speaking request support */}
+      <footer className="h-16 sm:h-20 shrink-0 bg-[#18191c] border-t border-white/10 flex items-center justify-between px-3 sm:px-6 md:px-8 z-30 select-none pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]">
+        {/* Desktop / Tablet Controls Bar (>= 768px) */}
+        <div className="hidden md:flex items-center justify-between w-full">
+          {/* Left Side: Mic, Camera, Raise Hand, Screen Share */}
+          <div className="flex items-center gap-2.5">
+            {/* Mic Button with speaking request support */}
+            <button
+              onClick={handleToggleMic}
+              className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                isMicEnabled
+                  ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                  : unmuteRequestStatus === "requesting"
+                  ? "bg-amber-500 text-white animate-pulse"
+                  : hasSpeakingPermission
+                  ? "bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50"
+                  : "bg-red-600 hover:bg-red-700 text-white"
+              }`}
+              title={
+                isMicEnabled
+                  ? "Mute Microphone"
+                  : unmuteRequestStatus === "requesting"
+                  ? "Speaking request pending tutor approval (Click to cancel)"
+                  : hasSpeakingPermission
+                  ? "Unmute Microphone (Speaking Approved)"
+                  : isHost
+                  ? "Unmute Microphone"
+                  : "Request Tutor to Speak"
+              }
+            >
+              {isMicEnabled ? (
+                <Mic className="w-5 h-5" />
+              ) : unmuteRequestStatus === "requesting" ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <MicOff className="w-5 h-5" />
+              )}
+            </button>
+
+            {/* Camera Button with Policy Check */}
+            <button
+              onClick={handleCameraToggle}
+              className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                isCamEnabled
+                  ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                  : "bg-red-600 hover:bg-red-700 text-white"
+              }`}
+              title={isCamEnabled ? "Turn off camera" : "Turn on camera"}
+            >
+              {isCamEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+            </button>
+
+            {/* Student Raise Hand Button */}
+            {!isHost && (
+              <button
+                onClick={handleToggleRaiseHand}
+                className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                  isHandRaised
+                    ? "bg-amber-500 text-zinc-950 font-bold shadow-lg shadow-amber-500/30 animate-pulse border border-amber-300"
+                    : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                }`}
+                title={isHandRaised ? "Lower Hand" : "Raise Hand"}
+              >
+                <Hand className={`w-5 h-5 ${isHandRaised ? "text-zinc-950" : "text-amber-400"}`} />
+              </button>
+            )}
+
+            {/* Screen Share Button */}
+            {isHost && (
+              <button
+                onClick={handleToggleScreenShare}
+                className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                  isScreenSharing
+                    ? "bg-[#1a73e8] text-white border border-[#1a73e8]/30 shadow-lg shadow-[#1a73e8]/25"
+                    : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                }`}
+                title={isScreenSharing ? "Stop sharing screen" : "Share screen"}
+              >
+                {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+              </button>
+            )}
+          </div>
+
+          {/* Center: Reactions */}
+          <div className="flex items-center gap-2 relative">
+            <div className="relative">
+              <button
+                onClick={() => setShowReactionPicker(!showReactionPicker)}
+                className="w-11 h-11 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white flex items-center justify-center border border-white/10 transition shadow-md cursor-pointer"
+                title="Send emoji reaction"
+              >
+                <Smile className="w-5 h-5 text-amber-400" />
+              </button>
+
+              {showReactionPicker && (
+                <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-50">
+                  <ReactionPickerBar
+                    onSelectReaction={handleSendReaction}
+                    onClose={() => setShowReactionPicker(false)}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Side: Raised Hand notification, Class Feed, Leave/End Buttons */}
+          <div className="flex items-center gap-2.5">
+            {/* Host Raised Hands Alert Pill */}
+            {isHost && totalRaisedHands > 0 && (!isSideDrawerOpen || activeSideTab !== "participants") && (
+              <Button
+                onClick={() => {
+                  setIsSideDrawerOpen(true);
+                  setActiveSideTab("participants");
+                }}
+                className="h-10 px-3.5 rounded-full bg-amber-500 hover:bg-amber-600 text-zinc-950 font-bold text-xs gap-1.5 shadow-lg shadow-amber-500/25 border border-amber-400/50 animate-pulse cursor-pointer"
+              >
+                <Hand className="w-4 h-4 text-zinc-950" />
+                <span>{totalRaisedHands} Hand Raised</span>
+              </Button>
+            )}
+
+            {/* Meeting Details / Info Trigger (Google Meet style) */}
+            <Button
+              onClick={() => {
+                setIsInfoDrawerOpen(!isInfoDrawerOpen);
+                if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
+              }}
+              className={`h-11 px-3.5 rounded-full font-bold text-xs border transition relative gap-1.5 cursor-pointer ${
+                isInfoDrawerOpen
+                  ? "bg-[#f59e0b] text-[#0e0d0b] border-[#f59e0b] shadow-md shadow-[#f59e0b]/20"
+                  : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
+              }`}
+              title="Meeting details (Meeting link & code)"
+            >
+              <Info className="w-4 h-4" />
+              <span className="hidden md:inline">Info</span>
+            </Button>
+
+            {/* Class Feed Sidepanel Trigger */}
+            <Button
+              onClick={() => {
+                setIsSideDrawerOpen(!isSideDrawerOpen);
+                if (!isSideDrawerOpen) setIsInfoDrawerOpen(false);
+                setUnreadChatCount(0);
+              }}
+              className={`h-11 px-4 rounded-full font-bold text-xs border transition relative gap-2 cursor-pointer ${
+                isSideDrawerOpen
+                  ? "bg-[#1a73e8] text-white border-[#1a73e8]/30"
+                  : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
+              }`}
+            >
+              <MessageSquare className="w-4 h-4" />
+              <span className="hidden sm:inline">Class Feed</span>
+              {unreadChatCount > 0 ? (
+                <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-md animate-pulse">
+                  {unreadChatCount}
+                </span>
+              ) : isHost && pendingKnocks.length > 0 ? (
+                <span className="absolute -top-1 -right-1 flex px-1.5 h-5 items-center justify-center rounded-full bg-[#f59e0b] text-[10px] font-black text-[#0e0d0b] shadow-md animate-pulse">
+                  +{pendingKnocks.length}
+                </span>
+              ) : null}
+            </Button>
+
+            {/* Leave / End Class Button */}
+            {isHost ? (
+              <Button
+                variant="destructive"
+                onClick={handleEndClassClick}
+                className="h-11 px-5 rounded-full font-bold text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 cursor-pointer"
+              >
+                <PhoneOff className="w-4 h-4" />
+                <span>End Class</span>
+              </Button>
+            ) : (
+              <Button
+                variant="destructive"
+                onClick={onLeaveMeeting}
+                className="h-11 px-5 rounded-full font-bold text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 cursor-pointer"
+              >
+                <PhoneOff className="w-4 h-4" />
+                <span>Leave Room</span>
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Mobile Google Meet Controls Bar (< 768px) */}
+        <div className="flex md:hidden items-center justify-between w-full max-w-md mx-auto gap-1">
+          {/* 1. Mic Button */}
           <button
             onClick={handleToggleMic}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md ${
+            className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
               isMicEnabled
                 ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
                 : unmuteRequestStatus === "requesting"
@@ -1779,172 +2418,233 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 ? "bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50"
                 : "bg-red-600 hover:bg-red-700 text-white"
             }`}
-            title={
-              isMicEnabled
-                ? "Mute Microphone"
-                : unmuteRequestStatus === "requesting"
-                ? "Speaking request pending tutor approval (Click to cancel)"
-                : hasSpeakingPermission
-                ? "Unmute Microphone (Speaking Approved)"
-                : isHost
-                ? "Unmute Microphone"
-                : "Request Tutor to Speak"
-            }
+            title="Microphone"
           >
             {isMicEnabled ? (
-              <Mic className="w-5 h-5" />
+              <Mic className="w-4 h-4" />
             ) : unmuteRequestStatus === "requesting" ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
-              <MicOff className="w-5 h-5" />
+              <MicOff className="w-4 h-4" />
             )}
           </button>
 
-          {/* Camera Button with Policy Check */}
+          {/* 2. Camera Button */}
           <button
             onClick={handleCameraToggle}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md ${
+            className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
               isCamEnabled
                 ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
                 : "bg-red-600 hover:bg-red-700 text-white"
             }`}
-            title={isCamEnabled ? "Turn off camera" : "Turn on camera"}
+            title="Camera"
           >
-            {isCamEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+            {isCamEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
           </button>
 
-          {/* Student Raise Hand Button */}
-          {!isHost && (
+          {/* 3. Student: Raise Hand / Tutor: Screen Share */}
+          {!isHost ? (
             <button
               onClick={handleToggleRaiseHand}
-              className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md ${
+              className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
                 isHandRaised
                   ? "bg-amber-500 text-zinc-950 font-bold shadow-lg shadow-amber-500/30 animate-pulse border border-amber-300"
                   : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
               }`}
               title={isHandRaised ? "Lower Hand" : "Raise Hand"}
             >
-              <Hand className={`w-5 h-5 ${isHandRaised ? "text-zinc-950" : "text-amber-400"}`} />
+              <Hand className={`w-4 h-4 ${isHandRaised ? "text-zinc-950" : "text-amber-400"}`} />
             </button>
-          )}
-
-          {/* Screen Share Button */}
-          {isHost && (
+          ) : (
             <button
               onClick={handleToggleScreenShare}
-              className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md ${
+              className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
                 isScreenSharing
                   ? "bg-[#1a73e8] text-white border border-[#1a73e8]/30 shadow-lg shadow-[#1a73e8]/25"
                   : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
               }`}
-              title={isScreenSharing ? "Stop sharing screen" : "Share screen"}
+              title={isScreenSharing ? "Stop sharing" : "Share screen"}
             >
-              {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+              {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
             </button>
           )}
-        </div>
 
-        {/* Center: Reactions */}
-        <div className="flex items-center gap-2 relative">
-
-          {/* Floating Reaction Picker Popover */}
-          <div className="relative">
-            <button
-              onClick={() => setShowReactionPicker(!showReactionPicker)}
-              className="w-11 h-11 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white flex items-center justify-center border border-white/10 transition shadow-md"
-              title="Send emoji reaction"
-            >
-              <Smile className="w-5 h-5 text-amber-400" />
-            </button>
-
-            {showReactionPicker && (
-              <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-50">
-                <ReactionPickerBar
-                  onSelectReaction={handleSendReaction}
-                  onClose={() => setShowReactionPicker(false)}
-                />
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Side: Raised Hand notification, Class Feed, Leave/End Buttons */}
-        <div className="flex items-center gap-2.5">
-          {/* Host Raised Hands Alert Pill */}
-          {isHost && totalRaisedHands > 0 && (!isSideDrawerOpen || activeSideTab !== "participants") && (
-            <Button
-              onClick={() => {
-                setIsSideDrawerOpen(true);
-                setActiveSideTab("participants");
-              }}
-              className="h-10 px-3.5 rounded-full bg-amber-500 hover:bg-amber-600 text-zinc-950 font-bold text-xs gap-1.5 shadow-lg shadow-amber-500/25 border border-amber-400/50 animate-pulse"
-            >
-              <Hand className="w-4 h-4 text-zinc-950" />
-              <span>{totalRaisedHands} Hand Raised</span>
-            </Button>
-          )}
-
-          {/* Meeting Details / Info Trigger (Google Meet style) */}
-          <Button
-            onClick={() => {
-              setIsInfoDrawerOpen(!isInfoDrawerOpen);
-              if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
-            }}
-            className={`h-11 px-3.5 rounded-full font-bold text-xs border transition relative gap-1.5 cursor-pointer ${
-              isInfoDrawerOpen
-                ? "bg-[#f59e0b] text-[#0e0d0b] border-[#f59e0b] shadow-md shadow-[#f59e0b]/20"
-                : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
-            }`}
-            title="Meeting details (Meeting link & code)"
-          >
-            <Info className="w-4 h-4" />
-            <span className="hidden md:inline">Info</span>
-          </Button>
-
-          {/* Class Feed Sidepanel Trigger */}
-          <Button
+          {/* 4. Class Feed Button */}
+          <button
             onClick={() => {
               setIsSideDrawerOpen(!isSideDrawerOpen);
               if (!isSideDrawerOpen) setIsInfoDrawerOpen(false);
               setUnreadChatCount(0);
             }}
-            className={`h-11 px-4 rounded-full font-bold text-xs border transition relative gap-2 ${
+            className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center border transition relative cursor-pointer ${
               isSideDrawerOpen
                 ? "bg-[#1a73e8] text-white border-[#1a73e8]/30"
                 : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
             }`}
+            title="Class Chat & Polls"
           >
             <MessageSquare className="w-4 h-4" />
-            <span className="hidden sm:inline">Class Feed</span>
-            {unreadChatCount > 0 && (
-              <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white shadow-md animate-pulse">
+            {unreadChatCount > 0 ? (
+              <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white shadow-md animate-pulse">
                 {unreadChatCount}
               </span>
-            )}
-          </Button>
+            ) : isHost && pendingKnocks.length > 0 ? (
+              <span className="absolute -top-1 -right-1 flex px-1 h-4 items-center justify-center rounded-full bg-[#f59e0b] text-[9px] font-black text-[#0e0d0b] shadow-md animate-pulse">
+                +{pendingKnocks.length}
+              </span>
+            ) : null}
+          </button>
 
-          {/* Leave / End Class Button */}
+          {/* 5. Mobile "More" Menu Button */}
+          <button
+            onClick={() => setShowMobileMoreSheet(true)}
+            className={`w-10 h-10 min-w-[40px] min-h-[40px] rounded-full flex items-center justify-center border transition cursor-pointer ${
+              showMobileMoreSheet
+                ? "bg-[#f59e0b] text-[#0e0d0b] border-[#f59e0b]"
+                : "bg-zinc-800 text-zinc-200 border-white/10 hover:bg-zinc-700"
+            }`}
+            title="More Options"
+          >
+            <MoreHorizontal className="w-4 h-4" />
+          </button>
+
+          {/* 6. End Call / Leave Room Button */}
           {isHost ? (
-            <Button
-              variant="destructive"
+            <button
               onClick={handleEndClassClick}
-              className="h-11 px-5 rounded-full font-bold text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25"
+              className="h-10 min-h-[40px] px-3.5 rounded-full font-bold text-xs gap-1 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 flex items-center justify-center cursor-pointer"
+              title="End Class"
             >
-              <PhoneOff className="w-4 h-4" />
-              <span>End Class</span>
-            </Button>
+              <PhoneOff className="w-3.5 h-3.5" />
+              <span>End</span>
+            </button>
           ) : (
-            <Button
-              variant="destructive"
+            <button
               onClick={onLeaveMeeting}
-              className="h-11 px-5 rounded-full font-bold text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25"
+              className="h-10 min-h-[40px] px-3.5 rounded-full font-bold text-xs gap-1 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 flex items-center justify-center cursor-pointer"
+              title="Leave Room"
             >
-              <PhoneOff className="w-4 h-4" />
-              <span>Leave Room</span>
-            </Button>
+              <PhoneOff className="w-3.5 h-3.5" />
+              <span>Leave</span>
+            </button>
           )}
         </div>
       </footer>
+
+      {/* ── MOBILE "MORE" ACTION SHEET ── */}
+      {showMobileMoreSheet && (
+        <>
+          <div
+            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => setShowMobileMoreSheet(false)}
+          />
+          <div className="fixed bottom-0 inset-x-0 z-[70] bg-[#1a1814] border-t border-[#f3eee6]/15 rounded-t-3xl p-5 shadow-2xl animate-in slide-in-from-bottom duration-200 space-y-4 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] max-h-[85vh] overflow-y-auto font-sans">
+            <div className="w-12 h-1.5 rounded-full bg-white/20 mx-auto" />
+
+            {/* Quick Reactions Bar */}
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[#a39e94]">
+                Send Reaction
+              </span>
+              <div className="flex items-center justify-around bg-[#0e0d0b] p-2 rounded-2xl border border-white/10">
+                {["❤️", "👍", "👏", "💡", "😂", "🎉", "🔥"].map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => {
+                      handleSendReaction(emoji);
+                      setShowMobileMoreSheet(false);
+                    }}
+                    className="text-2xl hover:scale-125 active:scale-95 transition cursor-pointer p-1"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Actions Grid */}
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                onClick={() => {
+                  setShowMobileMoreSheet(false);
+                  setIsInfoDrawerOpen(true);
+                  setIsSideDrawerOpen(false);
+                }}
+                className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-[#f3eee6] cursor-pointer"
+              >
+                <Info className="w-4 h-4 text-[#f59e0b]" />
+                <span>Meeting Details</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  toggleFullscreen();
+                  setShowMobileMoreSheet(false);
+                }}
+                className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-[#f3eee6] cursor-pointer"
+              >
+                {isFullscreen ? <Minimize2 className="w-4 h-4 text-[#f59e0b]" /> : <Maximize2 className="w-4 h-4 text-[#f59e0b]" />}
+                <span>{isFullscreen ? "Exit Fullscreen" : "Fullscreen"}</span>
+              </button>
+
+              {isHost && (
+                <>
+                  <button
+                    onClick={() => {
+                      setShowMobileMoreSheet(false);
+                      setShowTabletModal(true);
+                    }}
+                    className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-[#f3eee6] cursor-pointer"
+                  >
+                    <Tablet className="w-4 h-4 text-[#f59e0b]" />
+                    <span>Pair Tablet</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowMobileMoreSheet(false);
+                      setIsRecordingModalOpen(true);
+                    }}
+                    className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-[#f3eee6] cursor-pointer"
+                  >
+                    <Disc className="w-4 h-4 text-red-400" />
+                    <span>Record / Live</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowMobileMoreSheet(false);
+                      handleMuteAll();
+                    }}
+                    className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-rose-300 cursor-pointer"
+                  >
+                    <MicOff className="w-4 h-4" />
+                    <span>Mute All</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowMobileMoreSheet(false);
+                      handleLowerAllHands();
+                    }}
+                    className="flex items-center gap-2.5 p-3 rounded-xl bg-[#221f1a] hover:bg-[#2a2620] border border-[#f3eee6]/10 text-left text-xs font-semibold text-amber-300 cursor-pointer"
+                  >
+                    <Hand className="w-4 h-4" />
+                    <span>Lower All Hands</span>
+                  </button>
+                </>
+              )}
+            </div>
+
+            <button
+              onClick={() => setShowMobileMoreSheet(false)}
+              className="w-full py-3 bg-[#221f1a] hover:bg-[#2a2620] text-[#a39e94] hover:text-[#f3eee6] rounded-xl text-xs font-semibold transition cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        </>
+      )}
 
       {/* ── MODALS & DIALOGS ── */}
 

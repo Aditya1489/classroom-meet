@@ -28,16 +28,92 @@ function sanitizeCode(code: any): string {
 }
 
 /**
+ * Checks whether the given user is the authoritative host/owner of the room.
+ */
+export function isUserRoomHost(room: any, user: any): boolean {
+  if (!room || !user) return false;
+  const userId = user.id;
+  if (user.role === "admin") {
+    return true;
+  }
+  if (user.isParticipantToken && user.role === "tutor" && user.permissions?.isHost) {
+    return true;
+  }
+  if (room.tutor_id && String(room.tutor_id) === String(userId)) {
+    return true;
+  }
+  if (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(userId)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * GET /api/rooms/:roomCode/role
+ * Returns { exists: boolean, isOwner: boolean, tutorId?: string, isActive?: boolean }
+ */
+roomsRouter.get("/:roomCode/role", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { roomCode } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+    const user = (req as any).user;
+
+    const roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    const schedRes = await query(
+      "SELECT id, room_code, title, tutor_id, status FROM class_schedules WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    if (roomRes.rows.length === 0 && schedRes.rows.length === 0) {
+      return res.json({ exists: false, isOwner: false });
+    }
+
+    const room = roomRes.rows[0] || null;
+    const sched = schedRes.rows[0] || null;
+
+    let isOwner = false;
+    if (user) {
+      if (user.role === "admin") {
+        isOwner = true;
+      } else if (room && isUserRoomHost(room, user)) {
+        isOwner = true;
+      } else if (sched && String(sched.tutor_id) === String(user.id)) {
+        isOwner = true;
+      }
+    }
+
+    const tutorId = room?.tutor_id || sched?.tutor_id;
+    const tutorName = room?.tutor_name || "Tutor";
+    const isActive = Boolean(room?.is_active);
+
+    return res.json({
+      exists: true,
+      isOwner,
+      tutorId,
+      tutorName,
+      isActive,
+      isScheduled: Boolean(sched),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to get room role", details: err.message });
+  }
+});
+
+/**
  * GET /api/rooms/:roomCode
  * Retrieves room status and metadata.
- * Returns 404 if the room does not exist or is inactive.
+ * Returns 404 if the room does not exist or has ended.
  */
 roomsRouter.get("/:roomCode", async (req: Request, res: Response) => {
   try {
     const { roomCode } = req.params;
     const sanitizedCode = sanitizeCode(roomCode);
 
-    const result = await query(
+    let result = await query(
       `SELECT id, room_code, title, tutor_id, tutor_name, is_active, is_live_streaming, metadata, started_at, ended_at, created_at 
        FROM live_classes 
        WHERE room_code = $1`,
@@ -45,22 +121,56 @@ roomsRouter.get("/:roomCode", async (req: Request, res: Response) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Room not found", room: null });
+      const sched = await query(
+        `SELECT id, room_code, title, tutor_id, scheduled_at, duration_minutes, status, created_at
+         FROM class_schedules
+         WHERE room_code = $1`,
+        [sanitizedCode]
+      );
+      if (sched.rows.length === 0) {
+        return res.status(404).json({ error: "Room not found", room: null });
+      }
+      const s = sched.rows[0];
+      return res.json({
+        room: {
+          id: s.id,
+          room_code: s.room_code,
+          title: s.title,
+          tutor_id: s.tutor_id,
+          is_active: false,
+          isScheduled: true,
+          status: s.status,
+          scheduled_at: s.scheduled_at,
+          duration_minutes: s.duration_minutes,
+        },
+      });
     }
 
     const room = result.rows[0];
     if (!room.is_active) {
-      return res.status(404).json({
-        error: "Class has ended",
+      if (room.ended_at) {
+        return res.status(404).json({
+          error: "Class has ended",
+          room: {
+            id: room.id,
+            room_code: room.room_code,
+            title: room.title,
+            tutor_id: room.tutor_id,
+            tutor_name: room.tutor_name,
+            is_active: false,
+            ended_at: room.ended_at,
+          },
+          isEnded: true,
+        });
+      }
+
+      // Scheduled or unstarted room waiting for tutor
+      return res.json({
         room: {
-          id: room.id,
-          room_code: room.room_code,
-          title: room.title,
-          tutor_id: room.tutor_id,
-          tutor_name: room.tutor_name,
+          ...room,
           is_active: false,
+          isWaitingForHost: true,
         },
-        isEnded: true,
       });
     }
 
@@ -190,6 +300,18 @@ roomsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       }
     }
 
+    // Verify ownership if class schedule exists
+    const schedRes = await query(
+      "SELECT id, tutor_id FROM class_schedules WHERE room_code = $1",
+      [finalRoomCode]
+    );
+    if (schedRes.rows.length > 0) {
+      const sched = schedRes.rows[0];
+      if (sched.tutor_id && String(sched.tutor_id) !== String(user.id) && user.role !== "admin") {
+        return res.status(403).json({ error: "Unauthorized: only the host who scheduled this meeting can launch it" });
+      }
+    }
+
     const isTutorUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id));
     let validTutorId: string | null = null;
 
@@ -287,16 +409,71 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
     const sanitizedCode = sanitizeCode(roomCode);
 
     // 1. Verify that the room exists and is active
-    const roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, metadata, is_active FROM live_classes WHERE room_code = $1",
+    let roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
-    if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
+    let room = roomRes.rows[0];
+
+    // If not in live_classes, check class_schedules
+    if (!room) {
+      const sched = await query(
+        "SELECT id, room_code, title, tutor_id, scheduled_at, duration_minutes, status FROM class_schedules WHERE room_code = $1",
+        [sanitizedCode]
+      );
+      if (sched.rows.length > 0) {
+        const s = sched.rows[0];
+        await query(
+          `INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, metadata)
+           VALUES ($1, $2, $3, 'Tutor', FALSE, $4)
+           ON CONFLICT (room_code) DO NOTHING;`,
+          [sanitizedCode, s.title, s.tutor_id, JSON.stringify({ isScheduled: true, scheduledAt: s.scheduled_at })]
+        );
+        roomRes = await query(
+          "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id FROM live_classes WHERE room_code = $1",
+          [sanitizedCode]
+        );
+        room = roomRes.rows[0];
+      }
+    }
+
+    if (!room) {
       return res.status(404).json({ error: "Room not found or class has ended" });
     }
 
-    const room = roomRes.rows[0];
+    // Determine host status
+    let isHost = isUserRoomHost(room, user);
+    if (!isHost && user) {
+      const sched = await query("SELECT tutor_id FROM class_schedules WHERE room_code = $1", [sanitizedCode]);
+      if (sched.rows.length > 0 && String(sched.rows[0].tutor_id) === String(user.id)) {
+        isHost = true;
+      }
+    }
+
+    // Auto-activate inactive room when host joins
+    if (!room.is_active) {
+      if (isHost) {
+        await query(
+          `UPDATE live_classes 
+           SET is_active = TRUE, started_at = COALESCE(started_at, NOW()), ended_at = NULL 
+           WHERE room_code = $1;`,
+          [sanitizedCode]
+        );
+        await query(
+          `UPDATE class_schedules 
+           SET status = 'in_progress' 
+           WHERE room_code = $1 AND status = 'scheduled';`,
+          [sanitizedCode]
+        );
+        room.is_active = true;
+      } else {
+        return res.status(403).json({
+          error: "Class has not started yet. Please wait for the host to start the call.",
+          code: "CLASS_NOT_STARTED",
+        });
+      }
+    }
 
     // 2. Identity and Role derivation:
     // Derives user_id and display_name strictly from the verified session, never trusting client parameters.
@@ -316,14 +493,32 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
       }
     }
 
-    const isHost = Boolean(
-      (user.isParticipantToken && user.role === "tutor" && user.permissions?.isHost) ||
-      (room.tutor_id && String(room.tutor_id) === String(userId)) ||
-      (room.metadata?.tutor_id && String(room.metadata?.tutor_id) === String(userId))
-    );
     const role: "tutor" | "student" = isHost ? "tutor" : "student";
-
     const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
+
+    // 3b. Google Meet Host Admission Gate:
+    // Non-hosts cannot join until the room host has explicitly admitted them.
+    if (!isHost) {
+      const admissionRes = await query(
+        `SELECT id, status FROM room_knocks 
+         WHERE room_code = $1 
+           AND (
+             ($2::uuid IS NOT NULL AND user_id = $2::uuid) OR 
+             ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
+           )
+           AND status = 'admitted'
+         ORDER BY responded_at DESC LIMIT 1;`,
+        [sanitizedCode, isUserUUID ? userId : null, user.email || null]
+      );
+
+      if (admissionRes.rows.length === 0) {
+        return res.status(403).json({
+          error: "Admission required: The meeting host must admit you before you can enter this call.",
+          code: "ADMISSION_REQUIRED",
+        });
+      }
+    }
+
     let validUserId: string | null = null;
 
     if (isUserUUID) {
@@ -441,6 +636,380 @@ roomsRouter.post("/:roomCode/leave", authMiddleware, async (req: Request, res: R
     return res.json({ success: true });
   } catch (err: any) {
     return res.status(500).json({ error: "Failed to record leave", details: err.message });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomCode/knock
+ * Non-host participant asks to join the room ("Knocking").
+ */
+roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { roomCode } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+    const user = (req as any).user;
+
+    let roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    let room = roomRes.rows[0];
+
+    // If not in live_classes, check class_schedules
+    if (!room) {
+      const sched = await query(
+        "SELECT id, room_code, title, tutor_id, scheduled_at, duration_minutes, status FROM class_schedules WHERE room_code = $1",
+        [sanitizedCode]
+      );
+      if (sched.rows.length > 0) {
+        const s = sched.rows[0];
+        await query(
+          `INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, metadata)
+           VALUES ($1, $2, $3, 'Tutor', FALSE, $4)
+           ON CONFLICT (room_code) DO NOTHING;`,
+          [sanitizedCode, s.title, s.tutor_id, JSON.stringify({ isScheduled: true, scheduledAt: s.scheduled_at })]
+        );
+        roomRes = await query(
+          "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at FROM live_classes WHERE room_code = $1",
+          [sanitizedCode]
+        );
+        room = roomRes.rows[0];
+      }
+    }
+
+    if (!room) {
+      return res.status(404).json({ error: "Class room does not exist", code: "ROOM_NOT_FOUND" });
+    }
+
+    let isHost = Boolean(user && isUserRoomHost(room, user));
+    if (!isHost && user) {
+      const sched = await query("SELECT tutor_id FROM class_schedules WHERE room_code = $1", [sanitizedCode]);
+      if (sched.rows.length > 0 && String(sched.rows[0].tutor_id) === String(user.id)) {
+        isHost = true;
+      }
+    }
+
+    // If caller is host, no knock needed
+    if (isHost) {
+      return res.json({ status: "host", isHost: true, message: "Host joins directly without admission" });
+    }
+
+    // If room is inactive
+    if (!room.is_active) {
+      if (room.ended_at) {
+        return res.status(404).json({ error: "This class session has ended", code: "ROOM_ENDED" });
+      }
+      // Room has not started yet -> keep student waiting inside lobby gracefully
+      return res.json({
+        status: "waiting_for_host",
+        isWaitingForHost: true,
+        message: "Class has not started yet. Waiting for tutor to start the class.",
+        room_code: sanitizedCode,
+      });
+    }
+
+    const userId = user?.id || req.body.user_id || null;
+    const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
+    let validUserId: string | null = null;
+
+    const displayName = (user?.full_name || user?.name || req.body.display_name || "Guest").trim();
+    const email = (user?.email || req.body.email || null)?.trim().toLowerCase() || null;
+    const avatarUrl = user?.avatar_url || user?.avatarUrl || req.body.avatar_url || null;
+    const role = (user?.role || req.body.role || "student") === "tutor" ? "tutor" : "student";
+
+    if (isUserUUID) {
+      try {
+        await query(
+          `INSERT INTO users (id, email, full_name, role, auth_provider)
+           VALUES ($1, $2, $3, $4, 'google')
+           ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name;`,
+          [userId, email || `${userId}@mathsy.in`, displayName, role]
+        );
+        validUserId = userId;
+      } catch (uErr) {
+        // Fallback
+      }
+    }
+
+    // 1. Anti-spam check: If denied in the last 60 seconds, reject with cooldown
+    const recentDenied = await query(
+      `SELECT id, responded_at, EXTRACT(EPOCH FROM (NOW() - responded_at)) as seconds_ago
+       FROM room_knocks
+       WHERE room_code = $1
+         AND (
+           ($2::uuid IS NOT NULL AND user_id = $2::uuid) OR
+           ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
+         )
+         AND status = 'denied'
+         AND responded_at > NOW() - INTERVAL '60 seconds'
+       ORDER BY responded_at DESC LIMIT 1;`,
+      [sanitizedCode, validUserId, email]
+    );
+
+    if (recentDenied.rows.length > 0) {
+      const secondsAgo = Math.floor(Number(recentDenied.rows[0].seconds_ago || 0));
+      const cooldownRemaining = Math.max(1, 60 - secondsAgo);
+      return res.status(429).json({
+        error: `The meeting host declined your request. You can try again in ${cooldownRemaining} seconds.`,
+        code: "KNOCK_COOLDOWN",
+        cooldownRemaining,
+      });
+    }
+
+    // 2. Check if already admitted
+    const alreadyAdmitted = await query(
+      `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, responded_at
+       FROM room_knocks
+       WHERE room_code = $1
+         AND (
+           ($2::uuid IS NOT NULL AND user_id = $2::uuid) OR
+           ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
+         )
+         AND status = 'admitted'
+       ORDER BY responded_at DESC LIMIT 1;`,
+      [sanitizedCode, validUserId, email]
+    );
+
+    if (alreadyAdmitted.rows.length > 0) {
+      return res.json({
+        knock: alreadyAdmitted.rows[0],
+        status: "admitted",
+        isAdmitted: true,
+      });
+    }
+
+    // 3. Check if there is already a pending knock
+    const existingPending = await query(
+      `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, created_at
+       FROM room_knocks
+       WHERE room_code = $1
+         AND (
+           ($2::uuid IS NOT NULL AND user_id = $2::uuid) OR
+           ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
+         )
+         AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1;`,
+      [sanitizedCode, validUserId, email]
+    );
+
+    if (existingPending.rows.length > 0) {
+      return res.json({
+        knock: existingPending.rows[0],
+        status: "pending",
+      });
+    }
+
+    // 4. Create new pending knock
+    const insertRes = await query(
+      `INSERT INTO room_knocks (room_code, user_id, display_name, email, avatar_url, role, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+       RETURNING id, room_code, user_id, display_name, email, avatar_url, role, status, created_at;`,
+      [sanitizedCode, validUserId, displayName, email, avatarUrl, role]
+    );
+
+    return res.json({
+      knock: insertRes.rows[0],
+      status: "pending",
+    });
+  } catch (err: any) {
+    console.error("[Knock Submit Error]:", err.message);
+    return res.status(500).json({ error: "Failed to submit knock request", details: err.message });
+  }
+});
+
+/**
+ * GET /api/rooms/:roomCode/knock/:knockId
+ * Checks status of participant's knock.
+ */
+roomsRouter.get("/:roomCode/knock/:knockId", async (req: Request, res: Response) => {
+  try {
+    const { roomCode, knockId } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+
+    const knockRes = await query(
+      `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, responded_at, created_at
+       FROM room_knocks
+       WHERE id = $1 AND room_code = $2;`,
+      [knockId, sanitizedCode]
+    );
+
+    if (knockRes.rows.length === 0) {
+      return res.status(404).json({ error: "Knock request not found", code: "KNOCK_NOT_FOUND" });
+    }
+
+    return res.json({ knock: knockRes.rows[0], status: knockRes.rows[0].status });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to check knock status", details: err.message });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomCode/knock/:knockId/cancel
+ * Participant cancels their pending knock request.
+ */
+roomsRouter.post("/:roomCode/knock/:knockId/cancel", async (req: Request, res: Response) => {
+  try {
+    const { roomCode, knockId } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+
+    await query(
+      `UPDATE room_knocks
+       SET status = 'cancelled'
+       WHERE id = $1 AND room_code = $2 AND status = 'pending';`,
+      [knockId, sanitizedCode]
+    );
+
+    return res.json({ success: true, message: "Knock request cancelled" });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to cancel knock request", details: err.message });
+  }
+});
+
+/**
+ * GET /api/rooms/:roomCode/knocks
+ * Host only: Lists active pending knocks for this room.
+ */
+roomsRouter.get("/:roomCode/knocks", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { roomCode } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+    const user = (req as any).user;
+
+    const roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    const room = roomRes.rows[0];
+    if (!isUserRoomHost(room, user)) {
+      return res.status(403).json({ error: "Only the meeting host can view waiting participants", code: "FORBIDDEN" });
+    }
+
+    const result = await query(
+      `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, created_at
+       FROM room_knocks
+       WHERE room_code = $1 AND status = 'pending'
+       ORDER BY created_at ASC;`,
+      [sanitizedCode]
+    );
+
+    return res.json({ knocks: result.rows });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to list knocks", details: err.message });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomCode/knock/:knockId/respond
+ * Host only: Admits or denies a knocking participant.
+ */
+roomsRouter.post("/:roomCode/knock/:knockId/respond", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { roomCode, knockId } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+    const user = (req as any).user;
+    const { action } = req.body;
+
+    if (action !== "admit" && action !== "deny") {
+      return res.status(400).json({ error: "Action must be 'admit' or 'deny'" });
+    }
+
+    const roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    const room = roomRes.rows[0];
+    if (!isUserRoomHost(room, user)) {
+      return res.status(403).json({ error: "Only the meeting host can admit or deny participants", code: "FORBIDDEN" });
+    }
+
+    const newStatus = action === "admit" ? "admitted" : "denied";
+    const responderId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id))
+      ? user.id
+      : null;
+
+    const updateRes = await query(
+      `UPDATE room_knocks
+       SET status = $1, responded_by = $2, responded_at = NOW()
+       WHERE id = $3 AND room_code = $4 AND status = 'pending'
+       RETURNING id, room_code, user_id, display_name, email, role, status, responded_at;`,
+      [newStatus, responderId, knockId, sanitizedCode]
+    );
+
+    if (updateRes.rows.length === 0) {
+      return res.status(404).json({ error: "Pending knock request not found or already handled", code: "KNOCK_NOT_FOUND" });
+    }
+
+    return res.json({
+      success: true,
+      knock: updateRes.rows[0],
+      status: newStatus,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to respond to knock request", details: err.message });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomCode/knocks/respond-all
+ * Host only: Batch admits or denies all pending knocks.
+ */
+roomsRouter.post("/:roomCode/knocks/respond-all", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { roomCode } = req.params;
+    const sanitizedCode = sanitizeCode(roomCode);
+    const user = (req as any).user;
+    const { action } = req.body;
+
+    if (action !== "admit" && action !== "deny") {
+      return res.status(400).json({ error: "Action must be 'admit' or 'deny'" });
+    }
+
+    const roomRes = await query(
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    const room = roomRes.rows[0];
+    if (!isUserRoomHost(room, user)) {
+      return res.status(403).json({ error: "Only the meeting host can admit or deny participants", code: "FORBIDDEN" });
+    }
+
+    const newStatus = action === "admit" ? "admitted" : "denied";
+    const responderId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id))
+      ? user.id
+      : null;
+
+    const updateRes = await query(
+      `UPDATE room_knocks
+       SET status = $1, responded_by = $2, responded_at = NOW()
+       WHERE room_code = $3 AND status = 'pending'
+       RETURNING id, room_code, user_id, display_name, status;`,
+      [newStatus, responderId, sanitizedCode]
+    );
+
+    return res.json({
+      success: true,
+      action: newStatus,
+      updatedCount: updateRes.rows.length,
+      knocks: updateRes.rows,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to respond to all knock requests", details: err.message });
   }
 });
 

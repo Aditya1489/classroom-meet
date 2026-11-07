@@ -16,6 +16,9 @@ export const SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 export async function isPlatformSuperadmin(userId: string): Promise<boolean> {
   if (!userId) return false;
 
+  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
+  if (!isUUID) return false;
+
   try {
     const res = await query(
       `SELECT u.id, u.email, u.role, u.is_platform_superadmin, u.is_active, om.role as system_role

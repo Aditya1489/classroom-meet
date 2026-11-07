@@ -308,35 +308,35 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       }`}
     >
       {/* Top Header / Geometry Tool Bar */}
-      <div className="flex items-center justify-between px-3 md:px-4 py-2 bg-[#16130f] border-b border-[#f3eee6]/[0.08] shrink-0 gap-2 flex-wrap">
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#f59e0b]/10 border border-[#f59e0b]/20 text-[#f59e0b] text-xs font-semibold">
+      <div className="flex items-center justify-between px-2 sm:px-4 py-1.5 sm:py-2 bg-[#16130f] border-b border-[#f3eee6]/[0.08] shrink-0 gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#f59e0b]/10 border border-[#f59e0b]/20 text-[#f59e0b] text-xs font-semibold shrink-0">
             <Sparkles className="w-3.5 h-3.5" />
-            <span className="font-mono text-[11px]">Mathsy Geometry Canvas</span>
+            <span className="font-mono text-[11px] whitespace-nowrap">Math Canvas</span>
           </div>
           {isHost ? (
-            <span className="hidden sm:inline text-xs text-[#a39e94]">
-              Ruler, Compass & Protractor Instruments
+            <span className="hidden lg:inline text-xs text-[#a39e94] whitespace-nowrap">
+              Ruler, Compass & Protractor
             </span>
           ) : !canDraw ? (
-            <span className="inline-flex items-center gap-1 text-[11px] bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded-full border border-zinc-700">
-              <Eye className="w-3 h-3 text-amber-400" /> View-Only Mode
+            <span className="inline-flex items-center gap-1 text-[11px] bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded-full border border-zinc-700 whitespace-nowrap">
+              <Eye className="w-3 h-3 text-amber-400" /> View-Only
             </span>
           ) : (
-            <div className="flex items-center gap-1 text-[11px] text-amber-400/90 bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/20 font-medium">
+            <div className="hidden sm:flex items-center gap-1 text-[11px] text-amber-400/90 bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/20 font-medium whitespace-nowrap">
               <Users className="w-3 h-3" />
-              <span>Live Shared Classroom Board</span>
+              <span>Live Class</span>
             </div>
           )}
         </div>
 
         {/* Geometry Quick Tools (Only active if canDraw) */}
         {canDraw && (
-          <div className="flex items-center gap-1 bg-[#1a1814] p-1 rounded-xl border border-[#f3eee6]/10">
+          <div className="flex items-center gap-0.5 sm:gap-1 bg-[#1a1814] p-0.5 sm:p-1 rounded-xl border border-[#f3eee6]/10 shrink-0">
             <button
               onClick={insertRuler}
               title="Insert Geometry Ruler"
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition"
+              className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition shrink-0"
             >
               <Ruler className="w-3.5 h-3.5 text-[#f59e0b]" />
               <span className="hidden md:inline font-mono text-[11px]">Ruler</span>
@@ -345,7 +345,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             <button
               onClick={insertCompass}
               title="Insert Compass (Circle Drawer)"
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition"
+              className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition shrink-0"
             >
               <Compass className="w-3.5 h-3.5 text-emerald-400" />
               <span className="hidden md:inline font-mono text-[11px]">Compass</span>
@@ -354,7 +354,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             <button
               onClick={insertProtractor}
               title="Insert Protractor"
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition"
+              className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition shrink-0"
             >
               <CircleDot className="w-3.5 h-3.5 text-[#f59e0b]" />
               <span className="hidden md:inline font-mono text-[11px]">Protractor</span>
@@ -363,18 +363,18 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             <button
               onClick={insertSetSquare}
               title="Insert Set Square"
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition"
+              className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-[#f3eee6] hover:bg-[#221f1a] rounded-lg transition shrink-0"
             >
               <Triangle className="w-3.5 h-3.5 text-amber-300" />
               <span className="hidden md:inline font-mono text-[11px]">Set Square</span>
             </button>
 
-            <div className="h-4 w-px bg-[#f3eee6]/10 mx-1" />
+            <div className="h-4 w-px bg-[#f3eee6]/10 mx-0.5" />
 
             <button
               onClick={clearCanvas}
               title="Clear Canvas"
-              className="p-1.5 text-[#a39e94] hover:text-red-400 hover:bg-[#221f1a] rounded-lg transition"
+              className="p-1.5 text-[#a39e94] hover:text-red-400 hover:bg-[#221f1a] rounded-lg transition shrink-0"
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -382,20 +382,20 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         )}
 
         {/* Tutor drawing permissions toggle & PDF export & Window controls */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
           {/* Tutor toggle: Allow / Lock Student Drawing */}
           {isHost && (
             <button
               onClick={() => onToggleStudentDrawing?.(!letStudentsDraw)}
               title={letStudentsDraw ? "Click to lock drawing for students" : "Click to allow students to draw"}
-              className={`flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg border transition ${
+              className={`flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded-lg border transition shrink-0 ${
                 letStudentsDraw
                   ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20"
                   : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700 hover:text-zinc-200"
               }`}
             >
               {letStudentsDraw ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
-              <span className="hidden lg:inline text-[11px]">
+              <span className="hidden xl:inline text-[11px]">
                 {letStudentsDraw ? "Students Can Draw" : "Students Locked"}
               </span>
             </button>
@@ -406,10 +406,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             onClick={handleExportPdf}
             disabled={isExporting}
             title="Download Whiteboard Notes as PDF"
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#f3eee6] bg-[#221f1a] hover:bg-[#2a2721] border border-[#f3eee6]/15 rounded-lg transition"
+            className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-[#f3eee6] bg-[#221f1a] hover:bg-[#2a2721] border border-[#f3eee6]/15 rounded-lg transition shrink-0"
           >
             <Download className="w-3.5 h-3.5 text-[#f59e0b]" />
-            <span className="hidden md:inline text-[11px]">{isExporting ? "Exporting..." : "PDF Notes"}</span>
+            <span className="hidden md:inline text-[11px]">{isExporting ? "Exporting..." : "PDF"}</span>
           </button>
 
           <div className="h-4 w-px bg-[#f3eee6]/10 mx-0.5" />
@@ -417,7 +417,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           <button
             onClick={() => setIsExpanded(!isExpanded)}
             title={isExpanded ? "Collapse" : "Maximize"}
-            className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition"
+            className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition shrink-0"
           >
             {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
@@ -425,7 +425,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             <button
               onClick={onClose}
               title="Close Whiteboard for Classroom"
-              className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition"
+              className="p-1.5 text-[#a39e94] hover:text-[#f3eee6] hover:bg-white/5 rounded-lg transition shrink-0"
             >
               <X className="w-4 h-4" />
             </button>

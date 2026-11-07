@@ -74,7 +74,7 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
         parentOriginRef.current = parentOrigin;
       }
 
-      const rawApiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:5001/api";
+      const rawApiBase = import.meta.env.VITE_API_BASE_URL || "/api";
       const apiBase = rawApiBase.replace(/\/api$/, "/api/v1");
 
       let resolvedToken = token;
@@ -406,7 +406,7 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
   };
 
   return (
-    <div className="w-full h-screen relative bg-[#0e0d0b] overflow-hidden">
+    <div className="w-full h-[100dvh] relative bg-[#0e0d0b] overflow-hidden">
       <MeetingRoom
         meetingCode={roomCode}
         initialOptions={initialOptions}

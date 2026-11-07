@@ -29,6 +29,7 @@ dist-server
 
 # Testing & MCP artifacts
 .playwright-mcp/
+.serena/
 
 # Environment files
 .env
