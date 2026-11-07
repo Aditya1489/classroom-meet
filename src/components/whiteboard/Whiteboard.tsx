@@ -22,6 +22,8 @@ import {
   Unlock,
   Download,
   Eye,
+  RotateCw,
+  ZoomIn,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -48,6 +50,11 @@ interface WhiteboardProps {
   letStudentsDraw?: boolean;
   onToggleStudentDrawing?: (allowed: boolean) => void;
   remoteSnapshot?: any;
+  onToggleVirtualLandscape?: () => void;
+  isVirtualLandscape?: boolean;
+  onToggleFocusMode?: () => void;
+  isFocusMode?: boolean;
+  isMobile?: boolean;
 }
 
 export const Whiteboard: React.FC<WhiteboardProps> = ({
@@ -61,6 +68,11 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   letStudentsDraw = false,
   onToggleStudentDrawing,
   remoteSnapshot,
+  onToggleVirtualLandscape,
+  isVirtualLandscape = false,
+  onToggleFocusMode,
+  isFocusMode = false,
+  isMobile = false,
 }) => {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -70,6 +82,16 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
   const canDraw = Boolean(isHost || letStudentsDraw);
 
+  const handleZoomToFit = () => {
+    if (!editor) return;
+    try {
+      editor.zoomToFit({ animation: { duration: 250 } });
+      toast.info("Canvas centered to drawings", { id: "zoom-fit" });
+    } catch (err) {
+      console.warn("[Whiteboard] zoomToFit error:", err);
+    }
+  };
+
   const handleMount = (ed: Editor) => {
     setEditor(ed);
     registerWhiteboardEditor(ed);
@@ -77,11 +99,21 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     if (initialSnapshot) {
       try {
         loadSnapshot(ed.store, initialSnapshot);
+        setTimeout(() => {
+          try {
+            ed.zoomToFit({ animation: { duration: 200 } });
+          } catch {}
+        }, 150);
       } catch (err) {
         console.warn("[Whiteboard] Failed to load initial snapshot:", err);
       }
+    } else {
+      setTimeout(() => {
+        try {
+          ed.zoomToFit({ animation: { duration: 200 } });
+        } catch {}
+      }, 150);
     }
-    ed.zoomToFit();
 
     // Late Join / Fresh Mount: Load snapshot from PostgreSQL if available
     if (roomCode) {
@@ -90,6 +122,11 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           try {
             ed.loadSnapshot(snapshot);
             console.log("[Whiteboard] Authoritative snapshot loaded for room:", roomCode);
+            setTimeout(() => {
+              try {
+                ed.zoomToFit({ animation: { duration: 200 } });
+              } catch {}
+            }, 150);
           } catch (err) {
             console.warn("[Whiteboard] Error restoring snapshot:", err);
           }
@@ -214,12 +251,24 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           editor.store.mergeRemoteChanges(() => {
             editor.store.applyDiff(data.changes);
           });
+          if (isMobile) {
+            setTimeout(() => {
+              try {
+                editor.zoomToFit({ animation: { duration: 150 } });
+              } catch {}
+            }, 100);
+          }
         } catch (err) {
           console.warn("[Whiteboard] Error applying remote diff:", err);
         }
       } else if (data.type === "snapshot" && data.snapshot) {
         try {
           editor.loadSnapshot(data.snapshot);
+          setTimeout(() => {
+            try {
+              editor.zoomToFit({ animation: { duration: 200 } });
+            } catch {}
+          }, 150);
         } catch (err) {
           console.warn("[Whiteboard] Error applying remote snapshot:", err);
         }
@@ -381,8 +430,36 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           </div>
         )}
 
-        {/* Tutor drawing permissions toggle & PDF export & Window controls */}
+        {/* Tutor drawing permissions toggle & PDF export & Fit / Rotate / Focus controls */}
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          {/* Fit to Screen Button */}
+          <button
+            onClick={handleZoomToFit}
+            title="Fit drawings to screen"
+            className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-[#f3eee6] bg-[#221f1a] hover:bg-[#2a2721] border border-[#f3eee6]/15 rounded-lg transition shrink-0 cursor-pointer"
+          >
+            <ZoomIn className="w-3.5 h-3.5 text-[#f59e0b]" />
+            <span className="font-mono text-[11px]">Fit</span>
+          </button>
+
+          {/* Focus Mode Button (Hides classroom chrome for full canvas immersion) */}
+          {onToggleFocusMode && (
+            <button
+              onClick={onToggleFocusMode}
+              title={isFocusMode ? "Exit Focus Mode" : "Focus Mode (Hide Meeting Controls)"}
+              className={`flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded-lg border transition shrink-0 cursor-pointer ${
+                isFocusMode
+                  ? "bg-[#f59e0b]/20 text-[#f59e0b] border-[#f59e0b]/40 shadow-sm"
+                  : "text-[#f3eee6] bg-[#221f1a] hover:bg-[#2a2721] border-[#f3eee6]/15"
+              }`}
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-[#f59e0b]" />
+              <span className="font-mono text-[11px]">
+                {isFocusMode ? "Normal" : "Focus"}
+              </span>
+            </button>
+          )}
+
           {/* Tutor toggle: Allow / Lock Student Drawing */}
           {isHost && (
             <button
@@ -439,6 +516,8 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           shapeUtils={customShapeUtils}
           onMount={handleMount}
           autoFocus={false}
+          hideUi={!canDraw}
+          components={!canDraw ? { Toolbar: null, NavigationPanel: null, PageMenu: null, MainMenu: null } : undefined}
         />
       </div>
     </div>

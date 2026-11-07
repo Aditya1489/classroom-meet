@@ -34,9 +34,9 @@ export function isLandscapeOrientation(): boolean {
 
 export async function enterMobileFullscreenAndLandscape(
   element?: HTMLElement | null
-): Promise<{ fullscreen: boolean; orientation: boolean }> {
+): Promise<{ fullscreen: boolean; orientation: boolean; needsVirtualLandscape: boolean }> {
   if (typeof window === "undefined" || typeof document === "undefined") {
-    return { fullscreen: false, orientation: false };
+    return { fullscreen: false, orientation: false, needsVirtualLandscape: false };
   }
 
   let fullscreenSuccess = false;
@@ -72,7 +72,12 @@ export async function enterMobileFullscreenAndLandscape(
       await orientationObj.lock("landscape").catch((e: any) => {
         console.warn("[MobileOrientation] screen.orientation.lock rejected:", e?.message || e);
       });
-      orientationSuccess = true;
+      // Verify if orientation lock actually took effect
+      if (typeof screen !== "undefined" && screen.orientation && screen.orientation.type) {
+        orientationSuccess = screen.orientation.type.includes("landscape");
+      } else {
+        orientationSuccess = isLandscapeOrientation();
+      }
     } else if (typeof screen !== "undefined" && typeof (screen as any).lockOrientation === "function") {
       (screen as any).lockOrientation("landscape");
       orientationSuccess = true;
@@ -84,7 +89,11 @@ export async function enterMobileFullscreenAndLandscape(
     console.warn("[MobileOrientation] lockOrientation note:", err?.message || err);
   }
 
-  return { fullscreen: fullscreenSuccess, orientation: orientationSuccess };
+  const isMobile = isMobileDevice();
+  const isPhysicallyLandscape = isLandscapeOrientation();
+  const needsVirtualLandscape = isMobile && !isPhysicallyLandscape && !orientationSuccess;
+
+  return { fullscreen: fullscreenSuccess, orientation: orientationSuccess, needsVirtualLandscape };
 }
 
 export async function exitMobileFullscreenAndUnlock(): Promise<void> {

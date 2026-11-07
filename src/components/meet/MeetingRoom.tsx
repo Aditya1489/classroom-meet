@@ -59,6 +59,8 @@ import {
   ChevronDown,
   SlidersHorizontal,
   RotateCcw,
+  Minus,
+  RotateCw,
 } from "lucide-react";
 import {
   isMobileDevice,
@@ -244,6 +246,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const isMobile = isMobileDevice();
   const isStudentAttendee = !isHost && grantedRole !== "tutor";
   const [isLandscape, setIsLandscape] = useState(() => isLandscapeOrientation());
+  const [isFocusMode, setIsFocusMode] = useState(false);
+  const [isPipMinimized, setIsPipMinimized] = useState(false);
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -257,12 +261,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
   }, []);
 
-  // When student attendee joins on mobile devices, take them into fullscreen and horizontal landscape mode
+  // When student attendee joins on mobile devices, request native fullscreen & landscape
   useEffect(() => {
     if (isStudentAttendee && isMobile) {
       enterMobileFullscreenAndLandscape(playerRef.current)
         .then((res) => {
           if (res.fullscreen) setIsFullscreen(true);
+          if (res.orientation) setIsLandscape(true);
         })
         .catch(() => {});
     }
@@ -1510,6 +1515,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       ref={playerRef}
       className="flex flex-col h-[100dvh] w-full min-h-0 bg-[#0e0d0b] text-[#f3eee6] overflow-hidden select-none font-sans relative"
     >
+      {/* Floating Exit Focus Mode Pill */}
+      {isFocusMode && (
+        <button
+          onClick={() => setIsFocusMode(false)}
+          className="absolute top-2 left-2 z-50 px-3 py-1 bg-black/85 hover:bg-black text-[#f59e0b] border border-[#f59e0b]/40 rounded-full text-xs font-semibold backdrop-blur-md shadow-2xl flex items-center gap-1.5 transition-all cursor-pointer"
+        >
+          <Minimize2 className="w-3.5 h-3.5" />
+          <span>Exit Focus</span>
+        </button>
+      )}
+
       {/* Persistent Audio Sink: Guarantees remote student/tutor audio is always played regardless of active view layout (Whiteboard, Screen Share, Spotlight, or Grid) */}
       <div className="hidden" aria-hidden="true">
         {remoteParticipants.map((p) => (
@@ -1518,7 +1534,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       </div>
 
       {/* ── CLASSROOM HEADER ── */}
-      <header className="h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between z-20 backdrop-blur-md gap-2">
+      <header
+        className={`h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between z-20 backdrop-blur-md gap-2 ${
+          isFocusMode ? "mathsy-focus-mode-header hidden" : ""
+        }`}
+      >
         {/* Left: Room Badge & Duration */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0">
           <button
@@ -1817,26 +1837,30 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         </div>
       </header>
 
-      {/* Mobile Student Orientation & Fullscreen Assist Banner */}
-      {isStudentAttendee && isMobile && !isLandscape && (
+      {/* Mobile Student Orientation & Focus Assist Banner */}
+      {isStudentAttendee && isMobile && !isLandscape && !isFocusMode && (
         <aside
           aria-label="Landscape view suggestion"
-          className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-[#16130f]/95 border border-[#f59e0b]/40 rounded-full px-3.5 py-1.5 flex items-center gap-2.5 shadow-2xl backdrop-blur-md max-w-[92vw]"
+          className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-[#16130f]/95 border border-[#f59e0b]/40 rounded-full px-3 py-1 flex items-center gap-2 shadow-2xl backdrop-blur-md max-w-[95vw]"
         >
-          <RotateCcw className="w-3.5 h-3.5 text-[#f59e0b] animate-spin" style={{ animationDuration: "4s" }} />
+          <RotateCcw className="w-3.5 h-3.5 text-[#f59e0b] animate-spin shrink-0" style={{ animationDuration: "4s" }} />
           <span className="text-[11px] font-medium text-[#f3eee6] truncate">
-            Rotate horizontally for full classroom view
+            Rotate phone for widescreen
           </span>
-          <button
-            onClick={async () => {
-              await enterMobileFullscreenAndLandscape(playerRef.current);
-              setIsLandscape(isLandscapeOrientation());
-              setIsFullscreen(true);
-            }}
-            className="px-2.5 py-0.5 rounded-full bg-[#f59e0b] text-[#0e0d0b] text-[10px] font-bold shadow-md cursor-pointer hover:bg-[#d97706] transition shrink-0"
-          >
-            Full Screen
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => setIsFocusMode(true)}
+              className="px-2.5 py-0.5 rounded-full bg-[#f59e0b] text-[#0e0d0b] text-[10px] font-bold shadow-md cursor-pointer hover:bg-[#d97706] transition shrink-0"
+            >
+              Focus Mode
+            </button>
+            <button
+              onClick={toggleFullscreen}
+              className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-200 border border-zinc-700 text-[10px] font-bold shadow-md cursor-pointer hover:bg-zinc-700 transition shrink-0"
+            >
+              Full Screen
+            </button>
+          </div>
         </aside>
       )}
 
@@ -1957,9 +1981,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 />
 
                 {/* Top-Left Presenter Info Banner */}
-                <div className="absolute top-3 left-3 bg-[#0e0d0b]/85 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 text-xs text-[#f3eee6] flex items-center gap-2 shadow-lg z-20">
+                <div className="absolute top-2 left-2 sm:top-3 sm:left-3 bg-[#0e0d0b]/85 backdrop-blur-md px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl border border-white/15 text-xs text-[#f3eee6] flex items-center gap-2 shadow-lg z-20">
                   <Monitor className="w-3.5 h-3.5 text-[#f59e0b]" />
-                  <span className="font-semibold text-[11px] text-[#f59e0b]">
+                  <span className="font-semibold text-[11px] text-[#f59e0b] truncate max-w-[150px] sm:max-w-none">
                     {localScreenTrack ? "You are presenting" : `${remoteScreenSharer?.name || "Tutor"} is presenting`}
                   </span>
                   {isHost && isScreenSharing && (
@@ -1970,6 +1994,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       Stop Sharing
                     </button>
                   )}
+                </div>
+
+                {/* Top-Right Focus Mode Toggle */}
+                <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex items-center gap-1.5 z-20">
+                  <button
+                    onClick={() => setIsFocusMode(!isFocusMode)}
+                    title={isFocusMode ? "Exit Focus Mode" : "Focus on Presentation"}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold backdrop-blur-md border shadow-lg flex items-center gap-1.5 cursor-pointer transition ${
+                      isFocusMode
+                        ? "bg-[#f59e0b]/20 text-[#f59e0b] border-[#f59e0b]/40"
+                        : "bg-[#0e0d0b]/80 text-[#f3eee6] border-white/15 hover:bg-[#0e0d0b]"
+                    }`}
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 text-[#f59e0b]" />
+                    <span className="font-mono text-[11px]">{isFocusMode ? "Normal" : "Focus"}</span>
+                  </button>
                 </div>
 
                 {/* Floating PIP for Host/Presenter Camera (When alone or compact view) */}
@@ -1988,8 +2028,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 )}
               </div>
 
-              {/* Sidebar Carousel of Participants (Tutor + Students) */}
-              {allParticipants.length > 1 && (
+              {/* Sidebar Carousel of Participants (Tutor + Students) - Hidden in Focus Mode */}
+              {allParticipants.length > 1 && !isFocusMode && (
                 <div className="w-full md:w-56 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto shrink-0 pb-1 md:pb-0">
                   {allParticipants.map((p) => (
                     <VideoTile
@@ -2050,21 +2090,61 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 letStudentsDraw={letStudentsDraw}
                 onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
                 onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
+                onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
+                isFocusMode={isFocusMode}
+                isMobile={isMobile}
               />
-              {/* Floating PIP Host Camera */}
-              {isCamEnabled && localVideoTrack && (
-                <div className="absolute bottom-4 right-4 w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto">
-                  <VideoTrackPlayer
-                    track={localVideoTrack}
-                    mirror={true}
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute bottom-1.5 left-1.5 bg-black/80 px-2 py-0.5 rounded text-[9px] font-bold text-white flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    Host
+              {/* Floating PIP Camera (Relocated on mobile to top-right to prevent canvas collision, with 1-tap minimize) */}
+              {(() => {
+                const hostPeer = allParticipants.find((p) => p.role === "host");
+                const pipTrack = isHost
+                  ? (isCamEnabled ? localVideoTrack : null)
+                  : (hostPeer?.videoTrack || (isCamEnabled ? localVideoTrack : null));
+                const pipName = isHost
+                  ? "You (Host)"
+                  : hostPeer?.videoTrack
+                  ? (hostPeer.name || "Tutor (Host)")
+                  : "You";
+
+                if (!pipTrack || isFocusMode) return null;
+
+                if (isPipMinimized) {
+                  return (
+                    <button
+                      onClick={() => setIsPipMinimized(false)}
+                      title="Expand Video"
+                      className="absolute top-14 right-2 z-30 p-2 rounded-full bg-zinc-900/95 border border-white/20 text-white shadow-2xl hover:bg-zinc-800 transition flex items-center gap-1 cursor-pointer pointer-events-auto"
+                    >
+                      <Video className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[10px] font-bold text-zinc-300 pr-0.5">Video</span>
+                    </button>
+                  );
+                }
+
+                return (
+                  <div className="absolute top-14 right-2 w-20 sm:w-28 md:top-auto md:bottom-4 md:right-4 md:w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group">
+                    <VideoTrackPlayer
+                      track={pipTrack}
+                      mirror={pipTrack === localVideoTrack}
+                      className="w-full h-full object-cover"
+                    />
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsPipMinimized(true);
+                      }}
+                      title="Minimize Video"
+                      className="absolute top-1 right-1 p-0.5 bg-black/60 hover:bg-black/90 text-white/80 hover:text-white rounded transition cursor-pointer"
+                    >
+                      <Minus className="w-2.5 h-2.5" />
+                    </button>
+                    <div className="absolute bottom-1 left-1 bg-black/80 px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-bold text-white flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span className="truncate max-w-[70px] sm:max-w-[100px]">{pipName}</span>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           ) : layoutMode === "spotlight" && allParticipants.length > 0 ? (
             /* SPOTLIGHT VIEW */
@@ -2282,7 +2362,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       </main>
 
       {/* ── BOTTOM GOOGLE MEET CONTROLS BAR ── */}
-      <footer className="h-16 sm:h-20 shrink-0 bg-[#18191c] border-t border-white/10 flex items-center justify-between px-3 sm:px-6 md:px-8 z-30 select-none pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]">
+      <footer
+        className={`h-16 sm:h-20 shrink-0 bg-[#18191c] border-t border-white/10 flex items-center justify-between px-3 sm:px-6 md:px-8 z-30 select-none pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ${
+          isFocusMode ? "mathsy-focus-mode-dock hidden" : ""
+        }`}
+      >
         {/* Desktop / Tablet Controls Bar (>= 768px) */}
         <div className="hidden md:flex items-center justify-between w-full">
           {/* Left Side: Mic, Camera, Raise Hand, Screen Share */}

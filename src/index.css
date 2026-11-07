@@ -139,3 +139,34 @@ body {
   background: radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.08) 0%, transparent 60%);
 }
 
+/* Virtual 90° Landscape Mode for mobile devices where screen.orientation.lock is unavailable (e.g. iOS Safari) */
+.mathsy-virtual-landscape {
+  position: fixed !important;
+  top: 50% !important;
+  left: 50% !important;
+  width: 100vh !important;
+  height: 100vw !important;
+  transform: translate(-50%, -50%) rotate(90deg) !important;
+  transform-origin: center center !important;
+  z-index: 50 !important;
+  overflow: hidden !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
+/* Immersive Focus Mode for whiteboard stage */
+.mathsy-focus-mode-header {
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.25s ease-in-out;
+}
+
+.mathsy-focus-mode-dock {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.25s ease-in-out;
+}
+
+

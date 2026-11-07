@@ -847,6 +847,12 @@ export class MathsyMediasoupEngine {
             dispatchMicRequest(msg.userId || msg.senderId || "unknown", msg.name || "Student", cId, msg.roomCode);
           } else if (msg.controlAction === "PEER_MUTE_STATE") {
             handlePeerMuteState(msg);
+          } else if (msg.controlAction === "WHITEBOARD_DIFF" && msg.whiteboardData) {
+            // Room isolation check
+            const msgSender = msg.senderId || msg.userId;
+            if (msgSender !== this.currentUserId) {
+              this.onWhiteboardData?.(msg.whiteboardData);
+            }
           }
           return;
         }
@@ -1568,6 +1574,18 @@ export class MathsyMediasoupEngine {
   }
 
   public broadcastWhiteboard(data: any) {
+    // 1. Wrap in chatMessage control channel to guarantee room-wide broadcast via Mediasoup socket relay
+    const payload = {
+      isControl: true,
+      controlAction: "WHITEBOARD_DIFF",
+      roomCode: this.roomId,
+      senderId: this.currentUserId,
+      whiteboardData: data,
+      timestamp: Date.now(),
+    };
+    this.socket?.emit("chatMessage", payload);
+
+    // 2. Also emit to dedicated whiteboard channels
     this.socket?.emit("whiteboardDraw", data);
     this.socket?.emit("whiteboard:sync", data);
     this.socket?.emit("whiteboard:broadcast", data);
