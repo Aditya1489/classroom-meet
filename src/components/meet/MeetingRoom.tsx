@@ -581,10 +581,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         setIsHost(true);
         isHostRef.current = true;
         setGrantedRole("tutor");
-      } else if (!isHostRef.current) {
+      } else {
         setIsHost(false);
         isHostRef.current = false;
         setGrantedRole("student");
+        window.sessionStorage.removeItem(`mathsy_host_${meetingCode}`);
       }
       if (roomData?.isDemo) {
         setIsDemo(true);
@@ -1826,6 +1827,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </>
           )}
 
+          {/* Mobile Focus Mode Toggle */}
+          {isMobile && (
+            <button
+              onClick={() => setIsFocusMode(!isFocusMode)}
+              className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold transition flex items-center gap-1 cursor-pointer ${
+                isFocusMode
+                  ? "bg-[#f59e0b] text-[#0e0d0b]"
+                  : "bg-[#1a1814] text-[#f3eee6] border border-[#f3eee6]/15 hover:border-[#f59e0b]"
+              }`}
+              title={isFocusMode ? "Exit Focus Mode" : "Focus Mode (Full Canvas)"}
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>{isFocusMode ? "Exit" : "Focus"}</span>
+            </button>
+          )}
+
           {/* Fullscreen toggle */}
           <button
             onClick={toggleFullscreen}
@@ -1836,33 +1853,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </button>
         </div>
       </header>
-
-      {/* Mobile Student Orientation & Focus Assist Banner */}
-      {isStudentAttendee && isMobile && !isLandscape && !isFocusMode && (
-        <aside
-          aria-label="Landscape view suggestion"
-          className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-[#16130f]/95 border border-[#f59e0b]/40 rounded-full px-3 py-1 flex items-center gap-2 shadow-2xl backdrop-blur-md max-w-[95vw]"
-        >
-          <RotateCcw className="w-3.5 h-3.5 text-[#f59e0b] animate-spin shrink-0" style={{ animationDuration: "4s" }} />
-          <span className="text-[11px] font-medium text-[#f3eee6] truncate">
-            Rotate phone for widescreen
-          </span>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={() => setIsFocusMode(true)}
-              className="px-2.5 py-0.5 rounded-full bg-[#f59e0b] text-[#0e0d0b] text-[10px] font-bold shadow-md cursor-pointer hover:bg-[#d97706] transition shrink-0"
-            >
-              Focus Mode
-            </button>
-            <button
-              onClick={toggleFullscreen}
-              className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-200 border border-zinc-700 text-[10px] font-bold shadow-md cursor-pointer hover:bg-zinc-700 transition shrink-0"
-            >
-              Full Screen
-            </button>
-          </div>
-        </aside>
-      )}
 
       {/* ── MAIN WORKSPACE & STAGE ── */}
       <main className="flex-1 flex min-h-0 overflow-hidden relative">
@@ -2113,7 +2103,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     <button
                       onClick={() => setIsPipMinimized(false)}
                       title="Expand Video"
-                      className="absolute top-14 right-2 z-30 p-2 rounded-full bg-zinc-900/95 border border-white/20 text-white shadow-2xl hover:bg-zinc-800 transition flex items-center gap-1 cursor-pointer pointer-events-auto"
+                      className="absolute bottom-20 right-3 md:bottom-4 md:right-4 z-30 p-2 rounded-full bg-zinc-900/95 border border-white/20 text-white shadow-2xl hover:bg-zinc-800 transition flex items-center gap-1 cursor-pointer pointer-events-auto"
                     >
                       <Video className="w-3.5 h-3.5 text-emerald-400" />
                       <span className="text-[10px] font-bold text-zinc-300 pr-0.5">Video</span>
@@ -2122,7 +2112,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 }
 
                 return (
-                  <div className="absolute top-14 right-2 w-20 sm:w-28 md:top-auto md:bottom-4 md:right-4 md:w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group">
+                  <div className="absolute bottom-20 right-3 w-20 sm:w-28 md:bottom-4 md:right-4 md:w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group">
                     <VideoTrackPlayer
                       track={pipTrack}
                       mirror={pipTrack === localVideoTrack}

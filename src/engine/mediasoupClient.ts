@@ -139,9 +139,13 @@ function sanitizeTransportData(data: any, signalingUrl: string) {
     }
   } catch {}
 
-  // If host is localhost or ngrok tunnel, default candidate IP fallback to the known public SFU server
-  if (!fallbackHost || fallbackHost === "localhost" || fallbackHost === "127.0.0.1" || fallbackHost.includes("ngrok")) {
-    fallbackHost = "152.67.5.129";
+  // WebRTC RTCIceCandidateInit strictly requires numeric IPv4/IPv6 addresses, NOT domain names/hostnames.
+  let targetIp = fallbackHost;
+  const ipMatch = fallbackHost.match(/(\d{1,3})[-.](\d{1,3})[-.](\d{1,3})[-.](\d{1,3})/);
+  if (ipMatch) {
+    targetIp = `${ipMatch[1]}.${ipMatch[2]}.${ipMatch[3]}.${ipMatch[4]}`;
+  } else if (!targetIp || targetIp === "localhost" || targetIp === "127.0.0.1" || targetIp.includes("ngrok") || targetIp.includes("sslip.io")) {
+    targetIp = "152.67.5.129";
   }
 
   if (Array.isArray(data.iceCandidates)) {
@@ -155,12 +159,12 @@ function sanitizeTransportData(data: any, signalingUrl: string) {
         rawIp === "localhost" ||
         /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(rawIp);
 
-      if (isPrivate && fallbackHost) {
-        console.log(`[MathsyMeet Engine] Rewriting private ICE candidate IP: ${rawIp} -> ${fallbackHost}`);
+      if (isPrivate && targetIp) {
+        console.log(`[MathsyMeet Engine] Rewriting private ICE candidate IP: ${rawIp} -> ${targetIp}`);
         sanitizedCandidates.push({
           ...c,
-          ip: fallbackHost,
-          address: fallbackHost,
+          ip: targetIp,
+          address: targetIp,
         });
       } else {
         sanitizedCandidates.push(c);
@@ -399,12 +403,15 @@ export class MathsyMediasoupEngine {
         queryPayload.token = effectiveToken;
       }
 
-      // Establish WebSocket to Mediasoup signaling server
+      // Establish WebSocket to Mediasoup signaling server with robust auto-reconnection
       this.socket = io(this.signalingUrl, {
         auth: authPayload,
         query: queryPayload,
-        transports: ["websocket"],
-        reconnection: false, // Let callers manage retry instead of endless silent loop
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
       });
 
       this.socket.on("error", (err: any) => {

@@ -171,7 +171,7 @@ export const dbClient = {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(participant.room_code)}/participants`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, participant.room_code),
         body: JSON.stringify({
           user_id: participant.user_id,
           display_name: participant.display_name,
@@ -191,7 +191,7 @@ export const dbClient = {
   async getParticipants(roomCode: string): Promise<DbParticipant[]> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/participants`, {
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, roomCode),
       });
       if (!res.ok) return [];
       const data = await res.json();
@@ -206,7 +206,7 @@ export const dbClient = {
     try {
       await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/leave`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, roomCode),
         body: JSON.stringify({
           user_id: userId,
           display_name: displayName,

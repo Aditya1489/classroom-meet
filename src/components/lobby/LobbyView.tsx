@@ -531,7 +531,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   };
 
   if (!roomChecking && roomExists === false) {
-    const isTutorUser = profile?.role === "tutor" || isHostFromLanding || selectedRole === "tutor";
+    const isTutorUser = Boolean(isRoomHost || isHostFromLanding);
 
     return (
       <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[#0e0d0b] text-[#f3eee6] flex flex-col justify-between selection:bg-[#f59e0b]/30 selection:text-[#f3eee6]">
@@ -1127,55 +1127,23 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
                     </div>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    {/* Tutor Option */}
-                    <div
-                      onClick={() => setSelectedRole("tutor")}
-                      className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                        selectedRole === "tutor"
-                          ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
-                          : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className={`p-2 rounded-lg ${selectedRole === "tutor" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
-                          <GraduationCap className="w-4 h-4" />
-                        </div>
-                        {selectedRole === "tutor" && <Check className="w-4 h-4 text-[#f59e0b]" />}
-                      </div>
-                      <div>
-                        <h3 className={`text-sm font-semibold ${selectedRole === "tutor" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
-                          Tutor / Teacher
-                        </h3>
-                        <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
-                          Host controls, math whiteboard, live polls & moderation
-                        </p>
-                      </div>
+                  <div className="bg-[#1a1814] border border-[#f3eee6]/10 p-3.5 rounded-xl flex items-start gap-3">
+                    <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shrink-0 mt-0.5">
+                      <BookOpen className="w-5 h-5" />
                     </div>
-
-                    {/* Student Option */}
-                    <div
-                      onClick={() => setSelectedRole("student")}
-                      className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                        selectedRole === "student"
-                          ? "bg-[#f59e0b]/10 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
-                          : "bg-[#1a1814] border-[#f3eee6]/10 hover:border-[#f3eee6]/20 text-[#a39e94]"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className={`p-2 rounded-lg ${selectedRole === "student" ? "bg-[#f59e0b] text-[#0e0d0b]" : "bg-white/5 text-[#a39e94]"}`}>
-                          <BookOpen className="w-4 h-4" />
-                        </div>
-                        {selectedRole === "student" && <Check className="w-4 h-4 text-[#f59e0b]" />}
-                      </div>
-                      <div>
-                        <h3 className={`text-sm font-semibold ${selectedRole === "student" ? "text-[#f3eee6]" : "text-[#a39e94]"}`}>
-                          Student / Learner
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-[#f3eee6] flex items-center gap-1.5">
+                          <span>Participant / Student</span>
+                          <span className="text-[10px] font-mono uppercase bg-emerald-500/15 text-emerald-400 px-1.5 py-0.5 rounded font-bold border border-emerald-500/30">
+                            Attendee
+                          </span>
                         </h3>
-                        <p className="text-[11px] text-[#a39e94] leading-tight mt-0.5">
-                          Live classroom, raise hand, answer polls & interactive chat
-                        </p>
+                        <Check className="w-4 h-4 text-emerald-400" />
                       </div>
+                      <p className="text-xs text-[#a39e94] leading-relaxed mt-1">
+                        Joining live classroom with real-time STEM whiteboard, raise hand, live polls, and interactive audio/video.
+                      </p>
                     </div>
                   </div>
                 )}
