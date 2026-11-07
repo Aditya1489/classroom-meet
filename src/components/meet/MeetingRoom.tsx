@@ -58,7 +58,14 @@ import {
   MoreHorizontal,
   ChevronDown,
   SlidersHorizontal,
+  RotateCcw,
 } from "lucide-react";
+import {
+  isMobileDevice,
+  isLandscapeOrientation,
+  enterMobileFullscreenAndLandscape,
+  exitMobileFullscreenAndUnlock,
+} from "../../lib/mobileFullscreen";
 import { YouTubeConnectModal } from "../youtube/YouTubeConnectModal";
 import {
   startYouTubeLiveStreaming,
@@ -233,15 +240,49 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   };
 
+  // Mobile Fullscreen & Landscape Orientation for student attendees
+  const isMobile = isMobileDevice();
+  const isStudentAttendee = !isHost && grantedRole !== "tutor";
+  const [isLandscape, setIsLandscape] = useState(() => isLandscapeOrientation());
+
+  useEffect(() => {
+    const handleOrientationChange = () => {
+      setIsLandscape(isLandscapeOrientation());
+    };
+    window.addEventListener("resize", handleOrientationChange);
+    window.addEventListener("orientationchange", handleOrientationChange);
+    return () => {
+      window.removeEventListener("resize", handleOrientationChange);
+      window.removeEventListener("orientationchange", handleOrientationChange);
+    };
+  }, []);
+
+  // When student attendee joins on mobile devices, take them into fullscreen and horizontal landscape mode
+  useEffect(() => {
+    if (isStudentAttendee && isMobile) {
+      enterMobileFullscreenAndLandscape(playerRef.current)
+        .then((res) => {
+          if (res.fullscreen) setIsFullscreen(true);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      if (isStudentAttendee && isMobile) {
+        exitMobileFullscreenAndUnlock().catch(() => {});
+      }
+    };
+  }, [isStudentAttendee, isMobile]);
+
   // Fullscreen State
   const [isFullscreen, setIsFullscreen] = useState(false);
   const toggleFullscreen = async () => {
     try {
       if (!document.fullscreenElement) {
-        await playerRef.current?.requestFullscreen();
+        const res = await enterMobileFullscreenAndLandscape(playerRef.current);
         setIsFullscreen(true);
+        if (res.orientation) setIsLandscape(true);
       } else {
-        await document.exitFullscreen();
+        await exitMobileFullscreenAndUnlock();
         setIsFullscreen(false);
       }
     } catch (e) {
@@ -1775,6 +1816,29 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </button>
         </div>
       </header>
+
+      {/* Mobile Student Orientation & Fullscreen Assist Banner */}
+      {isStudentAttendee && isMobile && !isLandscape && (
+        <aside
+          aria-label="Landscape view suggestion"
+          className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-[#16130f]/95 border border-[#f59e0b]/40 rounded-full px-3.5 py-1.5 flex items-center gap-2.5 shadow-2xl backdrop-blur-md max-w-[92vw]"
+        >
+          <RotateCcw className="w-3.5 h-3.5 text-[#f59e0b] animate-spin" style={{ animationDuration: "4s" }} />
+          <span className="text-[11px] font-medium text-[#f3eee6] truncate">
+            Rotate horizontally for full classroom view
+          </span>
+          <button
+            onClick={async () => {
+              await enterMobileFullscreenAndLandscape(playerRef.current);
+              setIsLandscape(isLandscapeOrientation());
+              setIsFullscreen(true);
+            }}
+            className="px-2.5 py-0.5 rounded-full bg-[#f59e0b] text-[#0e0d0b] text-[10px] font-bold shadow-md cursor-pointer hover:bg-[#d97706] transition shrink-0"
+          >
+            Full Screen
+          </button>
+        </aside>
+      )}
 
       {/* ── MAIN WORKSPACE & STAGE ── */}
       <main className="flex-1 flex min-h-0 overflow-hidden relative">

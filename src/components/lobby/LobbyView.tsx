@@ -25,6 +25,7 @@ import { AuthRoleModal } from "../auth/AuthRoleModal";
 import { SignOutConfirmModal } from "../auth/SignOutConfirmModal";
 import { dbClient, API_BASE } from "../../lib/dbClient";
 import { getRoomRole } from "../../services/roomService";
+import { isMobileDevice, enterMobileFullscreenAndLandscape } from "../../lib/mobileFullscreen";
 
 interface LobbyViewProps {
   meetingCode: string;
@@ -432,6 +433,11 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
     // Non-hosts always enter as student/attendee with isHost: false
     const finalRole: "tutor" | "student" = isRoomHost ? "tutor" : "student";
+
+    // When student joins on mobile devices, trigger full screen mode and landscape orientation
+    if (!isRoomHost && isMobileDevice()) {
+      enterMobileFullscreenAndLandscape().catch(() => {});
+    }
 
     onJoinMeeting({
       micMuted: isMicMuted,
