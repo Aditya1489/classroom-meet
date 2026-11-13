@@ -181,5 +181,185 @@ test("Student Mobile Fullscreen & Horizontal Screen Suite", async (t) => {
     assert.ok(meetingCode.includes("isFocusMode"), "Must support 1-tap Focus Mode for presentations");
     assert.ok(meetingCode.includes("object-contain"), "Screen share must use object-contain without hardcoded pixel bounds");
   });
+
+  await t.test("SMF-11: Whiteboard Floating PiP Camera displays Tutor's camera to student and never student self-view", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+
+    // Verify remote participant role normalization includes both "host" and "tutor"
+    assert.ok(
+      meetingCode.includes('p.role === "host" || p.role === "tutor"'),
+      "Must normalize remote tutor role to host in allParticipants"
+    );
+
+    // Verify student view strictly binds to tutor camera and does not fall back to localVideoTrack
+    assert.ok(
+      meetingCode.includes("tutorPeer?.videoTrack || null"),
+      "Student PiP camera must strictly use tutorPeer video track"
+    );
+    assert.ok(
+      !meetingCode.includes("hostPeer?.videoTrack || (isCamEnabled ? localVideoTrack : null)"),
+      "Must not fall back to student's own videoTrack in the PiP box"
+    );
+
+    // Simulate PiP selection logic
+    const resolvePip = (isHost: boolean, myUserId: string, participants: Array<{ id: string; name: string; role: string; videoTrack?: any }>, isCamEnabled: boolean, localVideoTrack: any) => {
+      const tutorPeer = participants.find((p) => (p.role === "host" || p.role === "tutor") && p.id !== myUserId)
+        || participants.find((p) => p.id !== myUserId);
+
+      const pipTrack = isHost
+        ? (isCamEnabled ? localVideoTrack : null)
+        : (tutorPeer?.videoTrack || null);
+
+      const pipName = isHost
+        ? "Host (You)"
+        : tutorPeer
+        ? (tutorPeer.name ? `${tutorPeer.name} (Tutor)` : "Tutor")
+        : "Tutor";
+
+      return { pipTrack, pipName, tutorPeer };
+    };
+
+    const mockTutor = { id: "tutor-1", name: "Aditya Chavhan", role: "tutor", videoTrack: "tutor-cam-track" };
+    const mockStudent = { id: "student-1", name: "Kunal Gupta", role: "student", videoTrack: "student-cam-track" };
+
+    // When student views room with tutor:
+    const studentView = resolvePip(false, "student-1", [mockStudent, mockTutor], true, "student-cam-track");
+    assert.equal(studentView.pipName, "Aditya Chavhan (Tutor)", "Student PiP must display Tutor name");
+    assert.equal(studentView.pipTrack, "tutor-cam-track", "Student PiP must stream Tutor video track");
+
+    // Even if student has local video enabled, it must never show student's own track:
+    const studentWithTutorCamOff = resolvePip(false, "student-1", [mockStudent, { ...mockTutor, videoTrack: null }], true, "student-cam-track");
+    assert.equal(studentWithTutorCamOff.pipName, "Aditya Chavhan (Tutor)");
+    assert.equal(studentWithTutorCamOff.pipTrack, null, "Must NOT show student's own camera when tutor camera is off");
+  });
+
+  await t.test("SMF-12: Horizontal landscape 75/25 split architecture on mobile devices", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+
+    // Scoping check: must strictly gate on mobile landscape when whiteboard or screenshare is active
+    assert.ok(
+      meetingCode.includes("const isMobileLandscapeSplit = isMobileLandscape && (showWhiteboard || layoutMode === \"whiteboard\" || (layoutMode === \"screenshare\" && isAnyoneScreenSharing))"),
+      "Must define isMobileLandscapeSplit with mobile landscape and presentation stage conditions"
+    );
+
+    // 75% canvas and 25% sidebar width checks
+    assert.ok(meetingCode.includes("w-[75%]"), "Must allocate 75% width to the whiteboard/screenshare canvas");
+    assert.ok(meetingCode.includes("w-[25%]"), "Must allocate 25% width to the dedicated sidebar");
+
+    // Vertical division inside 25% sidebar (top video tile + tools & controls)
+    assert.ok(
+      meetingCode.includes("h-[38%]") || meetingCode.includes("h-[49%]"),
+      "Must provide dedicated top video tile in sidebar"
+    );
+
+    // Header and dock decluttering checks
+    assert.ok(
+      meetingCode.includes("${isMobileLandscapeSplit ? \"hidden\" : \"\"}"),
+      "Header and footer dock must be hidden in 75/25 split mode to grant 100% vertical canvas height"
+    );
+
+    // Focus mode toggling support: collapses sidebar to grant 100% full screen
+    assert.ok(meetingCode.includes('isFocusMode ? "w-full" : "w-[75%]"'), "Focus mode must expand canvas to 100% width");
+  });
+
+  await t.test("SMF-13: 1-Tap Mobile Fullscreen Pill and document.documentElement targeting", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+    const mobileFullscreenCode = await fs.readFile("src/lib/mobileFullscreen.ts", "utf-8");
+
+    // 1-Tap mobile fullscreen banner exists in MeetingRoom for mobile when not in fullscreen
+    assert.ok(
+      meetingCode.includes("Tap for Full Screen"),
+      "Must provide 1-tap mobile fullscreen trigger when not in fullscreen"
+    );
+
+    // Sidebar bottom control button directly triggers toggleFullscreen
+    assert.ok(
+      meetingCode.includes("title={isFullscreen ? \"Exit Fullscreen\" : \"Enter Fullscreen (Hide Browser Bar)\"}"),
+      "Sidebar button must toggle native full screen to hide browser address bar"
+    );
+
+    // Fullscreen event listeners track document.fullscreenElement reactively
+    assert.ok(
+      meetingCode.includes("addEventListener(\"fullscreenchange\", handleFullscreenChange)"),
+      "Must listen to fullscreenchange event to keep isFullscreen state synchronized"
+    );
+
+    // mobileFullscreen utility prefers document.documentElement on mobile devices
+    assert.ok(
+      mobileFullscreenCode.includes("isMobile ? document.documentElement : (element || document.documentElement)"),
+      "Must target document.documentElement on mobile devices to collapse browser chrome cleanly"
+    );
+  });
+
+  await t.test("SMF-14: Mobile Landscape Inline Chat in Sidebar with Back Navigation", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+
+    // Must have mobileSidebarTab state supporting controls, chat, and participants
+    assert.ok(
+      meetingCode.includes("mobileSidebarTab") && meetingCode.includes("setMobileSidebarTab"),
+      "Must track mobileSidebarTab between controls, chat, and participants"
+    );
+
+    // Clicking chat button in sidebar switches tab to 'chat'
+    assert.ok(
+      meetingCode.includes("setMobileSidebarTab(\"chat\");"),
+      "Chat button must switch mobileSidebarTab to chat"
+    );
+
+    // Chat view contains a Back button to return to controls
+    assert.ok(
+      meetingCode.includes("onClick={() => setMobileSidebarTab(\"controls\")}"),
+      "Chat header must have Back button to return to controls menu"
+    );
+
+    // Chat view contains message feed, input field, and send button
+    assert.ok(meetingCode.includes("Class Chat"), "Chat button must have Class Chat title");
+    assert.ok(meetingCode.includes("handleSendMessage(mobileChatText.trim())"), "Chat form must send message via handleSendMessage");
+    assert.ok(meetingCode.includes("placeholder={isChatLocked && !isHost ? \"Chat locked\" : \"Message...\"}"), "Input must handle chat lock status");
+  });
+
+  await t.test("SMF-15: 100-Student Smart Participant Switcher & Directory with Persistent Video", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+
+    // Must have selectedCameraPeerId, participantSearch, and participantFilter states
+    assert.ok(meetingCode.includes("selectedCameraPeerId"), "Must track selectedCameraPeerId for camera swapping");
+    assert.ok(meetingCode.includes("participantSearch"), "Must support participant search for 100 students");
+    assert.ok(meetingCode.includes("participantFilter"), "Must support participant filtering (all, cameras, hands)");
+
+    // Pinned Tutor pill always available
+    assert.ok(meetingCode.includes("👑 Tutor"), "Must render pinned Tutor button");
+    assert.ok(meetingCode.includes("setSelectedCameraPeerId(null)"), "Tutor pill must reset camera to tutor");
+
+    // Directory switcher button
+    assert.ok(meetingCode.includes("setMobileSidebarTab(\"participants\")") || meetingCode.includes("setMobileSidebarTab(mobileSidebarTab === \"participants\""), "Must toggle participant directory");
+
+    // Persistent video tile on top with active camera resolution
+    assert.ok(meetingCode.includes("mobilePipTrack"), "Must resolve mobilePipTrack dynamically");
+    assert.ok(meetingCode.includes("mobilePipName"), "Must resolve active participant name");
+  });
+
+  await t.test("SMF-16: Mobile Sidebar Whiteboard Quick Tools & Canvas Top-Bar Decluttering", async () => {
+    const fs = await import("node:fs/promises");
+    const meetingCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+    const whiteboardCode = await fs.readFile("src/components/whiteboard/Whiteboard.tsx", "utf-8");
+
+    // Whiteboard hides top header on mobile landscape split
+    assert.ok(whiteboardCode.includes("hideTopBar?: boolean;"), "Whiteboard must accept hideTopBar prop");
+    assert.ok(whiteboardCode.includes("!hideTopBar &&"), "Top header must be conditionally hidden when hideTopBar is true");
+    assert.ok(meetingCode.includes("hideTopBar={isMobileLandscapeSplit}"), "MeetingRoom must pass hideTopBar to Whiteboard in split mode");
+
+    // Whiteboard action callbacks (ZoomToFit, ExportPdf) exposed to sidebar
+    assert.ok(whiteboardCode.includes("onRegisterActions?:"), "Whiteboard must expose onRegisterActions prop");
+    assert.ok(meetingCode.includes("whiteboardActionsRef"), "MeetingRoom must maintain whiteboard actions ref");
+
+    // Quick tools row in sidebar
+    assert.ok(meetingCode.includes("whiteboardActionsRef.current?.zoomToFit()"), "Sidebar must have Fit action");
+    assert.ok(meetingCode.includes("whiteboardActionsRef.current?.exportPdf()"), "Sidebar must have Notes PDF action");
+  });
 });
 

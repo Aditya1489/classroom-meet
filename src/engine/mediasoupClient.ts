@@ -58,9 +58,13 @@ export interface MicRequestEvent {
 
 export interface ControlMessageEvent {
   isControl: boolean;
-  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE";
+  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE" | "HAND_RAISE" | "HAND_LOWER";
   userId?: string;
   targetUserId?: string;
+  peerId?: string;
+  studentId?: string;
+  isHandRaised?: boolean;
+  raised?: boolean;
   name?: string;
   approved?: boolean;
   tutorName?: string;
@@ -440,6 +444,12 @@ export class MathsyMediasoupEngine {
       this.socket.on("disconnect", (reason) => {
         console.log("[MathsyMeet Engine] Socket disconnected:", reason);
         this.onConnectionStateChange?.("disconnected", reason);
+        try { this.sendTransport?.close(); } catch {}
+        try { this.recvTransport?.close(); } catch {}
+        this.sendTransport = null;
+        this.recvTransport = null;
+        this.consumers.clear();
+        this.producers.clear();
       });
 
 
@@ -465,10 +475,14 @@ export class MathsyMediasoupEngine {
           try {
             this.device = new Device();
             await this.device.load({ routerRtpCapabilities: data.routerRtpCapabilities });
-            await this.createTransports(roomId);
           } catch (err: any) {
             console.warn("[MathsyMeet Engine] Device init note:", err.message);
           }
+        }
+
+        // Always create/re-create fresh transports on this active socket connection
+        if (this.device?.loaded) {
+          await this.createTransports(roomId);
         }
 
         // Populate existing participants already in room
@@ -643,6 +657,9 @@ export class MathsyMediasoupEngine {
       // Handle initial active producers when joining (handles nested array [[p1, p2]])
       const handleActiveProducers = async (producers: any) => {
         console.log("[MathsyMeet Engine] activeProducers received:", producers);
+        if (!this.recvTransport && this.device?.loaded) {
+          await this.createTransports(roomId);
+        }
         const list: any[] = Array.isArray(producers) ? producers.flat(2) : [];
         for (const p of list) {
           if (!p || typeof p !== "object") continue;
@@ -858,8 +875,41 @@ export class MathsyMediasoupEngine {
             // Room isolation check
             const msgSender = msg.senderId || msg.userId;
             if (msgSender !== this.currentUserId) {
+              if (msg.whiteboardData.snapshot) {
+                this.whiteboardSnapshot = msg.whiteboardData.snapshot;
+              }
               this.onWhiteboardData?.(msg.whiteboardData);
             }
+          } else if (msg.controlAction === "HAND_RAISE") {
+            const targetId = msg.peerId || msg.userId || msg.senderId;
+            const isRaised = Boolean(msg.isHandRaised ?? msg.raised);
+            if (targetId) {
+              const p = this.participants.get(targetId);
+              if (p) p.isHandRaised = isRaised;
+              for (const [key, part] of this.participants.entries()) {
+                if (key.includes(targetId) || targetId.includes(key)) {
+                  part.isHandRaised = isRaised;
+                }
+              }
+              this.notifyParticipants();
+            }
+          } else if (msg.controlAction === "HAND_LOWER") {
+            const targetId = msg.targetUserId || msg.studentId || msg.userId;
+            if (!targetId || targetId === "all") {
+              for (const p of this.participants.values()) {
+                p.isHandRaised = false;
+              }
+            } else {
+              const p = this.participants.get(targetId);
+              if (p) p.isHandRaised = false;
+              for (const [key, part] of this.participants.entries()) {
+                if (key.includes(targetId) || targetId.includes(key)) {
+                  part.isHandRaised = false;
+                }
+              }
+            }
+            this.notifyParticipants();
+            this.onHandLowered?.(targetId);
           }
           return;
         }
@@ -990,10 +1040,32 @@ export class MathsyMediasoupEngine {
     });
   }
 
-  private async createTransports(roomId: string) {
+  private createTransportsPromise: Promise<void> | null = null;
+
+  private async createTransports(roomId: string): Promise<void> {
+    if (!this.device || !this.device.loaded) return;
+    if (this.createTransportsPromise) {
+      return this.createTransportsPromise;
+    }
+    this.createTransportsPromise = this._doCreateTransports(roomId).finally(() => {
+      this.createTransportsPromise = null;
+    });
+    return this.createTransportsPromise;
+  }
+
+  private async _doCreateTransports(roomId: string) {
     if (!this.device || !this.device.loaded) return;
 
     try {
+      if (this.sendTransport) {
+        try { this.sendTransport.close(); } catch {}
+        this.sendTransport = null;
+      }
+      if (this.recvTransport) {
+        try { this.recvTransport.close(); } catch {}
+        this.recvTransport = null;
+      }
+
       // Create both send and receive transports concurrently for minimal latency
       const [sendRes, recvRes] = await Promise.all([
         this.request("createWebRtcTransport", { producing: true, consuming: false }),
@@ -1131,7 +1203,16 @@ export class MathsyMediasoupEngine {
       });
 
       const data = res?.params || res;
-      if (!data || !data.id) {
+      if (!data || !data.id || res?.error) {
+        const errStr = String(res?.error || "");
+        if (errStr.toLowerCase().includes("transport") && errStr.toLowerCase().includes("not found")) {
+          console.warn("[MathsyMeet Engine] Stale transport detected on consume, recreating transports and retrying...", res.error);
+          this.recvTransport = null;
+          await this.createTransports(this.roomId || "");
+          if (this.recvTransport && this.device) {
+            return this.consumeTrack(producerId, peerId, kind, source);
+          }
+        }
         console.warn("[MathsyMeet Engine] consume failed: server response missing consumer id:", res);
         return;
       }
@@ -1338,9 +1419,13 @@ export class MathsyMediasoupEngine {
     this.broadcastMuteState(undefined, true);
   }
 
-  public async startScreenShare(): Promise<MediaStreamTrack | null> {
+  public async startScreenShare(controller?: any): Promise<MediaStreamTrack | null> {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const displayMediaOptions: any = { video: true, audio: true };
+      if (controller) {
+        displayMediaOptions.controller = controller;
+      }
+      const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
       const track = stream.getVideoTracks()[0];
       this.localScreenTrack = track;
 
@@ -1464,6 +1549,17 @@ export class MathsyMediasoupEngine {
     const payload = { peerId: this.currentUserId, isHandRaised: isRaised, raised: isRaised, name: senderName };
     this.socket?.emit("raiseHand", payload);
     this.socket?.emit("hand:toggle", payload);
+    this.socket?.emit("chatMessage", {
+      isControl: true,
+      controlAction: "HAND_RAISE",
+      peerId: this.currentUserId,
+      userId: this.currentUserId,
+      name: senderName,
+      isHandRaised: isRaised,
+      raised: isRaised,
+      roomCode: this.roomId,
+      timestamp: Date.now(),
+    });
   }
 
   public requestMic(userId: string, name: string, correlationId?: string) {
@@ -1581,6 +1677,9 @@ export class MathsyMediasoupEngine {
   }
 
   public broadcastWhiteboard(data: any) {
+    if (data?.snapshot) {
+      this.whiteboardSnapshot = data.snapshot;
+    }
     // 1. Wrap in chatMessage control channel to guarantee room-wide broadcast via Mediasoup socket relay
     const payload = {
       isControl: true,
@@ -1628,10 +1727,28 @@ export class MathsyMediasoupEngine {
 
   public lowerStudentHand(studentId?: string) {
     this.socket?.emit("hand:lower", { studentId });
+    this.socket?.emit("chatMessage", {
+      isControl: true,
+      controlAction: "HAND_LOWER",
+      targetUserId: studentId,
+      studentId,
+      roomCode: this.roomId,
+      timestamp: Date.now(),
+      isHost: true,
+    });
   }
 
   public lowerAllHands() {
     this.socket?.emit("hand:lowerAll");
+    this.socket?.emit("chatMessage", {
+      isControl: true,
+      controlAction: "HAND_LOWER",
+      targetUserId: "all",
+      all: true,
+      roomCode: this.roomId,
+      timestamp: Date.now(),
+      isHost: true,
+    });
   }
 
   public setChatLock(locked: boolean) {

@@ -167,11 +167,11 @@ export const dbClient = {
   /**
    * Participants
    */
-  async recordParticipantJoin(participant: DbParticipant): Promise<{ participant?: DbParticipant; isHost?: boolean; sessionId?: string; tutorId?: string } | null> {
+  async recordParticipantJoin(participant: DbParticipant, customToken?: string): Promise<{ participant?: DbParticipant; isHost?: boolean; sessionId?: string; tutorId?: string } | null> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(participant.room_code)}/participants`, {
         method: "POST",
-        headers: getAuthHeaders(undefined, participant.room_code),
+        headers: getAuthHeaders(customToken, participant.room_code),
         body: JSON.stringify({
           user_id: participant.user_id,
           display_name: participant.display_name,
@@ -323,7 +323,7 @@ export const dbClient = {
     try {
       await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, roomCode),
         body: JSON.stringify({ snapshot }),
       });
     } catch (err) {
@@ -335,7 +335,7 @@ export const dbClient = {
     try {
       await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard/state`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(undefined, roomCode),
         body: JSON.stringify({ isOpen }),
       });
     } catch (err) {
@@ -347,7 +347,7 @@ export const dbClient = {
     try {
       const res = await fetch(
         `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard`,
-        { headers: getAuthHeaders() }
+        { headers: getAuthHeaders(undefined, roomCode) }
       );
       if (!res.ok) return { snapshot: null, isOpen: false };
       const data = await res.json();
@@ -365,7 +365,7 @@ export const dbClient = {
     try {
       const res = await fetch(
         `${API_BASE}/rooms/${encodeURIComponent(roomCode)}/whiteboard`,
-        { headers: getAuthHeaders() }
+        { headers: getAuthHeaders(undefined, roomCode) }
       );
       if (!res.ok) return null;
       const data = await res.json();

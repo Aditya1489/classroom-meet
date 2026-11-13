@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   MathsyMediasoupEngine,
   RemoteParticipant,
@@ -17,6 +17,8 @@ import { ClassFeedSidepanel, ChatMsg, PollItem } from "./ClassFeedSidepanel";
 import { InfoDrawer } from "./InfoDrawer";
 import { Whiteboard } from "../whiteboard/Whiteboard";
 import { RecordingModal } from "../recording/RecordingModal";
+import { useDocumentPiP } from "../../hooks/useDocumentPiP";
+import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { useAuth } from "../../auth/authContext";
 import { dbClient, DbRoomKnock } from "../../lib/dbClient";
@@ -57,10 +59,16 @@ import {
   X,
   MoreHorizontal,
   ChevronDown,
+  ChevronLeft,
+  Send,
   SlidersHorizontal,
   RotateCcw,
   Minus,
   RotateCw,
+  Download,
+  ZoomIn,
+  Search,
+  FileUp,
 } from "lucide-react";
 import {
   isMobileDevice,
@@ -155,13 +163,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Host status is authorized server-side based on room ownership (live_classes.tutor_id === user.id)
   // Display names containing "tutor" or "host" confer ZERO privileges.
-  const [grantedRole, setGrantedRole] = useState<"tutor" | "student">(
-    initialOptions.isHost ? "tutor" : "student"
-  );
   const [isHost, setIsHost] = useState<boolean>(() => {
     const fromSession = typeof window !== "undefined" && window.sessionStorage.getItem(`mathsy_host_${meetingCode}`) === "true";
-    return Boolean(initialOptions.isHost && fromSession);
+    return Boolean(initialOptions.isHost || fromSession);
   });
+  const [grantedRole, setGrantedRole] = useState<"tutor" | "student">(
+    isHost ? "tutor" : (initialOptions.isHost ? "tutor" : "student")
+  );
 
   const isHostRef = useRef<boolean>(isHost);
   useEffect(() => {
@@ -185,6 +193,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     if (initialOptions.userId) return `${initialOptions.userId.replace(/_/g, "-")}-${tabId}`;
     if (profile?.id) return `${profile.id.replace(/_/g, "-")}-${tabId}`;
+    if (typeof window !== "undefined") {
+      try {
+        const savedUserStr = window.localStorage.getItem("mathsy_meet_user");
+        if (savedUserStr) {
+          const parsed = JSON.parse(savedUserStr);
+          if (parsed?.id) return `${parsed.id.replace(/_/g, "-")}-${tabId}`;
+        }
+      } catch {}
+    }
     return `usr-${tabId}-${Math.random().toString(36).substring(2, 7)}`;
   });
 
@@ -193,7 +210,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     myUserIdRef.current = myUserId;
   }, [myUserId]);
 
-  const myName = initialOptions.displayName || profile?.name || (isHost ? "Tutor" : "Student");
+  const myName =
+    initialOptions.displayName ||
+    profile?.name ||
+    (() => {
+      if (typeof window !== "undefined") {
+        try {
+          const savedUserStr = window.localStorage.getItem("mathsy_meet_user");
+          if (savedUserStr) {
+            const parsed = JSON.parse(savedUserStr);
+            if (parsed?.name || parsed?.full_name) return parsed.name || parsed.full_name;
+          }
+        } catch {}
+      }
+      return isHost ? "Tutor" : "Student";
+    })();
 
   // Connection State
   const [connectionState, setConnectionState] = useState<
@@ -242,6 +273,49 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   };
 
+  // Document Picture-in-Picture for Floating "Always-on-Top" Mini-View during Screen Share
+  const {
+    isPiPSupported,
+    pipWindow,
+    isPiPActive,
+    openPiP,
+    closePiP,
+  } = useDocumentPiP({
+    width: 340,
+    height: 480,
+  });
+
+  // Automatically support Document PiP on tab-switch / mediaSession in Chrome 120+
+  useEffect(() => {
+    if (!isScreenSharing) {
+      if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
+        try {
+          (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", null);
+        } catch {}
+      }
+      return;
+    }
+
+    if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
+      try {
+        (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", async () => {
+          console.log("[MeetingRoom] mediaSession enterpictureinpicture triggered");
+          await openPiP({ width: 340, height: 480 });
+        });
+      } catch (e) {
+        console.warn("[MeetingRoom] mediaSession setActionHandler enterpictureinpicture error:", e);
+      }
+    }
+
+    return () => {
+      if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
+        try {
+          (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", null);
+        } catch {}
+      }
+    };
+  }, [isScreenSharing, openPiP]);
+
   // Mobile Fullscreen & Landscape Orientation for student attendees
   const isMobile = isMobileDevice();
   const isStudentAttendee = !isHost && grantedRole !== "tutor";
@@ -264,7 +338,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // When student attendee joins on mobile devices, request native fullscreen & landscape
   useEffect(() => {
     if (isStudentAttendee && isMobile) {
-      enterMobileFullscreenAndLandscape(playerRef.current)
+      enterMobileFullscreenAndLandscape(document.documentElement)
         .then((res) => {
           if (res.fullscreen) setIsFullscreen(true);
           if (res.orientation) setIsLandscape(true);
@@ -278,12 +352,29 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
   }, [isStudentAttendee, isMobile]);
 
-  // Fullscreen State
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Fullscreen State & Change Listeners
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    if (typeof document === "undefined") return false;
+    return Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+  });
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const active = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      setIsFullscreen(active);
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
   const toggleFullscreen = async () => {
     try {
-      if (!document.fullscreenElement) {
-        const res = await enterMobileFullscreenAndLandscape(playerRef.current);
+      if (!document.fullscreenElement && !(document as any).webkitFullscreenElement) {
+        const res = await enterMobileFullscreenAndLandscape(document.documentElement);
         setIsFullscreen(true);
         if (res.orientation) setIsLandscape(true);
       } else {
@@ -291,6 +382,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         setIsFullscreen(false);
       }
     } catch (e) {
+      console.warn("[MeetingRoom] toggleFullscreen note:", e);
       setIsFullscreen(!isFullscreen);
     }
   };
@@ -309,6 +401,61 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [initialWhiteboardSnapshot, setInitialWhiteboardSnapshot] = useState<any>(null);
   const [remoteWhiteboardSnapshot, setRemoteWhiteboardSnapshot] = useState<any>(null);
   const [letStudentsDraw, setLetStudentsDraw] = useState(false);
+
+  // Active Room-Wide Whiteboard & Slide Persistence (Preserved across view toggles until host ends meeting)
+  const [roomWhiteboardSnapshot, setRoomWhiteboardSnapshot] = useState<any>(() => {
+    try {
+      if (typeof window !== "undefined" && meetingCode) {
+        const cached = localStorage.getItem(`mathsy_room_whiteboard_${meetingCode}`);
+        if (cached) return JSON.parse(cached)?.snapshot || null;
+      }
+    } catch {}
+    return null;
+  });
+  const [roomPresentationSlides, setRoomPresentationSlides] = useState<any[]>(() => {
+    try {
+      if (typeof window !== "undefined" && meetingCode) {
+        const cached = localStorage.getItem(`mathsy_room_whiteboard_${meetingCode}`);
+        if (cached) return JSON.parse(cached)?.slides || [];
+      }
+    } catch {}
+    return [];
+  });
+  const [roomSlideIndex, setRoomSlideIndex] = useState<number>(() => {
+    try {
+      if (typeof window !== "undefined" && meetingCode) {
+        const cached = localStorage.getItem(`mathsy_room_whiteboard_${meetingCode}`);
+        if (cached) return JSON.parse(cached)?.slideIndex || 0;
+      }
+    } catch {}
+    return 0;
+  });
+
+  const handleWhiteboardStateChange = useCallback((snapshot: any, slides?: any[], slideIndex?: number) => {
+    if (snapshot) {
+      setRoomWhiteboardSnapshot(snapshot);
+      if (engineRef.current) engineRef.current.whiteboardSnapshot = snapshot;
+    }
+    if (slides && slides.length > 0) {
+      setRoomPresentationSlides(slides);
+    }
+    if (typeof slideIndex === "number") {
+      setRoomSlideIndex(slideIndex);
+    }
+    try {
+      if (typeof window !== "undefined" && meetingCode) {
+        localStorage.setItem(
+          `mathsy_room_whiteboard_${meetingCode}`,
+          JSON.stringify({
+            snapshot: snapshot || roomWhiteboardSnapshot,
+            slides: (slides && slides.length > 0) ? slides : roomPresentationSlides,
+            slideIndex: typeof slideIndex === "number" ? slideIndex : roomSlideIndex,
+            updatedAt: Date.now(),
+          })
+        );
+      }
+    } catch {}
+  }, [meetingCode, roomWhiteboardSnapshot, roomPresentationSlides, roomSlideIndex]);
 
   // Tablet Companion Pairing Code
   const [tabletCode] = useState(() => generateTabletCode());
@@ -406,6 +553,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [pinnedMessage, setPinnedMessage] = useState<{ text: string; senderName: string } | null>(null);
   const [isChatLocked, setIsChatLocked] = useState(false);
+  const [mobileSidebarTab, setMobileSidebarTab] = useState<"controls" | "chat" | "participants">("controls");
+  const [mobileChatText, setMobileChatText] = useState("");
+  const mobileChatBottomRef = useRef<HTMLDivElement>(null);
+  const [selectedCameraPeerId, setSelectedCameraPeerId] = useState<string | null>(null);
+  const [participantSearch, setParticipantSearch] = useState("");
+  const [participantFilter, setParticipantFilter] = useState<"all" | "cameras" | "hands">("all");
+  const whiteboardActionsRef = useRef<{ zoomToFit: () => void; exportPdf: () => void; importFile?: () => void } | null>(null);
+
+  useEffect(() => {
+    if (mobileSidebarTab === "chat") {
+      mobileChatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatMessages, mobileSidebarTab]);
 
   // Polls State
   const [activePoll, setActivePoll] = useState<PollItem | null>(null);
@@ -581,7 +741,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         setIsHost(true);
         isHostRef.current = true;
         setGrantedRole("tutor");
-      } else {
+        window.sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
+      } else if (!isHostRef.current) {
+        // Only demote to student if the participant is not already an authorized room host.
+        // True room ownership is authoritative from PostgreSQL database (/api/rooms/:roomCode/participants),
+        // and cannot be stripped by unauthenticated media relay (SFU) events.
         setIsHost(false);
         isHostRef.current = false;
         setGrantedRole("student");
@@ -595,6 +759,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
       if (roomData?.whiteboardSnapshot) {
         setInitialWhiteboardSnapshot(roomData.whiteboardSnapshot);
+        setRoomWhiteboardSnapshot((prev: any) => prev || roomData.whiteboardSnapshot);
       }
       if (typeof roomData?.letStudentsDraw === "boolean") {
         setLetStudentsDraw(roomData.letStudentsDraw);
@@ -626,6 +791,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       console.log("[MeetingRoom] Engine notified screen share ended");
       setLocalScreenTrack(null);
       setIsScreenSharing(false);
+      closePiP();
       setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
     };
 
@@ -697,6 +863,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
 
     engine.onClassEnded = () => {
+      try {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(`mathsy_room_whiteboard_${meetingCode}`);
+        }
+      } catch {}
       setChatMessages([]);
       setIsChatLocked(true);
       setPinnedMessage(null);
@@ -826,17 +997,91 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
           }
         }
+      } else if (ctrl.controlAction === "HAND_RAISE") {
+        const targetId = (ctrl.peerId || ctrl.userId || ctrl.senderId || "").toLowerCase().replace(/_/g, "-");
+        const isRaised = Boolean(ctrl.isHandRaised ?? ctrl.raised);
+        if (targetId && isTargetMe) {
+          setIsHandRaised(isRaised);
+        } else {
+          setRemoteParticipants((prev) =>
+            prev.map((p) => {
+              const pId = (p.id || (p as any).peerId || "").toLowerCase().replace(/_/g, "-");
+              if (pId === targetId || pId.includes(targetId) || targetId.includes(pId)) {
+                return { ...p, isHandRaised: isRaised };
+              }
+              return p;
+            })
+          );
+        }
+        if (isHostRef.current && isRaised) {
+          toast.info(`${ctrl.name || "A student"} raised their hand!`, { id: `hand-${targetId}` });
+        }
+      } else if (ctrl.controlAction === "HAND_LOWER") {
+        const targetId = (ctrl.targetUserId || ctrl.studentId || ctrl.userId || "").toLowerCase().replace(/_/g, "-");
+        if (ctrl.all || targetId === "all") {
+          setIsHandRaised(false);
+          setRemoteParticipants((prev) => prev.map((p) => ({ ...p, isHandRaised: false })));
+        } else if (isTargetMe) {
+          setIsHandRaised(false);
+          toast.info("Your hand was lowered by the tutor", { id: "hand-lowered" });
+        } else {
+          setRemoteParticipants((prev) =>
+            prev.map((p) => {
+              const pId = (p.id || (p as any).peerId || "").toLowerCase().replace(/_/g, "-");
+              if (pId === targetId || pId.includes(targetId) || targetId.includes(pId)) {
+                return { ...p, isHandRaised: false };
+              }
+              return p;
+            })
+          );
+        }
       }
     };
 
+    engine.onHandLowered = (studentId) => {
+      const sId = (studentId || "").toLowerCase().replace(/_/g, "-");
+      const currentId = (myUserIdRef.current || myUserId || "").toLowerCase().replace(/_/g, "-");
+      if (!sId || sId === currentId || sId === "all") {
+        setIsHandRaised(false);
+      }
+      setRemoteParticipants((prev) =>
+        prev.map((p) => {
+          const pId = (p.id || (p as any).peerId || "").toLowerCase().replace(/_/g, "-");
+          if (!sId || sId === "all" || pId === sId) {
+            return { ...p, isHandRaised: false };
+          }
+          return p;
+        })
+      );
+    };
+
+    engine.onHandLowerAll = () => {
+      setIsHandRaised(false);
+      setRemoteParticipants((prev) => prev.map((p) => ({ ...p, isHandRaised: false })));
+    };
+
+    // Resolve auth token (embed, session, or stored mathsy_meet_token)
+    const authToken =
+      initialOptions.token ||
+      (typeof window !== "undefined"
+        ? window.sessionStorage.getItem(`mathsy_meet_embed_token_${meetingCode}`) ||
+          window.sessionStorage.getItem("mathsy_meet_embed_token") ||
+          window.localStorage.getItem("mathsy_meet_token")
+        : "") ||
+      session?.access_token ||
+      "";
+
     // Record self in room attendance in PostgreSQL with server-verified role
     dbClient
-      .recordParticipantJoin({
-        room_code: meetingCode,
-        user_id: myUserId,
-        display_name: myName,
-        role: isHostRef.current ? "tutor" : "student",
-      })
+      .recordParticipantJoin(
+        {
+          room_code: meetingCode,
+          user_id: myUserId,
+          display_name: myName,
+          role: isHostRef.current ? "tutor" : "student",
+        },
+        authToken
+      )
       .then((joinRes) => {
         if (joinRes) {
           if (joinRes.tutorId) {
@@ -879,15 +1124,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
-
-    const authToken =
-      initialOptions.token ||
-      (typeof window !== "undefined"
-        ? window.sessionStorage.getItem(`mathsy_meet_embed_token_${meetingCode}`) ||
-          window.sessionStorage.getItem("mathsy_meet_embed_token")
-        : "") ||
-      session?.access_token ||
-      "";
 
     // Connect to room session with verified server-issued session token
     engine
@@ -933,6 +1169,42 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       engine.disconnect();
     };
   }, [meetingCode]);
+
+  // Authoritative room ownership synchronization when async authentication resolves
+  useEffect(() => {
+    if (!profile?.id && !session?.access_token) return;
+    const token =
+      session?.access_token ||
+      (typeof window !== "undefined" ? window.localStorage.getItem("mathsy_meet_token") : "") ||
+      "";
+    dbClient
+      .recordParticipantJoin(
+        {
+          room_code: meetingCode,
+          user_id: myUserIdRef.current,
+          display_name: myName,
+          role: isHostRef.current ? "tutor" : "student",
+        },
+        token
+      )
+      .then((joinRes) => {
+        if (joinRes && joinRes.isHost) {
+          setIsHost(true);
+          isHostRef.current = true;
+          setGrantedRole("tutor");
+          setHasSpeakingPermission(true);
+          setUnmuteRequestStatus("approved");
+          window.sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
+          const engine = engineRef.current;
+          if (engine) {
+            engine.setIsHostUser(true);
+            if (joinRes.tutorId) {
+              engine.setAuthorizedTutorId(String(joinRes.tutorId));
+            }
+          }
+        }
+      });
+  }, [profile?.id, session?.access_token, meetingCode]);
 
   const handleMicError = (err: any) => {
     console.error("[MeetingRoom] Microphone access error:", err);
@@ -1028,6 +1300,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       engine.stopScreenShare();
       setLocalScreenTrack(null);
       setIsScreenSharing(false);
+      closePiP();
       setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
     } else {
       if (
@@ -1049,12 +1322,33 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         dbClient.setWhiteboardState(meetingCode, false);
       }
 
-      const track = await engine.startScreenShare();
+      // Smoothly transition focus to captured window/surface using CaptureController where supported
+      let controller: any = undefined;
+      if (typeof window !== "undefined" && "CaptureController" in window) {
+        try {
+          controller = new (window as any).CaptureController();
+          if (typeof controller.setFocusBehavior === "function") {
+            controller.setFocusBehavior("focus-captured-surface");
+          }
+        } catch (err) {
+          console.warn("[MeetingRoom] CaptureController warning:", err);
+        }
+      }
+
+      const track = await engine.startScreenShare(controller);
       if (track) {
         setLocalScreenTrack(track);
         setIsScreenSharing(true);
         setLayoutMode("screenshare");
         engine.broadcastScreenShareState(meetingCode, true, true);
+
+        // Immediately launch floating always-on-top Document PiP mini-meet overlay
+        try {
+          await openPiP({ width: 340, height: 480 });
+          toast.success("Floating mini-view opened (Always on top)", { id: "pip-launched" });
+        } catch (pipErr) {
+          console.warn("[MeetingRoom] Error launching Document PiP window:", pipErr);
+        }
       }
     }
   };
@@ -1454,6 +1748,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       } catch (err) {
         console.warn("[MeetingRoom] Error ending meeting on backend:", err);
       }
+      try {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(`mathsy_room_whiteboard_${meetingCode}`);
+        }
+      } catch {}
       setChatMessages([]);
       setShowPostClassModal(true);
     } else {
@@ -1477,18 +1776,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     },
     ...remoteParticipants
       .filter((p) => p.id !== myUserId && (p as any).peerId !== myUserId)
-      .map((p) => ({
-        id: p.id,
-        userId: (p as any).userId || p.id,
-        name: p.name,
-        role: p.role || "student",
-        audioTrack: p.audioTrack || null,
-        videoTrack: p.videoTrack || null,
-        screenTrack: p.screenTrack || null,
-        isAudioMuted: p.audioTrack ? Boolean(p.isAudioMuted && !p.audioTrack.enabled) : true,
-        isVideoMuted: p.videoTrack ? Boolean(p.isVideoMuted && !p.videoTrack.enabled) : true,
-        isHandRaised: p.isHandRaised ?? false,
-      })),
+      .map((p) => {
+        const isPeerHost = p.role === "host" || p.role === "tutor" || (p as any).isHost === true;
+        return {
+          id: p.id,
+          userId: (p as any).userId || p.id,
+          name: p.name,
+          role: isPeerHost ? "host" : (p.role || "student"),
+          audioTrack: p.audioTrack || null,
+          videoTrack: p.videoTrack || null,
+          screenTrack: p.screenTrack || null,
+          isAudioMuted: p.audioTrack ? Boolean(p.isAudioMuted && !p.audioTrack.enabled) : true,
+          isVideoMuted: p.videoTrack ? Boolean(p.isVideoMuted && !p.videoTrack.enabled) : true,
+          isHandRaised: p.isHandRaised ?? false,
+        };
+      }),
   ];
 
   // Active Screen Share track (local presenter or remote peer)
@@ -1510,6 +1812,62 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   }, [remoteScreenSharer?.screenTrack, isHost, showWhiteboard]);
 
   const totalRaisedHands = allParticipants.filter((p) => p.isHandRaised).length;
+
+  // Mobile Horizontal / Landscape 75/25 Split Layout Mode
+  // Activated strictly on mobile devices in horizontal orientation when Whiteboard or Screen Share is active
+  const isMobileLandscape = isMobile && isLandscape;
+  const isMobileLandscapeSplit = isMobileLandscape && (showWhiteboard || layoutMode === "whiteboard" || (layoutMode === "screenshare" && isAnyoneScreenSharing));
+
+  // Tutor / Presenter Peer & Floating PiP Media Resolution
+  const tutorPeer = allParticipants.find((p) => (p.role === "host" || p.role === "tutor") && p.id !== myUserId)
+    || remoteParticipants.find((p) => p.role === "host" || p.role === "tutor")
+    || remoteParticipants.find((p) => p.id !== myUserId);
+
+  const pipTrack = isHost
+    ? (isCamEnabled ? localVideoTrack : null)
+    : (tutorPeer?.videoTrack || null);
+
+  const pipName = isHost
+    ? "Host (You)"
+    : tutorPeer
+    ? (tutorPeer.name ? `${tutorPeer.name} (Tutor)` : "Tutor")
+    : "Tutor";
+
+  // Selected camera peer resolution in Mobile Landscape Split
+  const mobileActiveCameraPeer = selectedCameraPeerId
+    ? allParticipants.find((p) => p.id === selectedCameraPeerId) || tutorPeer
+    : tutorPeer;
+
+  const mobilePipTrack = isHost
+    ? (isCamEnabled ? localVideoTrack : null)
+    : (mobileActiveCameraPeer?.videoTrack || null);
+
+  const mobilePipName = isHost
+    ? `${myName} (You)`
+    : mobileActiveCameraPeer
+    ? (mobileActiveCameraPeer.name ? `${mobileActiveCameraPeer.name}${mobileActiveCameraPeer.role === "host" || mobileActiveCameraPeer.role === "tutor" ? " (Tutor)" : ""}` : "Tutor")
+    : "Tutor";
+
+  const mobileIsTutorSelected = !selectedCameraPeerId || selectedCameraPeerId === tutorPeer?.id;
+
+  // Broadcaster students (cameras on, not host, not self) for 100-student smart switcher
+  const broadcasterStudents = allParticipants.filter(
+    (p) => p.id !== myUserId && p.id !== tutorPeer?.id && p.role !== "host" && p.role !== "tutor" && Boolean(p.videoTrack)
+  );
+
+  const isCustomStudentSelected = selectedCameraPeerId && selectedCameraPeerId !== tutorPeer?.id && !broadcasterStudents.some((b) => b.id === selectedCameraPeerId);
+  const customSelectedPeer = isCustomStudentSelected ? allParticipants.find((p) => p.id === selectedCameraPeerId) : null;
+
+  // Filtered students for 100-student directory
+  const filteredStudents = allParticipants.filter((p) => {
+    if (participantFilter === "cameras" && !p.videoTrack) return false;
+    if (participantFilter === "hands" && !p.isHandRaised) return false;
+    if (participantSearch.trim()) {
+      const q = participantSearch.toLowerCase();
+      return p.name.toLowerCase().includes(q) || (p.role && p.role.toLowerCase().includes(q));
+    }
+    return true;
+  });
 
   return (
     <div
@@ -1538,7 +1896,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       <header
         className={`h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between z-20 backdrop-blur-md gap-2 ${
           isFocusMode ? "mathsy-focus-mode-header hidden" : ""
-        }`}
+        } ${isMobileLandscapeSplit ? "hidden" : ""}`}
       >
         {/* Left: Room Badge & Duration */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0">
@@ -1959,12 +2317,534 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </div>
         )}
 
-        <section className="flex-1 min-w-0 h-full relative p-3 flex flex-col justify-center items-center overflow-hidden">
-          {/* SCREEN SHARE PRESENTATION MODE */}
-          {layoutMode === "screenshare" && isAnyoneScreenSharing ? (
-            <div className="w-full h-full flex flex-col md:flex-row gap-3">
-              {/* Central Screen Presentation Canvas */}
-              <div className="flex-1 h-full min-h-0 relative bg-[#0e0d0b] rounded-2xl overflow-hidden flex items-center justify-center border border-white/10 shadow-2xl">
+        <section className={`flex-1 min-w-0 h-full relative ${isMobileLandscapeSplit ? "p-1 sm:p-1.5" : "p-3"} flex flex-col justify-center items-center overflow-hidden`}>
+          {isMobileLandscapeSplit ? (
+            /* ── MOBILE HORIZONTAL 75% / 25% SPLIT PRESENTATION STAGE ── */
+            <div className="w-full h-full flex flex-row gap-1.5 overflow-hidden relative select-none">
+              {/* LEFT 75%: EXPANSIVE WHITEBOARD / SCREENSHARE CANVAS */}
+              <div className={`h-full relative overflow-hidden rounded-xl border border-white/10 bg-[#0e0d0b] transition-all duration-300 ${
+                isFocusMode ? "w-full" : "w-[75%]"
+              }`}>
+                {/* 1-Tap Mobile Fullscreen Trigger (Hides browser URL bar and status bar) */}
+                {isMobile && !isFullscreen && (
+                  <button
+                    onClick={toggleFullscreen}
+                    className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
+                    title="Enter Full Screen Mode (Hide Browser Address Bar)"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Tap for Full Screen</span>
+                  </button>
+                )}
+                {showWhiteboard || layoutMode === "whiteboard" ? (
+                  <Whiteboard
+                    onClose={() => {
+                      setShowWhiteboard(false);
+                      setLayoutMode("grid");
+                      if (isHost) {
+                        engineRef.current?.broadcastWhiteboardState(meetingCode, false, true);
+                        dbClient.setWhiteboardState(meetingCode, false);
+                      }
+                    }}
+                    isHost={isHost || isPenDevice}
+                    roomCode={meetingCode}
+                    engine={engineRef.current}
+                    myUserId={myUserId}
+                    initialSnapshot={roomWhiteboardSnapshot || initialWhiteboardSnapshot || engineRef.current?.whiteboardSnapshot}
+                    initialSlides={roomPresentationSlides}
+                    initialSlideIndex={roomSlideIndex}
+                    onStateChange={handleWhiteboardStateChange}
+                    remoteSnapshot={remoteWhiteboardSnapshot}
+                    letStudentsDraw={letStudentsDraw}
+                    onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
+                    onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
+                    onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
+                    isFocusMode={isFocusMode}
+                    isMobile={isMobile}
+                    onToggleFullscreen={toggleFullscreen}
+                    isFullscreen={isFullscreen}
+                    hideTopBar={isMobileLandscapeSplit}
+                    onRegisterActions={(actions) => {
+                      whiteboardActionsRef.current = actions;
+                    }}
+                  />
+                ) : (
+                  <VideoTrackPlayer
+                    track={activeScreenTrack}
+                    className="w-full h-full object-contain select-none"
+                  />
+                )}
+              </div>
+
+              {/* RIGHT 25%: DEDICATED SIDEBAR (CAMERA TILE, PARTICIPANT SWITCHER, WHITEBOARD TOOLS, CONTROLS / INLINE VIEWS) */}
+              {!isFocusMode && (
+                <aside className="w-[25%] min-w-[140px] max-w-[280px] h-full flex flex-col justify-between bg-[#121215]/95 backdrop-blur-md border border-white/10 rounded-xl p-1 sm:p-1.5 z-20 shadow-2xl overflow-hidden shrink-0 gap-1">
+                  {/* 1. TOP VIDEO TILE: ACTIVE PARTICIPANT / TUTOR CAMERA */}
+                  <div className="h-[38%] min-h-[85px] w-full rounded-lg overflow-hidden bg-zinc-900 border border-white/10 shadow-lg relative flex items-center justify-center shrink-0">
+                    {mobilePipTrack ? (
+                      <VideoTrackPlayer
+                        track={mobilePipTrack}
+                        mirror={isHost && mobileIsTutorSelected}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-zinc-900/95 text-zinc-400 gap-0.5 p-1">
+                        <div className="w-7 h-7 sm:w-9 sm:h-9 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-xs border border-amber-500/30">
+                          {(mobilePipName || "T").charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-[8px] text-zinc-400 font-medium">Camera Off</span>
+                      </div>
+                    )}
+
+                    {/* Active Speaker Info Pill */}
+                    <div className="absolute bottom-1 left-1 right-1 bg-black/80 backdrop-blur-sm px-1.5 py-0.5 rounded text-[8px] font-bold text-white flex items-center justify-between">
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${mobilePipTrack ? "bg-emerald-400" : "bg-zinc-500"}`} />
+                        <span className="truncate">{mobilePipName}</span>
+                      </div>
+                      {mobileIsTutorSelected ? (
+                        <span className="text-[7px] text-amber-400 font-mono">TUTOR</span>
+                      ) : (
+                        <Radio className="w-2.5 h-2.5 text-emerald-400 animate-pulse shrink-0" />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 2. PARTICIPANT CAMERA SWITCHER ROW (100-STUDENT SCALED) */}
+                  <div className="flex items-center gap-1 overflow-x-auto no-scrollbar shrink-0 py-0.5 w-full">
+                    {/* Tutor Pill (Always Pinned First, Sticky) */}
+                    <button
+                      onClick={() => setSelectedCameraPeerId(null)}
+                      className={`px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-bold border transition shrink-0 flex items-center gap-1 cursor-pointer sticky left-0 z-10 ${
+                        mobileIsTutorSelected
+                          ? "bg-amber-500/25 text-amber-300 border-amber-400/60 shadow-sm"
+                          : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-white/10"
+                      }`}
+                      title="Switch to Tutor Camera"
+                    >
+                      <span>👑 Tutor</span>
+                    </button>
+
+                    {/* Dynamic Active Broadcaster Pills (Students with Camera On) */}
+                    {broadcasterStudents.slice(0, 2).map((p) => {
+                      const isSel = selectedCameraPeerId === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          onClick={() => setSelectedCameraPeerId(p.id)}
+                          className={`px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-medium border transition shrink-0 flex items-center gap-0.5 cursor-pointer ${
+                            isSel
+                              ? "bg-emerald-500/25 text-emerald-300 border-emerald-400/60 font-bold"
+                              : "bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/10"
+                          }`}
+                          title={`View ${p.name}'s Camera`}
+                        >
+                          <span className="truncate max-w-[48px]">{p.name.split(" ")[0]}</span>
+                          <Video className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
+                        </button>
+                      );
+                    })}
+
+                    {/* Custom Selected Peer (from directory) */}
+                    {customSelectedPeer && (
+                      <button
+                        className="px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-bold bg-amber-500/25 text-amber-300 border border-amber-400/60 shrink-0 flex items-center gap-0.5"
+                      >
+                        <span className="truncate max-w-[48px]">{customSelectedPeer.name.split(" ")[0]}</span>
+                      </button>
+                    )}
+
+                    {/* Directory Button (Opens 100-student directory) */}
+                    <button
+                      onClick={() => setMobileSidebarTab(mobileSidebarTab === "participants" ? "controls" : "participants")}
+                      className={`px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-semibold border transition shrink-0 flex items-center gap-0.5 ml-auto cursor-pointer ${
+                        mobileSidebarTab === "participants"
+                          ? "bg-blue-500/25 text-blue-300 border-blue-400/60 font-bold"
+                          : "bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/10"
+                      }`}
+                      title="Browse all participants"
+                    >
+                      <Users className="w-2.5 h-2.5 text-blue-400" />
+                      <span>{allParticipants.length}</span>
+                      <ChevronDown className="w-2.5 h-2.5 text-zinc-400" />
+                    </button>
+                  </div>
+
+                  {/* 3. LOWER SECTION: INLINE CHAT, INLINE DIRECTORY, OR MAIN CONTROLS MENU */}
+                  <div className="flex-1 min-h-0 w-full flex flex-col justify-between pt-0.5">
+                    {mobileSidebarTab === "chat" ? (
+                      /* ── INLINE COMPACT CHAT VIEW ── */
+                      <div className="h-full w-full flex flex-col min-h-0 justify-between">
+                        {/* Header: Back Button + Title */}
+                        <div className="flex items-center justify-between pb-1 shrink-0 border-b border-white/10">
+                          <button
+                            onClick={() => setMobileSidebarTab("controls")}
+                            className="flex items-center gap-0.5 text-[9px] font-bold text-amber-400 hover:text-amber-300 px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 transition cursor-pointer"
+                            title="Back to Controls Menu"
+                          >
+                            <ChevronLeft className="w-3 h-3" />
+                            <span>Back</span>
+                          </button>
+                          <div className="flex items-center gap-1 text-[9px] font-semibold text-zinc-300">
+                            <MessageSquare className="w-3 h-3 text-blue-400" />
+                            <span>Chat</span>
+                            <span className="text-zinc-500 text-[8px]">({chatMessages.length})</span>
+                          </div>
+                        </div>
+
+                        {/* Message Feed (Capped to last 150 for 100-student room performance) */}
+                        <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 py-1 px-0.5 select-text">
+                          {chatMessages.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-center p-2 text-zinc-500 text-[9px]">
+                              <span>No messages yet.</span>
+                              <span className="text-[8px] text-zinc-600">Ask a question below!</span>
+                            </div>
+                          ) : (
+                            chatMessages.slice(-150).map((msg) => {
+                              const isMe = msg.senderId === myUserId;
+                              return (
+                                <div
+                                  key={msg.id || msg.clientMessageId}
+                                  className={`flex flex-col text-[9px] leading-tight ${
+                                    isMe ? "items-end" : "items-start"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1 text-[7px] text-zinc-400 mb-0.5 px-0.5">
+                                    <span className={`font-semibold ${msg.isHost ? "text-amber-400" : isMe ? "text-emerald-400" : "text-zinc-300"}`}>
+                                      {msg.senderName}
+                                      {msg.isHost && " (Tutor)"}
+                                    </span>
+                                    <span>{msg.timestamp}</span>
+                                  </div>
+                                  <div
+                                    className={`px-2 py-1 rounded-lg break-words max-w-[92%] ${
+                                      isMe
+                                        ? "bg-amber-500/20 text-amber-200 border border-amber-500/30 rounded-tr-none"
+                                        : "bg-zinc-800 text-zinc-200 border border-white/10 rounded-tl-none"
+                                    }`}
+                                  >
+                                    {msg.message}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                          <div ref={mobileChatBottomRef} />
+                        </div>
+
+                        {/* Input Row */}
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            if (!mobileChatText.trim()) return;
+                            if (isChatLocked && !isHost) {
+                              toast.error("Chat is locked by tutor");
+                              return;
+                            }
+                            handleSendMessage(mobileChatText.trim());
+                            setMobileChatText("");
+                          }}
+                          className="flex items-center gap-1 pt-1 shrink-0 border-t border-white/10"
+                        >
+                          <input
+                            type="text"
+                            value={mobileChatText}
+                            onChange={(e) => setMobileChatText(e.target.value)}
+                            disabled={isChatLocked && !isHost}
+                            placeholder={isChatLocked && !isHost ? "Chat locked" : "Message..."}
+                            className="flex-1 min-w-0 bg-zinc-900 border border-white/10 focus:border-amber-400 text-white placeholder-zinc-500 text-[9px] px-2 py-1 rounded-md focus:outline-none transition"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!mobileChatText.trim() || (isChatLocked && !isHost)}
+                            className="w-7 h-7 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-zinc-950 font-bold rounded-md flex items-center justify-center shrink-0 transition cursor-pointer"
+                            title="Send Message"
+                          >
+                            <Send className="w-3 h-3" />
+                          </button>
+                        </form>
+                      </div>
+                    ) : mobileSidebarTab === "participants" ? (
+                      /* ── INLINE 100-STUDENT PARTICIPANT DIRECTORY VIEW ── */
+                      <div className="h-full w-full flex flex-col min-h-0 justify-between">
+                        {/* Header: Back + Title */}
+                        <div className="flex items-center justify-between pb-1 shrink-0 border-b border-white/10">
+                          <button
+                            onClick={() => setMobileSidebarTab("controls")}
+                            className="flex items-center gap-0.5 text-[9px] font-bold text-amber-400 hover:text-amber-300 px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 transition cursor-pointer"
+                            title="Back to Controls"
+                          >
+                            <ChevronLeft className="w-3 h-3" />
+                            <span>Back</span>
+                          </button>
+                          <div className="flex items-center gap-1 text-[9px] font-semibold text-zinc-300">
+                            <Users className="w-3 h-3 text-emerald-400" />
+                            <span>Students ({allParticipants.length})</span>
+                          </div>
+                        </div>
+
+                        {/* Search Input */}
+                        <div className="relative py-1 shrink-0">
+                          <Search className="w-3 h-3 absolute left-1.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                          <input
+                            type="text"
+                            value={participantSearch}
+                            onChange={(e) => setParticipantSearch(e.target.value)}
+                            placeholder={`Search ${allParticipants.length} students...`}
+                            className="w-full bg-zinc-900 border border-white/10 focus:border-amber-400 text-white placeholder-zinc-500 text-[8px] sm:text-[9px] pl-5 pr-5 py-1 rounded-md focus:outline-none transition"
+                          />
+                          {participantSearch && (
+                            <button
+                              onClick={() => setParticipantSearch("")}
+                              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Filter Tabs */}
+                        <div className="flex items-center gap-1 pb-1 shrink-0 text-[8px]">
+                          <button
+                            onClick={() => setParticipantFilter("all")}
+                            className={`px-1.5 py-0.5 rounded-full border transition cursor-pointer ${
+                              participantFilter === "all"
+                                ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold"
+                                : "bg-zinc-900 text-zinc-400 border-white/5 hover:text-zinc-200"
+                            }`}
+                          >
+                            All ({allParticipants.length})
+                          </button>
+                          <button
+                            onClick={() => setParticipantFilter("cameras")}
+                            className={`px-1.5 py-0.5 rounded-full border transition cursor-pointer flex items-center gap-0.5 ${
+                              participantFilter === "cameras"
+                                ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold"
+                                : "bg-zinc-900 text-zinc-400 border-white/5 hover:text-zinc-200"
+                            }`}
+                          >
+                            <span>Cameras ({allParticipants.filter((p) => p.videoTrack).length})</span>
+                          </button>
+                          <button
+                            onClick={() => setParticipantFilter("hands")}
+                            className={`px-1.5 py-0.5 rounded-full border transition cursor-pointer flex items-center gap-0.5 ${
+                              participantFilter === "hands"
+                                ? "bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold"
+                                : "bg-zinc-900 text-zinc-400 border-white/5 hover:text-zinc-200"
+                            }`}
+                          >
+                            <span>Hands ({totalRaisedHands})</span>
+                          </button>
+                        </div>
+
+                        {/* Scrollable Students List */}
+                        <div className="flex-1 min-h-0 overflow-y-auto space-y-1 py-0.5 px-0.5">
+                          {filteredStudents.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-center p-2 text-zinc-500 text-[8px]">
+                              <span>No students found.</span>
+                            </div>
+                          ) : (
+                            filteredStudents.map((p) => {
+                              const isCurrent = (selectedCameraPeerId === p.id) || (!selectedCameraPeerId && p.id === tutorPeer?.id);
+                              const isP = p.role === "host" || p.role === "tutor";
+                              return (
+                                <div
+                                  key={p.id}
+                                  onClick={() => {
+                                    setSelectedCameraPeerId(p.id === tutorPeer?.id ? null : p.id);
+                                    setMobileSidebarTab("controls");
+                                    toast.info(`Viewing ${p.name}'s camera`, { id: "switch-cam" });
+                                  }}
+                                  className={`w-full flex items-center justify-between p-1 rounded-lg border transition cursor-pointer text-[9px] ${
+                                    isCurrent
+                                      ? "bg-amber-500/15 border-amber-500/40 text-amber-200 font-semibold"
+                                      : "bg-zinc-900/80 hover:bg-zinc-800 border-white/5 text-zinc-300"
+                                  }`}
+                                  title="Tap to view camera in top box"
+                                >
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0 ${
+                                      isP ? "bg-amber-500/20 text-amber-300 border border-amber-400/30" : "bg-zinc-800 text-zinc-300"
+                                    }`}>
+                                      {isP ? "👑" : p.name.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div className="flex flex-col min-w-0">
+                                      <div className="flex items-center gap-1">
+                                        <span className="truncate max-w-[70px]">{p.name}</span>
+                                        {p.id === myUserId && <span className="text-[7px] text-zinc-500">(You)</span>}
+                                        {isP && <span className="text-[7px] text-amber-400 font-mono">TUTOR</span>}
+                                      </div>
+                                      <span className="text-[7px] text-zinc-500">
+                                        {p.videoTrack ? "Camera on" : "Audio only"}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {p.isHandRaised && <Hand className="w-2.5 h-2.5 text-amber-400" />}
+                                    {p.videoTrack ? (
+                                      <Video className="w-3 h-3 text-emerald-400" />
+                                    ) : (
+                                      <VideoOff className="w-3 h-3 text-zinc-600" />
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      /* ── MAIN MENU: WHITEBOARD TOOLS, 2x2 CONTROLS & STATUS/LEAVE ── */
+                      <>
+                        {/* Whiteboard Quick Tools Row (Import for Tutor, Fit, Notes PDF, Fullscreen) - SHOWN ONLY IN MAIN MENU */}
+                        <div className={`grid ${isHost ? "grid-cols-4" : "grid-cols-3"} gap-1 py-0.5 shrink-0`}>
+                          {isHost && (
+                            <button
+                              onClick={() => whiteboardActionsRef.current?.importFile?.()}
+                              title="Import PDF, PPTX or Image"
+                              className="h-6 px-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-400/40 flex items-center justify-center gap-0.5 text-[8px] sm:text-[9px] font-semibold transition active:scale-95 cursor-pointer"
+                            >
+                              <FileUp className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                              <span className="truncate">Import</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => whiteboardActionsRef.current?.zoomToFit()}
+                            title="Fit Drawings to Screen"
+                            className="h-6 px-1 rounded-md bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-white/10 flex items-center justify-center gap-1 text-[8px] sm:text-[9px] font-semibold transition active:scale-95 cursor-pointer"
+                          >
+                            <ZoomIn className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                            <span>Fit</span>
+                          </button>
+                          <button
+                            onClick={() => whiteboardActionsRef.current?.exportPdf()}
+                            title="Download Classroom Notes as PDF"
+                            className="h-6 px-1 rounded-md bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border border-white/10 flex items-center justify-center gap-1 text-[8px] sm:text-[9px] font-semibold transition active:scale-95 cursor-pointer"
+                          >
+                            <Download className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                            <span className="truncate">{isHost ? "Notes" : "Notes PDF"}</span>
+                          </button>
+                          <button
+                            onClick={toggleFullscreen}
+                            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen (Hide Browser Bar)"}
+                            className={`h-6 px-1 rounded-md border flex items-center justify-center gap-1 text-[8px] sm:text-[9px] font-semibold transition active:scale-95 cursor-pointer ${
+                              isFullscreen
+                                ? "bg-amber-500/20 text-amber-300 border-amber-400/50"
+                                : "bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 border-white/10"
+                            }`}
+                          >
+                            {isFullscreen ? (
+                              <Minimize2 className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                            ) : (
+                              <Maximize2 className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                            )}
+                            <span>{isFullscreen ? "Exit" : "Full"}</span>
+                          </button>
+                        </div>
+
+                        {/* 2x2 Circular Buttons Grid */}
+                        <div className="grid grid-cols-2 gap-1.5 my-auto justify-items-center py-1">
+                          {/* Mic */}
+                          <button
+                            onClick={handleToggleMic}
+                            className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                              isMicEnabled
+                                ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                                : unmuteRequestStatus === "requesting"
+                                ? "bg-amber-500 text-white animate-pulse"
+                                : hasSpeakingPermission
+                                ? "bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50"
+                                : "bg-red-600 hover:bg-red-700 text-white"
+                            }`}
+                            title={isMicEnabled ? "Mute Microphone" : "Unmute Microphone"}
+                          >
+                            {isMicEnabled ? <Mic className="w-4 h-4 text-emerald-400" /> : <MicOff className="w-4 h-4 text-white" />}
+                          </button>
+
+                          {/* Camera */}
+                          <button
+                            onClick={handleCameraToggle}
+                            className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                              isCamEnabled
+                                ? "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                                : "bg-red-600 hover:bg-red-700 text-white"
+                            }`}
+                            title={isCamEnabled ? "Turn off camera" : "Turn on camera"}
+                          >
+                            {isCamEnabled ? <Video className="w-4 h-4 text-emerald-400" /> : <VideoOff className="w-4 h-4 text-white" />}
+                          </button>
+
+                          {/* Raise Hand or Screen Share */}
+                          {!isHost ? (
+                            <button
+                              onClick={handleToggleRaiseHand}
+                              className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                                isHandRaised
+                                  ? "bg-amber-500 text-zinc-950 font-bold shadow-lg shadow-amber-500/30 animate-pulse border border-amber-300"
+                                  : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                              }`}
+                              title={isHandRaised ? "Lower Hand" : "Raise Hand"}
+                            >
+                              <Hand className={`w-4 h-4 ${isHandRaised ? "text-zinc-950" : "text-amber-400"}`} />
+                            </button>
+                          ) : (
+                            <button
+                              onClick={handleToggleScreenShare}
+                              className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition shadow-md cursor-pointer ${
+                                isScreenSharing
+                                  ? "bg-[#1a73e8] text-white border border-[#1a73e8]/30 shadow-lg"
+                                  : "bg-zinc-800 text-white hover:bg-zinc-700 border border-white/10"
+                              }`}
+                              title={isScreenSharing ? "Stop sharing" : "Share screen"}
+                            >
+                              {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
+                            </button>
+                          )}
+
+                          {/* Chat */}
+                          <button
+                            onClick={() => {
+                              setMobileSidebarTab("chat");
+                              setUnreadChatCount(0);
+                            }}
+                            className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white flex items-center justify-center border border-white/10 transition shadow-md relative cursor-pointer"
+                            title="Class Chat"
+                          >
+                            <MessageSquare className="w-4 h-4 text-blue-400" />
+                            {unreadChatCount > 0 && (
+                              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[8px] font-bold px-1.5 py-0.2 rounded-full border border-black animate-pulse">
+                                {unreadChatCount}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Bottom Status & Leave Button Row */}
+                        <div className="flex items-center justify-between gap-1 w-full pt-1 border-t border-white/10 shrink-0">
+                          <div className="flex items-center gap-1 text-[8px] font-mono text-zinc-400">
+                            <span className="truncate max-w-[60px] font-semibold">{meetingCode}</span>
+                            <span>•</span>
+                            <span className="text-emerald-400">{formatDuration(elapsedSeconds)}</span>
+                          </div>
+                          <button
+                            onClick={onLeaveMeeting}
+                            className="h-6 px-2.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold text-[9px] sm:text-[10px] flex items-center gap-1 shadow-md shadow-red-600/30 transition cursor-pointer"
+                          >
+                            <LogOut className="w-2.5 h-2.5" />
+                            <span>Leave</span>
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </aside>
+              )}
+            </div>
+          ) : layoutMode === "screenshare" && isAnyoneScreenSharing ? (
+            <div className="w-full h-full relative">
+              {/* Central Screen Presentation Canvas (Full Stage, Clean & Unobstructed) */}
+              <div className="w-full h-full relative bg-[#0e0d0b] rounded-2xl overflow-hidden flex items-center justify-center border border-white/10 shadow-2xl">
                 <VideoTrackPlayer
                   track={activeScreenTrack}
                   className="w-full h-full object-contain select-none"
@@ -1984,6 +2864,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       Stop Sharing
                     </button>
                   )}
+                  {isScreenSharing && !isPiPActive && (
+                    <button
+                      onClick={() => openPiP({ width: 340, height: 480 })}
+                      title="Pop out floating mini-window (Always on top)"
+                      className="flex items-center gap-1 text-[10px] bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold px-2 py-0.5 rounded-md transition cursor-pointer active:scale-95 shadow-sm"
+                    >
+                      <ExternalLink className="w-3 h-3 text-[#f59e0b]" />
+                      <span>Pop Out Mini-View</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Top-Right Focus Mode Toggle */}
@@ -2001,67 +2891,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     <span className="font-mono text-[11px]">{isFocusMode ? "Normal" : "Focus"}</span>
                   </button>
                 </div>
-
-                {/* Floating PIP for Host/Presenter Camera (When alone or compact view) */}
-                {allParticipants.length === 1 && isCamEnabled && localVideoTrack && (
-                  <div className="absolute bottom-4 right-4 w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-20">
-                    <VideoTrackPlayer
-                      track={localVideoTrack}
-                      mirror={true}
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute bottom-1.5 left-1.5 bg-black/80 px-2 py-0.5 rounded text-[9px] font-bold text-white flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                      Host (You)
-                    </div>
-                  </div>
-                )}
               </div>
-
-              {/* Sidebar Carousel of Participants (Tutor + Students) - Hidden in Focus Mode */}
-              {allParticipants.length > 1 && !isFocusMode && (
-                <div className="w-full md:w-56 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto shrink-0 pb-1 md:pb-0">
-                  {allParticipants.map((p) => (
-                    <VideoTile
-                      key={p.id}
-                      id={p.id}
-                      name={p.name}
-                      avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
-                      videoTrack={p.videoTrack}
-                      audioTrack={p.audioTrack}
-                      isAudioMuted={p.isAudioMuted}
-                      isVideoMuted={p.isVideoMuted}
-                      isLocal={p.id === myUserId}
-                      isHost={p.role === "host"}
-                      isViewerHost={isHost}
-                      isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
-                      isHandRaised={p.isHandRaised}
-                      isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
-                      onApproveMic={() => {
-                        const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
-                        handleApproveMic(m?.userId || p.id, p.name);
-                      }}
-                      onDenyMic={() => {
-                        const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
-                        handleDenyMic(m?.userId || p.id, p.name);
-                      }}
-                      isPinned={false}
-                      onTogglePin={() => {
-                        setLayoutMode("spotlight");
-                        setPinnedId(p.id);
-                      }}
-                      onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
-                      onForceMute={() => handleForceMuteStudent(p.id, p.name)}
-                      onExpel={() => handleExpelStudent(p.id, p.name)}
-                      className="w-48 md:w-full aspect-video shrink-0"
-                    />
-                  ))}
-                </div>
-              )}
             </div>
           ) : showWhiteboard || layoutMode === "whiteboard" ? (
             /* COLLABORATIVE WHITEBOARD MODE WITH TLDraw & GEOMETRY TOOLS */
             <div className="w-full h-full relative rounded-2xl overflow-hidden border border-white/10">
+              {/* 1-Tap Mobile Fullscreen Trigger (Hides browser URL bar and status bar) */}
+              {isMobile && !isFullscreen && (
+                <button
+                  onClick={toggleFullscreen}
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
+                  title="Enter Full Screen Mode (Hide Browser Address Bar)"
+                >
+                  <Maximize2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>Tap for Full Screen</span>
+                </button>
+              )}
               <Whiteboard
                 onClose={() => {
                   setShowWhiteboard(false);
@@ -2075,7 +2920,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 roomCode={meetingCode}
                 engine={engineRef.current}
                 myUserId={myUserId}
-                initialSnapshot={initialWhiteboardSnapshot}
+                initialSnapshot={roomWhiteboardSnapshot || initialWhiteboardSnapshot || engineRef.current?.whiteboardSnapshot}
+                initialSlides={roomPresentationSlides}
+                initialSlideIndex={roomSlideIndex}
+                onStateChange={handleWhiteboardStateChange}
                 remoteSnapshot={remoteWhiteboardSnapshot}
                 letStudentsDraw={letStudentsDraw}
                 onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
@@ -2083,20 +2931,34 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
                 isFocusMode={isFocusMode}
                 isMobile={isMobile}
+                onToggleFullscreen={toggleFullscreen}
+                isFullscreen={isFullscreen}
               />
               {/* Floating PIP Camera (Relocated on mobile to top-right to prevent canvas collision, with 1-tap minimize) */}
               {(() => {
-                const hostPeer = allParticipants.find((p) => p.role === "host");
+                // Determine target participant for this floating box:
+                // - If isHost (Tutor): Tutor sees their own camera preview ("Host (You)")
+                // - If student (!isHost): Student MUST ONLY see the Tutor's camera in this box!
+                const tutorPeer = allParticipants.find((p) => (p.role === "host" || p.role === "tutor") && p.id !== myUserId)
+                  || remoteParticipants.find((p) => p.role === "host" || p.role === "tutor")
+                  || remoteParticipants.find((p) => p.id !== myUserId);
+
                 const pipTrack = isHost
                   ? (isCamEnabled ? localVideoTrack : null)
-                  : (hostPeer?.videoTrack || (isCamEnabled ? localVideoTrack : null));
-                const pipName = isHost
-                  ? "You (Host)"
-                  : hostPeer?.videoTrack
-                  ? (hostPeer.name || "Tutor (Host)")
-                  : "You";
+                  : (tutorPeer?.videoTrack || null);
 
-                if (!pipTrack || isFocusMode) return null;
+                const pipName = isHost
+                  ? "Host (You)"
+                  : tutorPeer
+                  ? (tutorPeer.name ? `${tutorPeer.name} (Tutor)` : "Tutor")
+                  : "Tutor";
+
+                // If in focus mode, hide PiP
+                if (isFocusMode) return null;
+                // If isHost and tutor has camera turned off, hide box so canvas isn't blocked
+                if (isHost && !pipTrack) return null;
+                // If student is viewing and no remote tutor/peer is present yet, hide box
+                if (!isHost && !tutorPeer) return null;
 
                 if (isPipMinimized) {
                   return (
@@ -2113,11 +2975,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
                 return (
                   <div className="absolute bottom-20 right-3 w-20 sm:w-28 md:bottom-4 md:right-4 md:w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group">
-                    <VideoTrackPlayer
-                      track={pipTrack}
-                      mirror={pipTrack === localVideoTrack}
-                      className="w-full h-full object-cover"
-                    />
+                    {pipTrack ? (
+                      <VideoTrackPlayer
+                        track={pipTrack}
+                        mirror={isHost}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-zinc-900/95 text-zinc-400 gap-0.5 p-1">
+                        <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-[10px] sm:text-xs border border-amber-500/30">
+                          {(pipName || "T").charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-[7px] sm:text-[9px] text-zinc-400 font-medium truncate max-w-[90%]">
+                          Camera Off
+                        </span>
+                      </div>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -2129,7 +3002,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                       <Minus className="w-2.5 h-2.5" />
                     </button>
                     <div className="absolute bottom-1 left-1 bg-black/80 px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-bold text-white flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span className={`w-1.5 h-1.5 rounded-full ${pipTrack ? "bg-emerald-400" : "bg-zinc-500"}`} />
                       <span className="truncate max-w-[70px] sm:max-w-[100px]">{pipName}</span>
                     </div>
                   </div>
@@ -2355,7 +3228,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       <footer
         className={`h-16 sm:h-20 shrink-0 bg-[#18191c] border-t border-white/10 flex items-center justify-between px-3 sm:px-6 md:px-8 z-30 select-none pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ${
           isFocusMode ? "mathsy-focus-mode-dock hidden" : ""
-        }`}
+        } ${isMobileLandscapeSplit ? "hidden" : ""}`}
       >
         {/* Desktop / Tablet Controls Bar (>= 768px) */}
         <div className="hidden md:flex items-center justify-between w-full">
@@ -2434,6 +3307,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 title={isScreenSharing ? "Stop sharing screen" : "Share screen"}
               >
                 {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+              </button>
+            )}
+
+            {/* Pop Out Mini-View Button (When screen sharing & PiP window was closed) */}
+            {isHost && isScreenSharing && !isPiPActive && (
+              <button
+                onClick={() => openPiP({ width: 340, height: 480 })}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold transition shadow-md cursor-pointer active:scale-95"
+                title="Pop out floating mini-window (Always on top)"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[#f59e0b]" />
+                <span>Mini-View</span>
               </button>
             )}
           </div>
@@ -2924,6 +3809,27 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         open={showYouTubeConnectModal}
         onOpenChange={setShowYouTubeConnectModal}
       />
+
+      {/* Floating Always-on-Top Mini-Meet Overlay (Document Picture-in-Picture Portal) */}
+      {pipWindow && (
+        <FloatingMeetOverlay
+          pipWindow={pipWindow}
+          remoteParticipants={remoteParticipants}
+          localVideoTrack={localVideoTrack}
+          localAudioTrack={localAudioTrack}
+          isAudioMuted={!isMicEnabled}
+          isVideoMuted={!isCamEnabled}
+          activeSpeakerId={remoteParticipants.find((p) => !p.isAudioMuted && Boolean(p.audioTrack))?.id || null}
+          myUserId={myUserId}
+          myName={myName}
+          chatMessages={chatMessages}
+          onSendMessage={handleSendMessage}
+          onToggleMute={handleToggleMic}
+          onToggleVideo={handleCameraToggle}
+          onStopScreenShare={handleToggleScreenShare}
+          onClosePiP={closePiP}
+        />
+      )}
     </div>
   );
 };

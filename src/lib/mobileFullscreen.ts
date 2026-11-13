@@ -44,7 +44,10 @@ export async function enterMobileFullscreenAndLandscape(
 
   // 1. Enter Fullscreen Mode
   try {
-    const target = element || document.documentElement;
+    // On mobile devices, target document.documentElement to ensure the browser URL bar collapses cleanly
+    const isMobile = isMobileDevice();
+    const target = isMobile ? document.documentElement : (element || document.documentElement);
+
     if (document.fullscreenElement || (document as any).webkitFullscreenElement) {
       fullscreenSuccess = true;
     } else if (target.requestFullscreen) {

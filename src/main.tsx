@@ -1,3 +1,8 @@
+// Global Iterator polyfill for Chromium < 122 & older mobile WebViews
+if (typeof (globalThis as any).Iterator === "undefined") {
+  (globalThis as any).Iterator = class Iterator {};
+}
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";

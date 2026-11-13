@@ -147,6 +147,10 @@ export default function App() {
           if (activeSession) {
             try {
               const parsedOptions = JSON.parse(activeSession);
+              if (wasHost) {
+                parsedOptions.isHost = true;
+                parsedOptions.role = "tutor";
+              }
               setJoinOptions(parsedOptions);
               setCurrentView("room");
               return;

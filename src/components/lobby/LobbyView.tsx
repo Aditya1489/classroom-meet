@@ -82,7 +82,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const [isOwner, setIsOwner] = useState(false);
   const [isRoomHost, setIsRoomHost] = useState<boolean>(() => {
     const fromSession = typeof window !== "undefined" && sessionStorage.getItem(`mathsy_host_${meetingCode}`) === "true";
-    return Boolean(isHostFromLanding && fromSession);
+    return Boolean(isHostFromLanding || fromSession);
   });
   const [isAskingToJoin, setIsAskingToJoin] = useState(false);
   const [activeKnockId, setActiveKnockId] = useState<string | null>(null);
@@ -223,7 +223,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             setIsOwner(true);
             setSelectedRole("tutor");
             sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
-          } else {
+          } else if (!isHostFromLanding && sessionStorage.getItem(`mathsy_host_${meetingCode}`) !== "true") {
             setIsRoomHost(false);
             setIsOwner(false);
             setSelectedRole("student");
@@ -243,6 +243,11 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
     setIsSubmittingKnock(true);
     setAdmissionError(null);
+
+    // Pre-request fullscreen during this user gesture on mobile
+    if (!isRoomHost && isMobileDevice()) {
+      enterMobileFullscreenAndLandscape(document.documentElement).catch(() => {});
+    }
 
     try {
       // If room is known to not be active yet, keep student waiting gracefully in lobby
