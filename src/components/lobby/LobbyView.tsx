@@ -272,6 +272,9 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
       }
 
       if (res.status === "waiting_for_host" || (res as any).isWaitingForHost) {
+        if (res.knock?.id) {
+          setActiveKnockId(res.knock.id);
+        }
         setKnockStatus("waiting_for_host");
         setIsAskingToJoin(true);
         toast.info("Class hasn't started yet. Waiting for tutor to start...");
@@ -316,7 +319,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
   // Poll knock status while waiting for host admission (Google Meet style)
   useEffect(() => {
-    if (!isAskingToJoin || !activeKnockId || knockStatus !== "pending") return;
+    if (!isAskingToJoin || !activeKnockId || (knockStatus !== "pending" && knockStatus !== "waiting_for_host")) return;
 
     const pollInterval = setInterval(async () => {
       try {
@@ -335,6 +338,8 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
           setKnockStatus("denied");
           setAdmissionError("The meeting host declined your request to join this class session.");
           toast.error("The meeting host declined your request to join.");
+        } else if (res.status === "pending" && knockStatus === "waiting_for_host") {
+          setKnockStatus("pending");
         }
       } catch (e) {
         // Continue polling silently

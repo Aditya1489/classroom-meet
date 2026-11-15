@@ -1819,46 +1819,48 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     }, 150);
   };
 
-  // Reconcile participant departures with authoritative database presence
+  // Authoritative database participant reconciliation:
+  // PostgreSQL room_participants (left_at IS NULL) is the single source of truth for who is admitted & active.
+  // Any remote participant tile that has NO active media tracks AND is NOT active in the database is pruned as a ghost peer.
   useEffect(() => {
     if (!meetingCode) return;
-    const interval = setInterval(async () => {
+
+    const reconcileWithDb = async () => {
       try {
         const dbParticipants = await dbClient.getParticipants(meetingCode);
-        if (Array.isArray(dbParticipants) && remoteParticipants.length > 0) {
-          const leftUserIds = new Set(
-            dbParticipants
-              .filter((p) => p.left_at)
-              .map((p) => p.user_id)
-              .filter(Boolean)
-          );
-          const leftNames = new Set(
-            dbParticipants
-              .filter((p) => p.left_at)
-              .map((p) => (p.display_name || "").trim().toLowerCase())
-              .filter(Boolean)
+        if (Array.isArray(dbParticipants)) {
+          const activeUserIds = new Set(dbParticipants.map((p) => p.user_id).filter(Boolean));
+          const activeNames = new Set(
+            dbParticipants.map((p) => (p.display_name || "").trim().toLowerCase()).filter(Boolean)
           );
 
-          if (leftUserIds.size > 0 || leftNames.size > 0) {
-            setRemoteParticipants((prev) =>
-              prev.filter((p) => {
-                const isLeft =
-                  leftUserIds.has(p.id) ||
-                  (p.userId && leftUserIds.has(p.userId)) ||
-                  (p.name && leftNames.has(p.name.trim().toLowerCase()));
-                if (isLeft) {
-                  console.log(`[MeetingRoom] Pruning departed participant: ${p.name} (${p.id})`);
-                  engineRef.current?.removeParticipant(p.id, p.name);
-                }
-                return !isLeft;
-              })
-            );
-          }
+          setRemoteParticipants((prev) => {
+            const next = prev.filter((p) => {
+              const hasActiveMedia = Boolean(p.audioTrack || p.videoTrack || p.screenTrack);
+              const isDbActive =
+                activeUserIds.has(p.id) ||
+                (p.userId && activeUserIds.has(p.userId)) ||
+                (p.name && activeNames.has(p.name.trim().toLowerCase()));
+
+              // If peer is not in active database participants and has no active media stream, prune immediately
+              const isGhost = !hasActiveMedia && !isDbActive;
+              if (isGhost) {
+                console.log(`[MeetingRoom] Pruning ghost peer from remote participants: ${p.name} (${p.id})`);
+                engineRef.current?.removeParticipant(p.id, p.name);
+                return false;
+              }
+              return true;
+            });
+            return next.length === prev.length ? prev : next;
+          });
         }
       } catch {
         // silent sync
       }
-    }, 5000);
+    };
+
+    reconcileWithDb();
+    const interval = setInterval(reconcileWithDb, 2000);
 
     return () => clearInterval(interval);
   }, [meetingCode, remoteParticipants.length]);

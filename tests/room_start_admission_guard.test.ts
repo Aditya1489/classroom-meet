@@ -177,7 +177,7 @@ describe("Room Start Admission Guard & Unstarted Room Containment", () => {
     try {
       await query("DELETE FROM room_knocks WHERE room_code = $1", [testRoomCode]);
       await query("DELETE FROM room_participants WHERE room_code = $1", [testRoomCode]);
-      await query("DELETE FROM rooms WHERE room_code = $1", [testRoomCode]);
+      await query("DELETE FROM live_classes WHERE room_code = $1", [testRoomCode]);
       await query("DELETE FROM users WHERE id IN ($1, $2)", [hostId, studentId]);
     } catch {}
   });
@@ -205,5 +205,135 @@ describe("Room Start Admission Guard & Unstarted Room Containment", () => {
       meetingCode.includes('joinRes.code === "CLASS_NOT_STARTED"'),
       "MeetingRoom must redirect non-hosts if class has not started"
     );
+
+    // MeetingRoom must prune ghost peers without active media tracks
+    assert.ok(
+      meetingCode.includes("Pruning ghost peer from remote participants"),
+      "MeetingRoom must prune ghost peers without active media and no DB presence"
+    );
+  });
+
+  it("TC-GUARD-08: Early arrival student knock on unstarted room is preserved and immediately delivered to host upon class start", async () => {
+    const earlyRoomCode = `grd-early-${Math.random().toString(36).substring(2, 8)}`;
+
+    // Create inactive room
+    await query(
+      `INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, metadata)
+       VALUES ($1, 'Early Arrival Test', $2, 'Dr. Guard Tutor', FALSE, '{}'::jsonb);`,
+      [earlyRoomCode, hostId]
+    );
+
+    // Student knocks BEFORE host starts the meeting
+    const earlyKnockRes = await fetch(`${BASE_URL}/rooms/${earlyRoomCode}/knock`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${studentToken}`,
+      },
+      body: JSON.stringify({
+        display_name: "Sam Early Student",
+        email: studentEmail,
+      }),
+    });
+
+    assert.equal(earlyKnockRes.status, 200);
+    const earlyKnockData = await earlyKnockRes.json();
+    assert.equal(earlyKnockData.status, "waiting_for_host");
+    assert.ok(earlyKnockData.knock?.id, "Knock record must be created and returned");
+
+    // Host starts class
+    const startRes = await fetch(`${BASE_URL}/rooms/${earlyRoomCode}/reactivate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${hostToken}`,
+      },
+    });
+    assert.equal(startRes.status, 200);
+
+    // Host checks knocks - student's early knock MUST BE PRESENT!
+    const hostKnocksRes = await fetch(`${BASE_URL}/rooms/${earlyRoomCode}/knocks`, {
+      headers: { Authorization: `Bearer ${hostToken}` },
+    });
+    assert.equal(hostKnocksRes.status, 200);
+    const hostKnocksData = await hostKnocksRes.json();
+    const foundKnock = hostKnocksData.knocks.find((k: any) => k.id === earlyKnockData.knock.id);
+    assert.ok(foundKnock, "Host must receive the early knock from student waiting in lobby");
+    assert.equal(foundKnock.status, "pending");
+
+    // Host admits student
+    const admitRes = await fetch(`${BASE_URL}/rooms/${earlyRoomCode}/knock/${foundKnock.id}/respond`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${hostToken}`,
+      },
+      body: JSON.stringify({ action: "admit" }),
+    });
+    assert.equal(admitRes.status, 200);
+
+    // Student can now enter call
+    const joinRes = await fetch(`${BASE_URL}/rooms/${earlyRoomCode}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${studentToken}`,
+      },
+      body: JSON.stringify({ display_name: "Sam Early Student" }),
+    });
+    assert.equal(joinRes.status, 200);
+
+    // Cleanup
+    await query("DELETE FROM room_knocks WHERE room_code = $1", [earlyRoomCode]);
+    await query("DELETE FROM room_participants WHERE room_code = $1", [earlyRoomCode]);
+    await query("DELETE FROM live_classes WHERE room_code = $1", [earlyRoomCode]);
+  });
+
+  it("TC-GUARD-09: Stale admission from past session cannot admit student to new session without new host approval", async () => {
+    const staleRoomCode = `grd-stale-${Math.random().toString(36).substring(2, 8)}`;
+
+    // Create room with session started 1 hour ago
+    await query(
+      `INSERT INTO live_classes (room_code, title, tutor_id, tutor_name, is_active, started_at, metadata)
+       VALUES ($1, 'Stale Admission Test', $2, 'Dr. Guard Tutor', TRUE, NOW() - INTERVAL '1 hour', '{}'::jsonb);`,
+      [staleRoomCode, hostId]
+    );
+
+    // Insert an admitted knock from 50 minutes ago (old session)
+    await query(
+      `INSERT INTO room_knocks (room_code, user_id, display_name, email, role, status, responded_at)
+       VALUES ($1, $2, 'Sam Student', $3, 'student', 'admitted', NOW() - INTERVAL '50 minutes');`,
+      [staleRoomCode, studentId, studentEmail]
+    );
+
+    // Host starts a brand new class session NOW
+    const reactivateRes = await fetch(`${BASE_URL}/rooms/${staleRoomCode}/reactivate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${hostToken}`,
+      },
+    });
+    assert.equal(reactivateRes.status, 200);
+
+    // Student attempts to join new session using old admission
+    const joinRes = await fetch(`${BASE_URL}/rooms/${staleRoomCode}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${studentToken}`,
+      },
+      body: JSON.stringify({ display_name: "Sam Student" }),
+    });
+
+    // MUST be rejected with 403 ADMISSION_REQUIRED!
+    assert.equal(joinRes.status, 403);
+    const joinData = await joinRes.json();
+    assert.equal(joinData.code, "ADMISSION_REQUIRED", "Stale session admission must never grant entry to new session");
+
+    // Cleanup
+    await query("DELETE FROM room_knocks WHERE room_code = $1", [staleRoomCode]);
+    await query("DELETE FROM room_participants WHERE room_code = $1", [staleRoomCode]);
+    await query("DELETE FROM live_classes WHERE room_code = $1", [staleRoomCode]);
   });
 });

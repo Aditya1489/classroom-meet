@@ -59,7 +59,7 @@ roomsRouter.get("/:roomCode/role", authMiddleware, async (req: Request, res: Res
     const user = (req as any).user;
 
     const roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
@@ -225,9 +225,19 @@ roomsRouter.post("/:roomCode/reactivate", requireAuth, async (req: Request, res:
       [room.id, newSessionId, user.id, user.full_name || user.name || "Tutor"]
     );
 
-    // Invalidate stale knocks from prior sessions so new session requires fresh admission
+    // Invalidate stale admitted knocks and aged pending knocks from prior sessions so new session requires fresh admission.
+    // Preserve fresh pending knocks (created within last 15 minutes) from students waiting in lobby.
     await query(
-      "UPDATE room_knocks SET status = 'cancelled' WHERE room_code = $1 AND status NOT IN ('cancelled', 'denied');",
+      `UPDATE room_knocks 
+       SET status = 'cancelled' 
+       WHERE room_code = $1 
+         AND (status = 'admitted' OR (status = 'pending' AND created_at < NOW() - INTERVAL '15 minutes'));`,
+      [sanitizedCode]
+    );
+
+    // Prune prior participant attendance from previous sessions
+    await query(
+      "UPDATE room_participants SET left_at = NOW() WHERE room_code = $1 AND left_at IS NULL;",
       [sanitizedCode]
     );
 
@@ -416,7 +426,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
 
     // 1. Verify that the room exists and is active
     let roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
@@ -437,7 +447,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
           [sanitizedCode, s.title, s.tutor_id, JSON.stringify({ isScheduled: true, scheduledAt: s.scheduled_at })]
         );
         roomRes = await query(
-          "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id FROM live_classes WHERE room_code = $1",
+          "SELECT id, room_code, title, tutor_id, metadata, is_active, organization_id, started_at FROM live_classes WHERE room_code = $1",
           [sanitizedCode]
         );
         room = roomRes.rows[0];
@@ -462,7 +472,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
       if (isHost) {
         await query(
           `UPDATE live_classes 
-           SET is_active = TRUE, started_at = COALESCE(started_at, NOW()), ended_at = NULL 
+           SET is_active = TRUE, started_at = NOW(), ended_at = NULL 
            WHERE room_code = $1;`,
           [sanitizedCode]
         );
@@ -473,6 +483,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
           [sanitizedCode]
         );
         room.is_active = true;
+        room.started_at = new Date();
       } else {
         return res.status(403).json({
           error: "Class has not started yet. Please wait for the host to start the call.",
@@ -503,7 +514,7 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
     const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
 
     // 3b. Google Meet Host Admission Gate:
-    // Non-hosts cannot join until the room host has explicitly admitted them.
+    // Non-hosts cannot join until the room host has explicitly admitted them during the active session.
     if (!isHost) {
       const admissionRes = await query(
         `SELECT id, status FROM room_knocks 
@@ -513,7 +524,8 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
              ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
            )
            AND status = 'admitted'
-           AND ($4::timestamptz IS NULL OR responded_at >= $4::timestamptz)
+           AND responded_at >= COALESCE($4::timestamptz, NOW())
+           AND responded_at >= NOW() - INTERVAL '6 hours'
          ORDER BY responded_at DESC LIMIT 1;`,
         [sanitizedCode, isUserUUID ? userId : null, user.email || null, room.started_at || null]
       );
@@ -657,7 +669,7 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
     const user = (req as any).user;
 
     let roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
@@ -678,7 +690,7 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
           [sanitizedCode, s.title, s.tutor_id, JSON.stringify({ isScheduled: true, scheduledAt: s.scheduled_at })]
         );
         roomRes = await query(
-          "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at FROM live_classes WHERE room_code = $1",
+          "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, ended_at, started_at FROM live_classes WHERE room_code = $1",
           [sanitizedCode]
         );
         room = roomRes.rows[0];
@@ -702,20 +714,6 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
       return res.json({ status: "host", isHost: true, message: "Host joins directly without admission" });
     }
 
-    // If room is inactive
-    if (!room.is_active) {
-      if (room.ended_at) {
-        return res.status(404).json({ error: "This class session has ended", code: "ROOM_ENDED" });
-      }
-      // Room has not started yet -> keep student waiting inside lobby gracefully
-      return res.json({
-        status: "waiting_for_host",
-        isWaitingForHost: true,
-        message: "Class has not started yet. Waiting for tutor to start the class.",
-        room_code: sanitizedCode,
-      });
-    }
-
     const userId = user?.id || req.body.user_id || null;
     const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
     let validUserId: string | null = null;
@@ -737,6 +735,47 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
       } catch (uErr) {
         // Fallback
       }
+    }
+
+    // If room is inactive
+    if (!room.is_active) {
+      if (room.ended_at) {
+        return res.status(404).json({ error: "This class session has ended", code: "ROOM_ENDED" });
+      }
+
+      // Check if student already submitted a pending knock
+      const existingPending = await query(
+        `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, created_at
+         FROM room_knocks
+         WHERE room_code = $1
+           AND (
+             ($2::uuid IS NOT NULL AND user_id = $2::uuid) OR
+             ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
+           )
+           AND status = 'pending'
+         ORDER BY created_at DESC LIMIT 1;`,
+        [sanitizedCode, validUserId, email]
+      );
+
+      let pendingKnock = existingPending.rows[0];
+      if (!pendingKnock) {
+        const insertRes = await query(
+          `INSERT INTO room_knocks (room_code, user_id, display_name, email, avatar_url, role, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+           RETURNING id, room_code, user_id, display_name, email, avatar_url, role, status, created_at;`,
+          [sanitizedCode, validUserId, displayName, email, avatarUrl, role]
+        );
+        pendingKnock = insertRes.rows[0];
+      }
+
+      // Room has not started yet -> keep student waiting inside lobby gracefully with their knock attached
+      return res.json({
+        status: "waiting_for_host",
+        isWaitingForHost: true,
+        message: "Class has not started yet. Waiting for tutor to start the class.",
+        room_code: sanitizedCode,
+        knock: pendingKnock,
+      });
     }
 
     // 1. Anti-spam check: If denied in the last 60 seconds, reject with cooldown
@@ -774,7 +813,8 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
            ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
          )
          AND status = 'admitted'
-         AND ($4::timestamptz IS NULL OR responded_at >= $4::timestamptz)
+         AND responded_at >= COALESCE($4::timestamptz, NOW())
+         AND responded_at >= NOW() - INTERVAL '6 hours'
        ORDER BY responded_at DESC LIMIT 1;`,
       [sanitizedCode, validUserId, email, room.started_at || null]
     );
@@ -885,7 +925,7 @@ roomsRouter.get("/:roomCode/knocks", requireAuth, async (req: Request, res: Resp
     const user = (req as any).user;
 
     const roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
@@ -928,7 +968,7 @@ roomsRouter.post("/:roomCode/knock/:knockId/respond", requireAuth, async (req: R
     }
 
     const roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
@@ -984,7 +1024,7 @@ roomsRouter.post("/:roomCode/knocks/respond-all", requireAuth, async (req: Reque
     }
 
     const roomRes = await query(
-      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active FROM live_classes WHERE room_code = $1",
+      "SELECT id, room_code, title, tutor_id, tutor_name, metadata, is_active, started_at FROM live_classes WHERE room_code = $1",
       [sanitizedCode]
     );
 
