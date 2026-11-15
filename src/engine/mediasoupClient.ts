@@ -59,7 +59,7 @@ export interface MicRequestEvent {
 
 export interface ControlMessageEvent {
   isControl: boolean;
-  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE" | "HAND_RAISE" | "HAND_LOWER";
+  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE" | "HAND_RAISE" | "HAND_LOWER" | "PEER_LEFT";
   userId?: string;
   targetUserId?: string;
   peerId?: string;
@@ -198,6 +198,7 @@ export class MathsyMediasoupEngine {
   public chatMessages: ChatMessage[] = [];
   public activePolls: Poll[] = [];
   private currentUserId: string = "";
+  public myName: string = "";
   public roomId: string = "";
   public isHostUser: boolean = false;
   public authorizedTutorId: string | null = null;
@@ -216,7 +217,7 @@ export class MathsyMediasoupEngine {
   // Listeners
   public onRoleAssigned?: (role: "tutor" | "student", isOwner: boolean, roomData?: any) => void;
   public onParticipantsChange?: (participants: RemoteParticipant[]) => void;
-  public onPeerLeft?: (peerId: string) => void;
+  public onPeerLeft?: (peerId: string, userId?: string, name?: string) => void;
   public onChatMessage?: (message: ChatMessage) => void;
   public onPollsChange?: (polls: Poll[]) => void;
   public onReaction?: (reaction: ReactionEvent) => void;
@@ -328,6 +329,7 @@ export class MathsyMediasoupEngine {
     // Replace underscores with hyphens so extractBaseUserId on server treats each user as unique
     const sanitizedUserId = userId.replace(/_/g, "-");
     this.currentUserId = sanitizedUserId;
+    this.myName = userName || "";
 
     let effectiveToken = token && token.trim().length > 0 ? token.trim() : "";
     if (!effectiveToken) {
@@ -615,22 +617,66 @@ export class MathsyMediasoupEngine {
         this.onCameraOffResponse?.(payload);
       });
 
-      // Handle peer left events (peerLeft / peer-left)
+      // Handle peer left events (peerLeft / peer-left / userLeft / participantLeft)
       const handlePeerLeft = (data: any) => {
-        const pId = typeof data === "string" ? data : (data?.id || data?.peerId || data?.baseUserId);
-        if (!pId) return;
-        console.log("[MathsyMeet Engine] Peer left room:", pId);
-        this.participants.delete(pId);
-        for (const [key] of this.participants.entries()) {
-          if (key === pId || (typeof data === "object" && (data.id === key || data.baseUserId === key))) {
-            this.participants.delete(key);
+        if (!data) return;
+        const targetId = typeof data === "string" ? data : (data?.id || data?.peerId || data?.userId || data?.baseUserId || data?.studentId);
+        const targetUserId = typeof data === "object" ? (data?.userId || data?.baseUserId || data?.id) : (typeof data === "string" ? data : undefined);
+        const targetName = typeof data === "object" ? data?.name : undefined;
+
+        console.log("[MathsyMeet Engine] Peer left room event received:", { targetId, targetUserId, targetName, raw: data });
+
+        const keysToDelete: string[] = [];
+        for (const [key, part] of this.participants.entries()) {
+          const isMatch =
+            key === targetId ||
+            key === targetUserId ||
+            part.id === targetId ||
+            part.id === targetUserId ||
+            part.userId === targetId ||
+            part.userId === targetUserId ||
+            (part as any).peerId === targetId ||
+            (part as any).peerId === targetUserId ||
+            (part as any).baseUserId === targetId ||
+            (part as any).baseUserId === targetUserId ||
+            (targetId && (key.includes(targetId) || targetId.includes(key) || part.id.includes(targetId) || targetId.includes(part.id))) ||
+            (targetUserId && part.userId && (part.userId.includes(targetUserId) || targetUserId.includes(part.userId))) ||
+            (targetName && part.name && part.name.trim().toLowerCase() === targetName.trim().toLowerCase());
+
+          if (isMatch) {
+            keysToDelete.push(key);
+            // Close any consumers matching this peer
+            for (const [cId, consumer] of this.consumers.entries()) {
+              if (
+                consumer.appData?.peerId === key ||
+                consumer.appData?.peerId === targetId ||
+                consumer.appData?.peerId === targetUserId ||
+                consumer.appData?.userId === targetUserId
+              ) {
+                try { consumer.close(); } catch {}
+                this.consumers.delete(cId);
+              }
+            }
           }
         }
+
+        for (const k of keysToDelete) {
+          this.participants.delete(k);
+        }
+        if (targetId) this.participants.delete(targetId);
+        if (targetUserId) this.participants.delete(targetUserId);
+
         this.notifyParticipants();
-        this.onPeerLeft?.(pId);
+        this.onPeerLeft?.(targetId || targetUserId || "", targetUserId, targetName);
       };
+
       this.socket.on("peerLeft", handlePeerLeft);
       this.socket.on("peer-left", handlePeerLeft);
+      this.socket.on("peer:left", handlePeerLeft);
+      this.socket.on("userLeft", handlePeerLeft);
+      this.socket.on("user-left", handlePeerLeft);
+      this.socket.on("participantLeft", handlePeerLeft);
+      this.socket.on("participant:left", handlePeerLeft);
 
       // Handle incoming media producers
       const handleNewProducer = async (data: any) => {
@@ -876,7 +922,16 @@ export class MathsyMediasoupEngine {
           }
 
           this.onControlMessage?.(msg);
-          if (msg.controlAction === "REQUEST_MIC") {
+          if (msg.controlAction === "PEER_LEFT") {
+            console.log("[MathsyMeet Engine] Intercepted PEER_LEFT control message:", msg);
+            handlePeerLeft({
+              id: msg.userId || msg.peerId || msg.senderId,
+              userId: msg.userId || msg.senderId,
+              peerId: msg.peerId,
+              name: msg.name,
+            });
+            return;
+          } else if (msg.controlAction === "REQUEST_MIC") {
             dispatchMicRequest(msg.userId || msg.senderId || "unknown", msg.name || "Student", cId, msg.roomCode);
           } else if (msg.controlAction === "PEER_MUTE_STATE") {
             handlePeerMuteState(msg);
@@ -1976,7 +2031,54 @@ export class MathsyMediasoupEngine {
     };
   }
 
+  /**
+   * Broadcasts an immediate departure signal to the room across multiple signaling channels.
+   * Ensures instant elimination of participant tiles on peers' screens before the socket terminates.
+   */
+  public leaveRoom() {
+    try {
+      const leavePayload: ControlMessageEvent = {
+        isControl: true,
+        controlAction: "PEER_LEFT",
+        peerId: this.socket?.id,
+        userId: this.currentUserId,
+        name: this.myName || (this.isHostUser ? "Tutor" : "Student"),
+        roomCode: this.roomId,
+        senderId: this.currentUserId,
+        timestamp: Date.now(),
+      };
+      if (this.socket && this.socket.connected) {
+        this.socket.emit("chatMessage", leavePayload);
+        this.socket.emit("peerLeft", {
+          peerId: this.socket.id,
+          id: this.currentUserId,
+          userId: this.currentUserId,
+          name: leavePayload.name,
+        });
+        this.socket.emit("peer-left", {
+          peerId: this.socket.id,
+          id: this.currentUserId,
+          userId: this.currentUserId,
+        });
+        this.socket.emit("peer:left", {
+          peerId: this.socket.id,
+          userId: this.currentUserId,
+        });
+        this.socket.emit("leaveRoom", {
+          roomId: this.roomId,
+          peerId: this.socket.id,
+          userId: this.currentUserId,
+        });
+      }
+    } catch (e) {
+      console.warn("[MathsyMeet Engine] leaveRoom emit note:", e);
+    }
+  }
+
   public disconnect() {
+    try {
+      this.leaveRoom();
+    } catch {}
     this.disableAudio();
     this.disableVideo();
     this.stopScreenShare();

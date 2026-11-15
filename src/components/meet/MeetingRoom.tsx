@@ -823,9 +823,26 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
     };
 
-    engine.onPeerLeft = (peerId) => {
-      console.log("[MeetingRoom] Peer left:", peerId);
-      setUnmuteRequests((prev) => prev.filter((r) => r.userId !== peerId && (r as any).peerId !== peerId));
+    engine.onPeerLeft = (peerId, userId, name) => {
+      console.log("[MeetingRoom] Peer left event received:", { peerId, userId, name });
+      setUnmuteRequests((prev) =>
+        prev.filter((r) => r.userId !== peerId && (r as any).peerId !== peerId && (!userId || r.userId !== userId))
+      );
+      setRemoteParticipants((prev) =>
+        prev.filter((p) => {
+          const match =
+            p.id === peerId ||
+            p.id === userId ||
+            (p as any).userId === peerId ||
+            (p as any).userId === userId ||
+            (p as any).peerId === peerId ||
+            (p as any).peerId === userId ||
+            (peerId && (p.id.includes(peerId) || peerId.includes(p.id))) ||
+            (userId && ((p as any).userId?.includes(userId) || userId.includes((p as any).userId || ""))) ||
+            (name && p.name && p.name.trim().toLowerCase() === name.trim().toLowerCase());
+          return !match;
+        })
+      );
     };
 
     engine.onChatMessage = (msg: any) => {
@@ -1141,9 +1158,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     });
 
-    // Handle tab close / refresh: send beacon leave to keep attendance clean
+    // Handle tab close / refresh / mobile app switch: broadcast instant leave and beacon
     const handleBeforeUnload = () => {
       try {
+        engine.leaveRoom();
         const payload = JSON.stringify({ user_id: myUserId, display_name: myName });
         const blob = new Blob([payload], { type: "application/json" });
         navigator.sendBeacon(`/api/rooms/${encodeURIComponent(meetingCode)}/leave`, blob);
@@ -1152,6 +1170,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("pagehide", handleBeforeUnload);
 
     // Connect to room session with verified server-issued session token
     engine
@@ -1193,6 +1212,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("pagehide", handleBeforeUnload);
+      try {
+        engine.leaveRoom();
+      } catch {}
       dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
       stopYouTubeLiveStreaming();
       engine.disconnect();
@@ -1773,8 +1796,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     return () => window.removeEventListener("mathsy-update-live-url", handleLiveUrlUpdate);
   }, []);
 
+  // Participant Leave Handler
+  const handleLeaveMeeting = () => {
+    try {
+      engineRef.current?.leaveRoom();
+      dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
+    } catch {}
+    onLeaveMeeting();
+  };
+
   // End Meeting Handler
   const handleEndClassClick = async () => {
+    try {
+      engineRef.current?.leaveRoom();
+    } catch {}
     dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
     if (isYouTubeLive) {
       stopYouTubeLiveStreaming();
@@ -1795,7 +1830,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setChatMessages([]);
       setShowPostClassModal(true);
     } else {
-      onLeaveMeeting();
+      handleLeaveMeeting();
     }
   };
 
@@ -2875,7 +2910,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                             <span className="text-emerald-400">{formatDuration(elapsedSeconds)}</span>
                           </div>
                           <button
-                            onClick={onLeaveMeeting}
+                            onClick={handleLeaveMeeting}
                             className="h-6 px-2.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold text-[9px] sm:text-[10px] flex items-center gap-1 shadow-md shadow-red-600/30 transition cursor-pointer"
                           >
                             <LogOut className="w-2.5 h-2.5" />
@@ -3505,7 +3540,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             ) : (
               <Button
                 variant="destructive"
-                onClick={onLeaveMeeting}
+                onClick={handleLeaveMeeting}
                 className="h-11 px-5 rounded-full font-bold text-xs gap-1.5 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 cursor-pointer"
               >
                 <PhoneOff className="w-4 h-4" />
@@ -3631,7 +3666,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </button>
           ) : (
             <button
-              onClick={onLeaveMeeting}
+              onClick={handleLeaveMeeting}
               className="h-10 min-h-[40px] px-3.5 rounded-full font-bold text-xs gap-1 bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/25 flex items-center justify-center cursor-pointer"
               title="Leave Room"
             >
@@ -3777,7 +3812,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           setShowCameraGateModal(false);
         }}
         onRequestCameraOff={handleRequestCameraOff}
-        onCancel={onLeaveMeeting}
+        onCancel={handleLeaveMeeting}
       />
 
       {/* In-Class Camera Off Warning Modal */}
@@ -3794,7 +3829,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           engineRef.current?.disableVideo();
           setLocalVideoTrack(null);
           setIsCamEnabled(false);
-          onLeaveMeeting();
+          handleLeaveMeeting();
         }}
       />
 
@@ -3838,7 +3873,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             {expelledReason || "You were removed from this room by the tutor and cannot rejoin this session."}
           </p>
           <Button
-            onClick={onLeaveMeeting}
+            onClick={handleLeaveMeeting}
             className="bg-white/10 hover:bg-white/20 text-white rounded-xl px-6 py-2.5 text-xs font-semibold"
           >
             Exit to Home
@@ -3861,7 +3896,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           }
           setChatMessages([]);
           setShowPostClassModal(false);
-          onLeaveMeeting();
+          handleLeaveMeeting();
         }}
       />
 
