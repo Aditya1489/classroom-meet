@@ -53,6 +53,7 @@ import {
   GraduationCap,
   BookOpen,
   Youtube,
+  Volume2,
   ExternalLink,
   Info,
   Check,
@@ -102,6 +103,9 @@ interface MeetingRoomProps {
 
 const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ participant }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const screenAudioRef = useRef<HTMLAudioElement>(null);
+
+  // Play participant microphone audio
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
@@ -114,7 +118,25 @@ const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ part
     }
   }, [participant.audioTrack, participant.isAudioMuted]);
 
-  return <audio ref={audioRef} autoPlay playsInline />;
+  // Play participant shared screen / tab audio
+  useEffect(() => {
+    const el = screenAudioRef.current;
+    if (!el) return;
+    if (participant.screenAudioTrack) {
+      const stream = new MediaStream([participant.screenAudioTrack]);
+      el.srcObject = stream;
+      el.play().catch((e) => console.warn(`[MathsyMeet ScreenAudioSink] play() error for ${participant.id}:`, e));
+    } else {
+      el.srcObject = null;
+    }
+  }, [participant.screenAudioTrack]);
+
+  return (
+    <>
+      <audio ref={audioRef} autoPlay playsInline />
+      <audio ref={screenAudioRef} autoPlay playsInline />
+    </>
+  );
 };
 
 function playKnockChime() {
@@ -245,6 +267,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [localVideoTrack, setLocalVideoTrack] = useState<MediaStreamTrack | null>(null);
   const [localAudioTrack, setLocalAudioTrack] = useState<MediaStreamTrack | null>(null);
   const [localScreenTrack, setLocalScreenTrack] = useState<MediaStreamTrack | null>(null);
+  const [localScreenAudioTrack, setLocalScreenAudioTrack] = useState<MediaStreamTrack | null>(null);
 
   // Remote Participants & Spotlight
   const [remoteParticipants, setRemoteParticipants] = useState<RemoteParticipant[]>([]);
@@ -321,6 +344,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const isStudentAttendee = !isHost && grantedRole !== "tutor";
   const [isLandscape, setIsLandscape] = useState(() => isLandscapeOrientation());
   const [isFocusMode, setIsFocusMode] = useState(false);
+  const [screenZoom, setScreenZoom] = useState(1);
   const [isPipMinimized, setIsPipMinimized] = useState(false);
 
   useEffect(() => {
@@ -790,6 +814,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     engine.onScreenShareEnded = () => {
       console.log("[MeetingRoom] Engine notified screen share ended");
       setLocalScreenTrack(null);
+      setLocalScreenAudioTrack(null);
       setIsScreenSharing(false);
       closePiP();
       setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
@@ -1152,6 +1177,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           const sTrack = await engine.startScreenShare();
           if (sTrack) {
             setLocalScreenTrack(sTrack);
+            setLocalScreenAudioTrack(engine.localScreenAudioTrack || null);
             setIsScreenSharing(true);
             setLayoutMode("screenshare");
             engine.broadcastScreenShareState(meetingCode, true, true);
@@ -1299,6 +1325,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     if (isScreenSharing) {
       engine.stopScreenShare();
       setLocalScreenTrack(null);
+      setLocalScreenAudioTrack(null);
       setIsScreenSharing(false);
       closePiP();
       setLayoutMode((prev) => (prev === "screenshare" ? "grid" : prev));
@@ -1338,9 +1365,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       const track = await engine.startScreenShare(controller);
       if (track) {
         setLocalScreenTrack(track);
+        setLocalScreenAudioTrack(engine.localScreenAudioTrack || null);
         setIsScreenSharing(true);
         setLayoutMode("screenshare");
         engine.broadcastScreenShareState(meetingCode, true, true);
+
+        if (engine.localScreenAudioTrack) {
+          toast.success("Sharing screen with tab/system audio", { id: "screen-audio-active" });
+        } else {
+          toast("Sharing screen (Tip: select 'Also share tab audio' to play video sound)", { icon: "ℹ️", id: "screen-audio-hint" });
+        }
 
         // Immediately launch floating always-on-top Document PiP mini-meet overlay
         try {
@@ -1360,6 +1394,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       if (isScreenSharing) {
         engineRef.current?.stopScreenShare();
         setLocalScreenTrack(null);
+        setLocalScreenAudioTrack(null);
         setIsScreenSharing(false);
       }
       setShowWhiteboard(true);
@@ -1398,6 +1433,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       if (isScreenSharing) {
         engineRef.current?.stopScreenShare();
         setLocalScreenTrack(null);
+        setLocalScreenAudioTrack(null);
         setIsScreenSharing(false);
       }
       setLayoutMode("whiteboard");
@@ -1770,6 +1806,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       audioTrack: localAudioTrack,
       videoTrack: localVideoTrack,
       screenTrack: localScreenTrack,
+      screenAudioTrack: localScreenAudioTrack,
       isAudioMuted: !isMicEnabled,
       isVideoMuted: !isCamEnabled,
       isHandRaised: isHandRaised,
@@ -1786,6 +1823,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           audioTrack: p.audioTrack || null,
           videoTrack: p.videoTrack || null,
           screenTrack: p.screenTrack || null,
+          screenAudioTrack: p.screenAudioTrack || null,
           isAudioMuted: p.audioTrack ? Boolean(p.isAudioMuted && !p.audioTrack.enabled) : true,
           isVideoMuted: p.videoTrack ? Boolean(p.isVideoMuted && !p.videoTrack.enabled) : true,
           isHandRaised: p.isHandRaised ?? false,
@@ -2371,6 +2409,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 ) : (
                   <VideoTrackPlayer
                     track={activeScreenTrack}
+                    objectFit="contain"
                     className="w-full h-full object-contain select-none"
                   />
                 )}
@@ -2844,11 +2883,23 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           ) : layoutMode === "screenshare" && isAnyoneScreenSharing ? (
             <div className="w-full h-full relative">
               {/* Central Screen Presentation Canvas (Full Stage, Clean & Unobstructed) */}
-              <div className="w-full h-full relative bg-[#0e0d0b] rounded-2xl overflow-hidden flex items-center justify-center border border-white/10 shadow-2xl">
-                <VideoTrackPlayer
-                  track={activeScreenTrack}
-                  className="w-full h-full object-contain select-none"
-                />
+              <div
+                className="w-full h-full relative bg-[#0e0d0b] rounded-2xl overflow-hidden flex items-center justify-center border border-white/10 shadow-2xl"
+                onDoubleClick={() => setScreenZoom((z) => (z > 1 ? 1 : 2))}
+              >
+                <div
+                  className="w-full h-full flex items-center justify-center transition-transform duration-200"
+                  style={{
+                    transform: screenZoom > 1 ? `scale(${screenZoom})` : "none",
+                    transformOrigin: "center center",
+                  }}
+                >
+                  <VideoTrackPlayer
+                    track={activeScreenTrack}
+                    objectFit="contain"
+                    className="w-full h-full object-contain select-none"
+                  />
+                </div>
 
                 {/* Top-Left Presenter Info Banner */}
                 <div className="absolute top-2 left-2 sm:top-3 sm:left-3 bg-[#0e0d0b]/85 backdrop-blur-md px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl border border-white/15 text-xs text-[#f3eee6] flex items-center gap-2 shadow-lg z-20">
@@ -2856,6 +2907,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   <span className="font-semibold text-[11px] text-[#f59e0b] truncate max-w-[150px] sm:max-w-none">
                     {localScreenTrack ? "You are presenting" : `${remoteScreenSharer?.name || "Tutor"} is presenting`}
                   </span>
+                  {(localScreenAudioTrack || remoteScreenSharer?.screenAudioTrack) && (
+                    <span className="flex items-center gap-1 text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-1.5 py-0.5 rounded-md font-medium" title="Tab / System Audio is live">
+                      <Volume2 className="w-3 h-3 text-emerald-400" />
+                      <span>Tab Audio</span>
+                    </span>
+                  )}
                   {isHost && isScreenSharing && (
                     <button
                       onClick={handleToggleScreenShare}
@@ -2876,8 +2933,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   )}
                 </div>
 
-                {/* Top-Right Focus Mode Toggle */}
+                {/* Top-Right Focus Mode & Mobile Zoom Toggle */}
                 <div className="absolute top-2 right-2 sm:top-3 sm:right-3 flex items-center gap-1.5 z-20">
+                  {isMobile && (
+                    <button
+                      onClick={() => setScreenZoom((z) => (z > 1 ? 1 : 2))}
+                      title={screenZoom > 1 ? "Reset Zoom (1x)" : "Zoom In (2x)"}
+                      className="px-2.5 py-1 rounded-xl text-xs font-semibold backdrop-blur-md border shadow-lg flex items-center gap-1.5 cursor-pointer transition bg-[#0e0d0b]/80 text-[#f3eee6] border-white/15 hover:bg-[#0e0d0b]"
+                    >
+                      <ZoomIn className="w-3.5 h-3.5 text-[#f59e0b]" />
+                      <span className="font-mono text-[11px]">{screenZoom > 1 ? "1x Fit" : "2x Zoom"}</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => setIsFocusMode(!isFocusMode)}
                     title={isFocusMode ? "Exit Focus Mode" : "Focus on Presentation"}
@@ -2891,6 +2958,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     <span className="font-mono text-[11px]">{isFocusMode ? "Normal" : "Focus"}</span>
                   </button>
                 </div>
+
+                {/* 1-Tap Mobile Fullscreen / Widescreen Trigger (Rotates to landscape / full screen) */}
+                {isMobile && !isFullscreen && (
+                  <button
+                    onClick={toggleFullscreen}
+                    className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
+                    title="Enter Full Screen Mode (Hide Browser Address Bar & Maximize Screen Share)"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Tap for Widescreen</span>
+                  </button>
+                )}
               </div>
             </div>
           ) : showWhiteboard || layoutMode === "whiteboard" ? (

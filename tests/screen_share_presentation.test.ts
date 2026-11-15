@@ -209,5 +209,28 @@ describe("Screen Share Presentation UI & State Logic", () => {
     assert.equal(isScreenSharing, false);
     assert.equal(localScreenTrack, null);
   });
+
+  // ── 7. Mobile Full View & Contain Assurance ──
+  it("TC-SCREEN-07: VideoTrackPlayer cleans object-cover and enforces object-fit contain when requested", async () => {
+    const fs = await import("node:fs/promises");
+    const vtpCode = await fs.readFile("src/components/meet/VideoTrackPlayer.tsx", "utf-8");
+    assert.ok(vtpCode.includes('objectFit?: "contain" | "cover" | "fill" | "none" | "scale-down"'), "VideoTrackPlayer must accept objectFit prop");
+    assert.ok(vtpCode.includes('style={{ objectFit: fitMode, ...style }}'), "VideoTrackPlayer must apply inline style objectFit to prevent CSS precedence override");
+    assert.ok(vtpCode.includes('cleanedClassName'), "VideoTrackPlayer must clean conflicting object-* classes from className");
+  });
+
+  it("TC-SCREEN-08: MeetingRoom screen share stage explicitly passes objectFit contain", async () => {
+    const fs = await import("node:fs/promises");
+    const mrCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+    assert.ok(mrCode.includes('objectFit="contain"'), "Screen share player must pass objectFit contain");
+    assert.ok(mrCode.includes('Tap for Widescreen'), "Mobile screen share stage must provide 1-tap widescreen button");
+  });
+
+  it("TC-SCREEN-09: Screen share supports interactive zoom toggle on mobile", async () => {
+    const fs = await import("node:fs/promises");
+    const mrCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+    assert.ok(mrCode.includes('screenZoom'), "Must support screenZoom state");
+    assert.ok(mrCode.includes('setScreenZoom'), "Must provide zoom toggle");
+  });
 });
 

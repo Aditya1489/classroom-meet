@@ -11,6 +11,7 @@ export interface RemoteParticipant {
   audioTrack?: MediaStreamTrack;
   videoTrack?: MediaStreamTrack;
   screenTrack?: MediaStreamTrack;
+  screenAudioTrack?: MediaStreamTrack;
   isSpeaking?: boolean;
   isHandRaised?: boolean;
 }
@@ -185,12 +186,13 @@ export class MathsyMediasoupEngine {
   private sendTransport: any = null;
   private recvTransport: any = null;
   
-  private producers = new Map<"audio" | "video" | "screen", any>();
+  private producers = new Map<"audio" | "video" | "screen" | "screenAudio", any>();
   private consumers = new Map<string, any>(); // consumerId -> Consumer
   
   public localAudioTrack: MediaStreamTrack | null = null;
   public localVideoTrack: MediaStreamTrack | null = null;
   public localScreenTrack: MediaStreamTrack | null = null;
+  public localScreenAudioTrack: MediaStreamTrack | null = null;
 
   public participants = new Map<string, RemoteParticipant>();
   public chatMessages: ChatMessage[] = [];
@@ -724,6 +726,9 @@ export class MathsyMediasoupEngine {
           if (trackId && participant.screenTrack?.id === trackId) {
             participant.screenTrack = undefined;
             console.log(`[MathsyMeet Engine] Cleared remote SCREEN track for peer:`, peerId);
+          } else if (trackId && participant.screenAudioTrack?.id === trackId) {
+            participant.screenAudioTrack = undefined;
+            console.log(`[MathsyMeet Engine] Cleared remote SCREEN AUDIO track for peer:`, peerId);
           } else if (trackId && participant.videoTrack?.id === trackId) {
             participant.videoTrack = undefined;
             participant.isVideoMuted = true;
@@ -739,8 +744,12 @@ export class MathsyMediasoupEngine {
               participant.isVideoMuted = true;
             }
           } else if (consumer?.kind === "audio") {
-            participant.audioTrack = undefined;
-            participant.isAudioMuted = true;
+            if (participant.screenAudioTrack && (consumer?.appData?.mediaType === "screenAudio" || consumer?.appData?.source === "screenAudio")) {
+              participant.screenAudioTrack = undefined;
+            } else {
+              participant.audioTrack = undefined;
+              participant.isAudioMuted = true;
+            }
           }
           this.notifyParticipants();
         }
@@ -1151,6 +1160,19 @@ export class MathsyMediasoupEngine {
             console.warn("[MathsyMeet Engine] Auto-produce screen note:", e.message);
           }
         }
+
+        if (this.localScreenAudioTrack && !this.producers.has("screenAudio")) {
+          try {
+            const prod = await this.sendTransport.produce({
+              track: this.localScreenAudioTrack,
+              appData: { mediaType: "screenAudio", source: "screenAudio" }
+            });
+            this.producers.set("screenAudio", prod);
+            console.log("[MathsyMeet Engine] Auto-produced screenAudio track:", prod.id);
+          } catch (e: any) {
+            console.warn("[MathsyMeet Engine] Auto-produce screenAudio note:", e.message);
+          }
+        }
       }
 
       // 2. Initialize Receive Transport
@@ -1266,7 +1288,7 @@ export class MathsyMediasoupEngine {
       // 3. Match any remote participant missing this kind of track
       if (!participant) {
         participant = Array.from(this.participants.values()).find((p) =>
-          kind === "video" ? !p.videoTrack : !p.audioTrack
+          kind === "video" ? !p.videoTrack : (!p.audioTrack || (source === "screenAudio" && !p.screenAudioTrack))
         );
       }
 
@@ -1290,9 +1312,19 @@ export class MathsyMediasoupEngine {
         data?.appData?.source === "screen" ||
         (kind === "video" && participant.videoTrack && participant.videoTrack.id !== consumer.track.id);
 
+      const isScreenAudioSource =
+        source === "screenAudio" ||
+        source === "screen-audio" ||
+        data?.appData?.mediaType === "screenAudio" ||
+        data?.appData?.source === "screenAudio" ||
+        (kind === "audio" && (participant.screenTrack || isScreenSource) && participant.audioTrack && participant.audioTrack.id !== consumer.track.id);
+
       if (isScreenSource) {
         participant.screenTrack = consumer.track;
         console.log(`[MathsyMeet Engine] Attached remote SCREEN track for peer:`, participant.id);
+      } else if (isScreenAudioSource) {
+        participant.screenAudioTrack = consumer.track;
+        console.log(`[MathsyMeet Engine] Attached remote SCREEN AUDIO track for peer:`, participant.id);
       } else if (kind === "video") {
         participant.videoTrack = consumer.track;
         participant.isVideoMuted = false;
@@ -1307,7 +1339,7 @@ export class MathsyMediasoupEngine {
         console.log(`[MathsyMeet Engine] Remote ${kind} track UNMUTED from peer:`, participant?.id);
         if (participant) {
           if (kind === "video") participant.isVideoMuted = false;
-          if (kind === "audio") participant.isAudioMuted = false;
+          if (kind === "audio" && !isScreenAudioSource) participant.isAudioMuted = false;
           this.notifyParticipants();
         }
       });
@@ -1421,11 +1453,33 @@ export class MathsyMediasoupEngine {
 
   public async startScreenShare(controller?: any): Promise<MediaStreamTrack | null> {
     try {
-      const displayMediaOptions: any = { video: true, audio: true };
+      const displayMediaOptions: any = {
+        video: true,
+        audio: {
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+        },
+        systemAudio: "include",
+        surfaceSwitching: "include",
+        selfBrowserSurface: "exclude",
+      };
       if (controller) {
         displayMediaOptions.controller = controller;
       }
-      const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+      } catch (err: any) {
+        console.warn("[MathsyMeet Engine] Advanced getDisplayMedia options failed, retrying with simple audio:true...", err.message);
+        const fallbackOptions: any = { video: true, audio: true };
+        if (controller) {
+          fallbackOptions.controller = controller;
+        }
+        stream = await navigator.mediaDevices.getDisplayMedia(fallbackOptions);
+      }
+
       const track = stream.getVideoTracks()[0];
       this.localScreenTrack = track;
 
@@ -1433,17 +1487,58 @@ export class MathsyMediasoupEngine {
         this.stopScreenShare();
       };
 
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const audioTrack = audioTracks[0];
+        this.localScreenAudioTrack = audioTrack;
+        audioTrack.onended = () => {
+          this.stopScreenAudio();
+        };
+        console.log("[MathsyMeet Engine] Screen share audio track captured:", audioTrack.id, audioTrack.label);
+      } else {
+        console.log("[MathsyMeet Engine] Screen share started without tab/system audio");
+      }
+
       if (this.sendTransport) {
         const producer = await this.sendTransport.produce({
           track,
           appData: { mediaType: "screen", source: "screen" }
         });
         this.producers.set("screen", producer);
+
+        if (this.localScreenAudioTrack) {
+          try {
+            const audioProducer = await this.sendTransport.produce({
+              track: this.localScreenAudioTrack,
+              appData: { mediaType: "screenAudio", source: "screenAudio" }
+            });
+            this.producers.set("screenAudio", audioProducer);
+            console.log("[MathsyMeet Engine] Produced screenAudio track:", audioProducer.id);
+          } catch (audioErr: any) {
+            console.warn("[MathsyMeet Engine] Produce screen audio error:", audioErr.message);
+          }
+        }
       }
       return track;
     } catch (e: any) {
       console.error("[MathsyMeet] startScreenShare error:", e.message);
       return null;
+    }
+  }
+
+  public stopScreenAudio() {
+    if (this.localScreenAudioTrack) {
+      this.localScreenAudioTrack.stop();
+      this.localScreenAudioTrack = null;
+    }
+    const audioProducer = this.producers.get("screenAudio");
+    if (audioProducer) {
+      const prodId = audioProducer.id;
+      audioProducer.close();
+      this.producers.delete("screenAudio");
+      this.request("closeProducer", { producerId: prodId }).catch(() => {});
+      this.socket?.emit("producerClose", { producerId: prodId });
+      console.log("[MathsyMeet Engine] Stopped screen audio producer:", prodId);
     }
   }
 
@@ -1460,6 +1555,7 @@ export class MathsyMediasoupEngine {
       this.request("closeProducer", { producerId: prodId }).catch(() => {});
       this.socket?.emit("producerClose", { producerId: prodId });
     }
+    this.stopScreenAudio();
     this.broadcastScreenShareState(this.roomId, false, this.isHostUser);
     this.onScreenShareEnded?.();
   }

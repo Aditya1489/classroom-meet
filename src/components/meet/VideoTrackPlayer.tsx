@@ -5,6 +5,7 @@ interface VideoTrackPlayerProps {
   className?: string;
   style?: React.CSSProperties;
   mirror?: boolean;
+  objectFit?: "contain" | "cover" | "fill" | "none" | "scale-down";
 }
 
 export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
@@ -12,6 +13,7 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
   className = "",
   style,
   mirror = false,
+  objectFit,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -76,14 +78,28 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
 
   if (!track) return null;
 
+  // Determine intended object-fit: explicit prop > className scan > default to "cover"
+  const isContain = objectFit === "contain" || className.includes("object-contain");
+  const fitMode: "contain" | "cover" | "fill" | "none" | "scale-down" = objectFit
+    ? objectFit
+    : isContain
+    ? "contain"
+    : className.includes("object-cover")
+    ? "cover"
+    : "cover";
+
+  const baseFitClass = isContain ? "object-contain" : "object-cover";
+  // Remove conflicting object-fit classes from className to avoid Tailwind stylesheet ordering collisions
+  const cleanedClassName = className.replace(/\bobject-(contain|cover|fill|none|scale-down)\b/g, "").trim();
+
   return (
     <video
       ref={videoRef}
       autoPlay
       playsInline
       muted
-      className={`w-full h-full object-cover ${mirror ? "scale-x-[-1]" : ""} ${className}`}
-      style={style}
+      className={`w-full h-full ${baseFitClass} ${mirror ? "scale-x-[-1]" : ""} ${cleanedClassName}`}
+      style={{ objectFit: fitMode, ...style }}
     />
   );
 };

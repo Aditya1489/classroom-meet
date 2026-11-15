@@ -53,6 +53,21 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
     inviteCount: number;
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+
+  // Form is considered dirty if any meaningful field has been modified and class is not yet scheduled
+  const isDirty = Boolean(
+    !scheduledResult && (
+      title.trim().length > 0 ||
+      subject.trim().length > 0 ||
+      date.trim().length > 0 ||
+      time.trim().length > 0 ||
+      description.trim().length > 0 ||
+      emailInput.trim().length > 0 ||
+      invitees.length > 0 ||
+      durationMinutes !== 0
+    )
+  );
 
   const resetForm = () => {
     setTitle("");
@@ -66,28 +81,20 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
     setInvitees([]);
     setScheduledResult(null);
     setCopied(false);
+    setShowDiscardConfirm(false);
   };
 
   // Reset form cleanly whenever the modal is opened afresh
   useEffect(() => {
     if (isOpen) {
       resetForm();
+      setShowDiscardConfirm(false);
     }
   }, [isOpen]);
 
-  // Support closing modal on Escape key press
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !isSubmitting) {
-        handleClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, isSubmitting]);
-
-  const handleClose = () => {
+  // Force close and cleanup without confirmation (used after user confirms discard or on successful schedule)
+  const forceClose = () => {
+    setShowDiscardConfirm(false);
     resetForm();
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("mathsy:schedule-updated"));
@@ -101,6 +108,47 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
     }
     onClose();
   };
+
+  // Safe close handler: prompts confirmation if there are unsaved changes
+  const handleAttemptClose = () => {
+    if (isSubmitting) return;
+    if (scheduledResult) {
+      forceClose();
+      return;
+    }
+    if (isDirty) {
+      setShowDiscardConfirm(true);
+    } else {
+      forceClose();
+    }
+  };
+
+  // Support closing modal or dismissing discard confirmation on Escape key press
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !isSubmitting) {
+        if (showDiscardConfirm) {
+          setShowDiscardConfirm(false);
+        } else {
+          handleAttemptClose();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, isSubmitting, showDiscardConfirm, isDirty, scheduledResult]);
+
+  // Warn on accidental tab close / browser refresh when user has unsaved scheduling data
+  useEffect(() => {
+    if (!isOpen || !isDirty) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isOpen, isDirty]);
 
   const inviteeEmails = invitees.map((i) => i.email);
 
@@ -360,8 +408,10 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150 cursor-pointer select-none"
-      onClick={() => {
-        if (!isSubmitting) handleClose();
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !isSubmitting) {
+          handleAttemptClose();
+        }
       }}
     >
       <div
@@ -380,8 +430,10 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
             </div>
           </div>
           <button
-            onClick={handleClose}
+            type="button"
+            onClick={handleAttemptClose}
             className="p-2 rounded-full hover:bg-[#f3eee6]/10 text-[#a39e94] hover:text-[#f3eee6] transition cursor-pointer"
+            aria-label="Close scheduler"
           >
             <X className="w-5 h-5" />
           </button>
@@ -444,7 +496,8 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
                 <span>Schedule Another Class</span>
               </button>
               <button
-                onClick={handleClose}
+                type="button"
+                onClick={forceClose}
                 className="flex-1 py-3 px-4 rounded-xl bg-[#221f1a] hover:bg-[#2c2720] border border-[#f3eee6]/10 text-xs font-semibold text-[#f3eee6] transition cursor-pointer"
               >
                 Done & View My Schedule
@@ -701,6 +754,86 @@ export const ScheduleClassModal: React.FC<ScheduleClassModalProps> = ({
           </form>
         )}
       </div>
+
+      {/* Unsaved Changes Discard Confirmation Dialog */}
+      {showDiscardConfirm && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="discard-dialog-title"
+          aria-describedby="discard-dialog-desc"
+          data-testid="discard-schedule-confirm-dialog"
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-150 select-none cursor-pointer"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowDiscardConfirm(false); // Clicking outside confirmation cancels discard
+            }
+          }}
+        >
+          <div
+            className="relative w-full max-w-sm bg-[#1a1814] border border-amber-500/30 rounded-3xl p-6 shadow-[0_25px_60px_rgba(0,0,0,0.9)] text-[#f3eee6] text-center space-y-4 cursor-default animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Warning Icon Badge */}
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-400 mx-auto flex items-center justify-center shadow-lg shadow-amber-500/10">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 id="discard-dialog-title" className="text-base font-bold text-[#f3eee6]">
+                Discard unsaved class?
+              </h3>
+              <p id="discard-dialog-desc" className="text-xs text-[#a39e94] leading-relaxed">
+                You have unsaved details in your class schedule. If you close now without scheduling, all your entered information will be lost.
+              </p>
+            </div>
+
+            {/* Quick summary of what would be discarded */}
+            {(title.trim() || invitees.length > 0 || date || time) && (
+              <div className="p-3 rounded-2xl bg-[#24221c] border border-[#f3eee6]/10 text-left text-[11px] text-[#a39e94] space-y-1">
+                {title.trim() && (
+                  <div className="truncate text-[#f3eee6] font-medium flex items-center gap-1.5">
+                    <span>📌</span>
+                    <span className="truncate">{title.trim()}</span>
+                  </div>
+                )}
+                {(date || time) && (
+                  <div className="text-[#a39e94] flex items-center gap-1.5">
+                    <span>🗓️</span>
+                    <span>{date || "No date set"}{time ? ` at ${time}` : ""}</span>
+                  </div>
+                )}
+                {invitees.length > 0 && (
+                  <div className="text-emerald-400 font-medium flex items-center gap-1.5">
+                    <span>👥</span>
+                    <span>{invitees.length} invitee{invitees.length === 1 ? "" : "s"} added</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDiscardConfirm(false)}
+                data-testid="discard-cancel-btn"
+                className="flex-1 py-2.5 px-4 rounded-xl bg-[#f3eee6]/10 hover:bg-[#f3eee6]/15 border border-[#f3eee6]/20 text-xs font-semibold text-[#f3eee6] transition cursor-pointer"
+              >
+                Keep Editing
+              </button>
+              <button
+                type="button"
+                onClick={forceClose}
+                data-testid="discard-confirm-btn"
+                className="flex-1 py-2.5 px-4 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-xs font-semibold text-red-400 hover:text-red-300 transition cursor-pointer"
+              >
+                Discard Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
