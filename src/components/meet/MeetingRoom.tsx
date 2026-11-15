@@ -404,13 +404,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         const res = await enterMobileFullscreenAndLandscape(document.documentElement);
         setIsFullscreen(true);
         if (res.orientation) setIsLandscape(true);
+        if (isMobile) setIsFocusMode(true);
       } else {
         await exitMobileFullscreenAndUnlock();
         setIsFullscreen(false);
+        if (isMobile) setIsFocusMode(false);
       }
     } catch (e) {
       console.warn("[MeetingRoom] toggleFullscreen note:", e);
-      setIsFullscreen(!isFullscreen);
+      const next = !isFullscreen;
+      setIsFullscreen(next);
+      if (isMobile) setIsFocusMode(next);
     }
   };
 
@@ -2013,7 +2017,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       {/* Floating Exit Focus Mode Pill */}
       {isFocusMode && (
         <button
-          onClick={() => setIsFocusMode(false)}
+          onClick={() => {
+            setIsFocusMode(false);
+            if (isFullscreen) {
+              exitMobileFullscreenAndUnlock().catch(() => {});
+              setIsFullscreen(false);
+            }
+          }}
           className="absolute top-2 left-2 z-50 px-3 py-1 bg-black/85 hover:bg-black text-[#f59e0b] border border-[#f59e0b]/40 rounded-full text-xs font-semibold backdrop-blur-md shadow-2xl flex items-center gap-1.5 transition-all cursor-pointer"
         >
           <Minimize2 className="w-3.5 h-3.5" />
@@ -2457,7 +2467,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </div>
         )}
 
-        <section className={`flex-1 min-w-0 h-full relative ${isMobileLandscapeSplit ? "p-1 sm:p-1.5" : "p-3"} flex flex-col justify-center items-center overflow-hidden`}>
+        <section className={`flex-1 min-w-0 h-full relative ${isFocusMode ? "p-0" : isMobileLandscapeSplit ? "p-1 sm:p-1.5" : isMobile ? "p-1" : "p-3"} flex flex-col justify-center items-center overflow-hidden`}>
           {isMobileLandscapeSplit ? (
             /* ── MOBILE HORIZONTAL 75% / 25% SPLIT PRESENTATION STAGE ── */
             <div className="w-full h-full flex flex-row gap-1.5 overflow-hidden relative select-none">
@@ -2466,7 +2476,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 isFocusMode ? "w-full" : "w-[75%]"
               }`}>
                 {/* 1-Tap Mobile Fullscreen Trigger (Hides browser URL bar and status bar) */}
-                {isMobile && !isFullscreen && (
+                {isMobile && !isFullscreen && !isFocusMode && (
                   <button
                     onClick={toggleFullscreen}
                     className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
@@ -3064,7 +3074,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 </div>
 
                 {/* 1-Tap Mobile Fullscreen / Widescreen Trigger (Rotates to landscape / full screen) */}
-                {isMobile && !isFullscreen && (
+                {isMobile && !isFullscreen && !isFocusMode && (
                   <button
                     onClick={toggleFullscreen}
                     className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
@@ -3078,9 +3088,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </div>
           ) : showWhiteboard || layoutMode === "whiteboard" ? (
             /* COLLABORATIVE WHITEBOARD MODE WITH TLDraw & GEOMETRY TOOLS */
-            <div className="w-full h-full relative rounded-2xl overflow-hidden border border-white/10">
+            <div className={`w-full h-full relative ${isFocusMode ? "rounded-none border-0" : isMobile ? "rounded-lg" : "rounded-2xl"} overflow-hidden ${isFocusMode ? "" : "border border-white/10"}`}>
               {/* 1-Tap Mobile Fullscreen Trigger (Hides browser URL bar and status bar) */}
-              {isMobile && !isFullscreen && (
+              {isMobile && !isFullscreen && !isFocusMode && (
                 <button
                   onClick={toggleFullscreen}
                   className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"

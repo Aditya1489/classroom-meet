@@ -139,6 +139,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   onRegisterActions,
 }) => {
   const [editor, setEditor] = useState<Editor | null>(null);
+  const editorRef = useRef<Editor | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const snapshotTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -175,6 +176,11 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   });
   const slidesRef = useRef<PresentationSlide[]>(presentationSlides);
   slidesRef.current = presentationSlides;
+
+  // Host Viewport Synchronization State (Ensures participants on any device see full host view)
+  const lastHostViewportRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const lastBroadcastBoundsRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const viewportTimerRef = useRef<any>(null);
 
   // File Importer State (PDF, PPT/PPTX, PNG/JPG)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -449,16 +455,62 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     }
   };
 
+  const broadcastViewport = useCallback(
+    (force = false) => {
+      const ed = editorRef.current || editor;
+      if (!isHost || !ed || !engine || !roomCode) return;
+      try {
+        const bounds = ed.getViewportPageBounds();
+        if (!bounds || bounds.w <= 0 || bounds.h <= 0) return;
+
+        const last = lastBroadcastBoundsRef.current;
+        if (
+          !force &&
+          last &&
+          Math.abs(last.x - bounds.x) < 5 &&
+          Math.abs(last.y - bounds.y) < 5 &&
+          Math.abs(last.w - bounds.w) < 5 &&
+          Math.abs(last.h - bounds.h) < 5
+        ) {
+          return;
+        }
+
+        lastBroadcastBoundsRef.current = { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h };
+
+        engine.broadcastWhiteboard({
+          type: "viewport",
+          roomCode,
+          senderId: myUserId || "local",
+          bounds: { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h },
+          timestamp: Date.now(),
+        });
+      } catch (err) {
+        console.warn("[Whiteboard] Error broadcasting viewport:", err);
+      }
+    },
+    [isHost, editor, engine, roomCode, myUserId]
+  );
+
+  // Host Periodic Viewport Heartbeat (keeps late joiners and mobile viewers seamlessly locked to host area)
+  useEffect(() => {
+    if (!isHost || !editor) return;
+    const interval = setInterval(() => {
+      broadcastViewport(false);
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [isHost, editor, broadcastViewport]);
+
   const handleZoomToFit = () => {
     if (!editor) return;
     try {
+      // 1. If viewing presentation slides, fit the current slide
       if (presentationSlides.length > 0 && presentationSlides[currentSlideIndex]) {
         const targetSlide = presentationSlides[currentSlideIndex];
         const shape = editor.getShape(targetSlide.shapeId);
         const bounds = shape ? editor.getShapePageBounds(targetSlide.shapeId) : targetSlide.bounds;
         if (bounds) {
           editor.zoomToBounds(bounds, {
-            inset: 0,
+            inset: isMobile ? 4 : 12,
             animation: { duration: 250 },
             force: true,
           });
@@ -466,6 +518,30 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           return;
         }
       }
+
+      // 2. If student has received host viewport bounds, prioritize aligning with host's exact view
+      if (!isHost && lastHostViewportRef.current) {
+        editor.zoomToBounds(lastHostViewportRef.current, {
+          inset: isMobile ? 8 : 16,
+          animation: { duration: 250 },
+          force: true,
+        });
+        toast.info("Whiteboard aligned to host view", { id: "zoom-fit" });
+        return;
+      }
+
+      // 3. Fit to all page drawings with padding and bounds check
+      const pageBounds = editor.getCurrentPageBounds();
+      if (pageBounds && pageBounds.w > 20 && pageBounds.h > 20) {
+        editor.zoomToBounds(pageBounds, {
+          inset: isMobile ? 12 : 24,
+          animation: { duration: 250 },
+          force: true,
+        });
+        toast.info("Canvas centered to drawings", { id: "zoom-fit" });
+        return;
+      }
+
       editor.zoomToFit({ animation: { duration: 250 } });
       toast.info("Canvas centered to drawings", { id: "zoom-fit" });
     } catch (err) {
@@ -474,6 +550,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   };
 
   const handleMount = (ed: Editor) => {
+    editorRef.current = ed;
     setEditor(ed);
     registerWhiteboardEditor(ed);
     onRegisterActions?.({
@@ -646,9 +723,43 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       updateActiveToolAndStyles();
     });
 
+    // Listen to camera movements to broadcast host viewport to participants
+    const unlistenCamera = ed.store.listen(
+      (entry) => {
+        if (!isHost) return;
+        const hasCameraChange =
+          Object.keys(entry.changes.added).some((k) => k.startsWith("camera:")) ||
+          Object.keys(entry.changes.updated).some((k) => k.startsWith("camera:"));
+        if (hasCameraChange) {
+          if (viewportTimerRef.current) clearTimeout(viewportTimerRef.current);
+          viewportTimerRef.current = setTimeout(() => {
+            broadcastViewport(false);
+          }, 150);
+        }
+      },
+      { scope: "all" }
+    );
+
+    // Initial viewport sync: Host broadcasts initial viewport; Participant asks host for current viewport
+    if (isHost) {
+      setTimeout(() => broadcastViewport(true), 400);
+    } else if (engine && roomCode) {
+      setTimeout(() => {
+        engine.broadcastWhiteboard({
+          type: "request-viewport",
+          roomCode,
+          senderId: myUserId || "local",
+          timestamp: Date.now(),
+        });
+      }, 300);
+    }
+
     return () => {
       unlisten();
       unlistenTool();
+      unlistenCamera();
+      if (viewportTimerRef.current) clearTimeout(viewportTimerRef.current);
+      editorRef.current = null;
       registerWhiteboardEditor(null);
       if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
     };
@@ -755,15 +866,25 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           editor.store.mergeRemoteChanges(() => {
             editor.store.applyDiff(data.changes);
           });
-          if (isMobile) {
-            setTimeout(() => {
-              try {
-                editor.zoomToFit({ animation: { duration: 150 } });
-              } catch {}
-            }, 100);
-          }
         } catch (err) {
           console.warn("[Whiteboard] Error applying remote diff:", err);
+        }
+      } else if (data.type === "viewport" && data.bounds) {
+        lastHostViewportRef.current = data.bounds;
+        if (!isHost && editor) {
+          try {
+            editor.zoomToBounds(data.bounds, {
+              inset: isMobile ? 8 : 16,
+              animation: { duration: 250 },
+              force: true,
+            });
+          } catch (err) {
+            console.warn("[Whiteboard] Error aligning to host viewport:", err);
+          }
+        }
+      } else if (data.type === "request-viewport") {
+        if (isHost && (editorRef.current || editor)) {
+          broadcastViewport(true);
         }
       } else if (data.type === "snapshot" && data.snapshot) {
         try {
