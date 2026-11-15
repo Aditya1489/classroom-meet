@@ -272,13 +272,13 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
     const code = generateMeetingCode();
     setShowNewMeetingDropdown(false);
 
-    // Persist room in PostgreSQL backend before entering
+    // Persist room in PostgreSQL backend before entering (inactive until host explicitly starts in lobby)
     const createdRoom = await dbClient.upsertRoom({
       room_code: code,
       title: "Instant Class",
       tutor_id: profile?.id,
       tutor_name: profile?.name,
-      is_active: true,
+      is_active: false,
     });
 
     if (!createdRoom) {
@@ -303,13 +303,13 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
     const code = generateMeetingCode();
     setShowNewMeetingDropdown(false);
 
-    // Persist room in PostgreSQL backend before generating shareable link
+    // Persist room in PostgreSQL backend before generating shareable link (inactive until host starts)
     const createdRoom = await dbClient.upsertRoom({
       room_code: code,
       title: "Scheduled Class",
       tutor_id: profile?.id,
       tutor_name: profile?.name,
-      is_active: true,
+      is_active: false,
     });
 
     if (!createdRoom) {

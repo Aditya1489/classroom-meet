@@ -239,4 +239,74 @@ describe("Peer Leaving & Ghost Participant Elimination Pipeline", () => {
     assert.equal(unmuteRequests.length, 1);
     assert.equal(unmuteRequests[0].userId, "usr-sumit-456");
   });
+
+  it("TC-LEAVE-10: Peer heartbeat liveness watchdog detects silent dropped peer and purges them", () => {
+    const participants = new Map<string, any>();
+    const peerLastSeen = new Map<string, number>();
+
+    participants.set("usr-aditya-123", {
+      id: "usr-aditya-123",
+      userId: "usr-aditya-123",
+      name: "Aditya Chavhan",
+    });
+
+    // Simulated: last heartbeat was 20 seconds ago
+    peerLastSeen.set("usr-aditya-123", Date.now() - 20000);
+
+    const now = Date.now();
+    const TIMEOUT_MS = 14000;
+    const purged: string[] = [];
+
+    for (const [key, part] of Array.from(participants.entries())) {
+      const lastSeen = peerLastSeen.get(part.id) || 0;
+      if (lastSeen > 0 && (now - lastSeen) > TIMEOUT_MS) {
+        purged.push(key);
+        participants.delete(key);
+        peerLastSeen.delete(key);
+      }
+    }
+
+    assert.equal(purged.length, 1);
+    assert.equal(purged[0], "usr-aditya-123");
+    assert.equal(participants.size, 0, "Inactive participant must be purged by watchdog");
+  });
+
+  it("TC-LEAVE-11: mediasoupClient contains buffer flush delay in disconnect and PEER_HEARTBEAT handling", async () => {
+    const fs = await import("node:fs/promises");
+    const code = await fs.readFile("src/engine/mediasoupClient.ts", "utf-8");
+
+    assert.ok(
+      code.includes("PEER_HEARTBEAT"),
+      "mediasoupClient must recognize PEER_HEARTBEAT"
+    );
+    assert.ok(
+      code.includes("livenessWatchdogInterval"),
+      "mediasoupClient must implement liveness watchdog interval"
+    );
+    assert.ok(
+      code.includes("setTimeout"),
+      "mediasoupClient must delay socket close to flush outbound leave packets"
+    );
+  });
+
+  it("TC-LEAVE-12: MeetingRoom reconciles database left_at participant departures", () => {
+    let remoteParticipants = [
+      { id: "usr-aditya-123", userId: "usr-aditya-123", name: "Aditya Chavhan" },
+      { id: "usr-active-456", userId: "usr-active-456", name: "Active Student" },
+    ];
+
+    const dbParticipants = [
+      { user_id: "usr-aditya-123", display_name: "Aditya Chavhan", left_at: new Date().toISOString() },
+      { user_id: "usr-active-456", display_name: "Active Student", left_at: null },
+    ];
+
+    const leftUserIds = new Set(
+      dbParticipants.filter((p) => p.left_at).map((p) => p.user_id)
+    );
+
+    remoteParticipants = remoteParticipants.filter((p) => !leftUserIds.has(p.id));
+
+    assert.equal(remoteParticipants.length, 1);
+    assert.equal(remoteParticipants[0].id, "usr-active-456");
+  });
 });

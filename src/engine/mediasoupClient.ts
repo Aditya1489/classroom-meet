@@ -59,7 +59,7 @@ export interface MicRequestEvent {
 
 export interface ControlMessageEvent {
   isControl: boolean;
-  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE" | "HAND_RAISE" | "HAND_LOWER" | "PEER_LEFT";
+  controlAction: "REQUEST_MIC" | "CANCEL_REQUEST" | "MIC_RESPONSE" | "FORCE_MUTE" | "WHITEBOARD_STATE" | "PEER_MUTE_STATE" | "CLASS_ENDED" | "SCREENSHARE_STATE" | "HAND_RAISE" | "HAND_LOWER" | "PEER_LEFT" | "PEER_HEARTBEAT";
   userId?: string;
   targetUserId?: string;
   peerId?: string;
@@ -204,6 +204,10 @@ export class MathsyMediasoupEngine {
   public authorizedTutorId: string | null = null;
   private isEnablingAudio: boolean = false;
   private processedControlIds = new Set<string>();
+  private peerLastSeen = new Map<string, number>();
+  private heartbeatInterval: any = null;
+  private livenessWatchdogInterval: any = null;
+  private handlePeerLeftFn: ((data: any) => void) | null = null;
 
   public serverRole: "tutor" | "student" = "student";
   public isServerOwner: boolean = false;
@@ -260,6 +264,12 @@ export class MathsyMediasoupEngine {
 
   public setIsHostUser(isHost: boolean) {
     this.isHostUser = isHost;
+  }
+
+  public removeParticipant(identifier: string, name?: string) {
+    if (this.handlePeerLeftFn) {
+      this.handlePeerLeftFn({ id: identifier, userId: identifier, name });
+    }
   }
 
   private signalingUrl: string;
@@ -365,6 +375,41 @@ export class MathsyMediasoupEngine {
             clearTimeout(connectTimer);
             connectTimer = null;
           }
+
+          // Start peer heartbeat broadcast (every 4 seconds)
+          if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+          this.heartbeatInterval = setInterval(() => {
+            if (this.socket && this.socket.connected) {
+              this.socket.emit("chatMessage", {
+                isControl: true,
+                controlAction: "PEER_HEARTBEAT",
+                senderId: this.currentUserId,
+                userId: this.currentUserId,
+                name: this.myName,
+                roomCode: this.roomId,
+                timestamp: Date.now(),
+              });
+            }
+          }, 4000);
+
+          // Start peer liveness watchdog (every 4 seconds)
+          if (this.livenessWatchdogInterval) clearInterval(this.livenessWatchdogInterval);
+          this.livenessWatchdogInterval = setInterval(() => {
+            const now = Date.now();
+            const TIMEOUT_MS = 14000;
+            for (const [, part] of Array.from(this.participants.entries())) {
+              const lastSeenById = this.peerLastSeen.get(part.id);
+              const lastSeenByUserId = part.userId ? this.peerLastSeen.get(part.userId) : undefined;
+              const lastSeenByName = part.name ? this.peerLastSeen.get(part.name.trim().toLowerCase()) : undefined;
+              const lastSeen = Math.max(lastSeenById || 0, lastSeenByUserId || 0, lastSeenByName || 0);
+
+              if (lastSeen > 0 && (now - lastSeen) > TIMEOUT_MS) {
+                console.log(`[MathsyMeet Engine] Liveness watchdog: participant ${part.name} (${part.id}) inactive for ${now - lastSeen}ms. Removing.`);
+                handlePeerLeft({ id: part.id, userId: part.userId, name: part.name });
+              }
+            }
+          }, 4000);
+
           resolve();
         }
       };
@@ -495,6 +540,9 @@ export class MathsyMediasoupEngine {
             const pId = peer.id || peer.baseUserId;
             const pUserId = peer.baseUserId || peer.userId || peer.id;
             if (pId && pId !== sanitizedUserId && pId !== userId) {
+              this.peerLastSeen.set(pId, Date.now());
+              if (pUserId) this.peerLastSeen.set(pUserId, Date.now());
+              if (peer.name) this.peerLastSeen.set(peer.name.trim().toLowerCase(), Date.now());
               this.participants.set(pId, {
                 id: pId,
                 userId: pUserId,
@@ -534,6 +582,9 @@ export class MathsyMediasoupEngine {
         const pUserId = peer.baseUserId || peer.userId || peer.id;
         if (!pId || pId === sanitizedUserId || pId === userId) return;
         console.log("[MathsyMeet Engine] Peer joined room:", peer);
+        this.peerLastSeen.set(pId, Date.now());
+        if (pUserId) this.peerLastSeen.set(pUserId, Date.now());
+        if (peer.name) this.peerLastSeen.set(peer.name.trim().toLowerCase(), Date.now());
         this.participants.set(pId, {
           id: pId,
           userId: pUserId,
@@ -662,14 +713,25 @@ export class MathsyMediasoupEngine {
 
         for (const k of keysToDelete) {
           this.participants.delete(k);
+          this.peerLastSeen.delete(k);
         }
-        if (targetId) this.participants.delete(targetId);
-        if (targetUserId) this.participants.delete(targetUserId);
+        if (targetId) {
+          this.participants.delete(targetId);
+          this.peerLastSeen.delete(targetId);
+        }
+        if (targetUserId) {
+          this.participants.delete(targetUserId);
+          this.peerLastSeen.delete(targetUserId);
+        }
+        if (targetName) {
+          this.peerLastSeen.delete(targetName.trim().toLowerCase());
+        }
 
         this.notifyParticipants();
         this.onPeerLeft?.(targetId || targetUserId || "", targetUserId, targetName);
       };
 
+      this.handlePeerLeftFn = handlePeerLeft;
       this.socket.on("peerLeft", handlePeerLeft);
       this.socket.on("peer-left", handlePeerLeft);
       this.socket.on("peer:left", handlePeerLeft);
@@ -677,6 +739,10 @@ export class MathsyMediasoupEngine {
       this.socket.on("user-left", handlePeerLeft);
       this.socket.on("participantLeft", handlePeerLeft);
       this.socket.on("participant:left", handlePeerLeft);
+      this.socket.on("peerClosed", handlePeerLeft);
+      this.socket.on("peer-closed", handlePeerLeft);
+      this.socket.on("peerDisconnected", handlePeerLeft);
+      this.socket.on("userDisconnected", handlePeerLeft);
 
       // Handle incoming media producers
       const handleNewProducer = async (data: any) => {
@@ -877,6 +943,16 @@ export class MathsyMediasoupEngine {
             roomCode: msg.roomCode,
             currentRoom: this.roomId,
           });
+
+          // Refresh sender liveness
+          const sender = msg.senderId || msg.userId || msg.peerId;
+          const now = Date.now();
+          if (sender) this.peerLastSeen.set(sender, now);
+          if (msg.name) this.peerLastSeen.set(msg.name.trim().toLowerCase(), now);
+
+          if (msg.controlAction === "PEER_HEARTBEAT") {
+            return;
+          }
 
           if (msg.controlAction === "CLASS_ENDED") {
             this.chatMessages = [];
@@ -2076,6 +2152,16 @@ export class MathsyMediasoupEngine {
   }
 
   public disconnect() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.livenessWatchdogInterval) {
+      clearInterval(this.livenessWatchdogInterval);
+      this.livenessWatchdogInterval = null;
+    }
+    this.peerLastSeen.clear();
+
     try {
       this.leaveRoom();
     } catch {}
@@ -2083,9 +2169,15 @@ export class MathsyMediasoupEngine {
     this.disableVideo();
     this.stopScreenShare();
     if (this.socket) {
-      this.socket.disconnect();
-      this.socket.close();
+      const sock = this.socket;
       this.socket = null;
+      // Allow brief 150ms buffer flush so outbound PEER_LEFT/leave packets exit before socket termination
+      setTimeout(() => {
+        try {
+          sock.disconnect();
+          sock.close();
+        } catch {}
+      }, 150);
     }
     this.participants.clear();
     this.producers.clear();

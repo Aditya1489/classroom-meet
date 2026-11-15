@@ -223,7 +223,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             setIsOwner(true);
             setSelectedRole("tutor");
             sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
-          } else if (!isHostFromLanding && sessionStorage.getItem(`mathsy_host_${meetingCode}`) !== "true") {
+          } else {
             setIsRoomHost(false);
             setIsOwner(false);
             setSelectedRole("student");
@@ -250,8 +250,8 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
     }
 
     try {
-      // If room is known to not be active yet, keep student waiting gracefully in lobby
-      if (roomRecord && !roomRecord.is_active) {
+      // If room is not active yet (tutor hasn't started class), keep student waiting gracefully in lobby
+      if (!roomRecord || !roomRecord.is_active) {
         setKnockStatus("waiting_for_host");
         setIsAskingToJoin(true);
         toast.info("Class hasn't started yet. Waiting for tutor to start...");
@@ -424,6 +424,14 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   };
 
   const handleJoinDirect = (role: "tutor" | "student", present = false) => {
+    // SECURITY GUARD: Non-hosts CANNOT join if room is not active yet!
+    if (!isRoomHost && (!roomRecord || !roomRecord.is_active)) {
+      setKnockStatus("waiting_for_host");
+      setIsAskingToJoin(true);
+      toast.info("Class hasn't started yet. Waiting for tutor to start...");
+      return;
+    }
+
     const fallbackPrefix = role === "tutor" ? "Tutor" : "Student";
     const finalName = displayName.trim() || profile?.name || `${fallbackPrefix} ${Math.floor(100 + Math.random() * 900)}`;
 
@@ -1172,12 +1180,10 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
                   <>
                     <button
                       onClick={async () => {
-                        if (roomRecord && !roomRecord.is_active) {
-                          try {
-                            await dbClient.reactivateRoom(meetingCode);
-                          } catch (e) {
-                            console.warn("Could not reactivate room:", e);
-                          }
+                        try {
+                          await dbClient.reactivateRoom(meetingCode);
+                        } catch (e) {
+                          console.warn("Could not reactivate room:", e);
                         }
                         handleJoinDirect("tutor", false);
                       }}
@@ -1198,12 +1204,10 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
                     <button
                       onClick={async () => {
-                        if (roomRecord && !roomRecord.is_active) {
-                          try {
-                            await dbClient.reactivateRoom(meetingCode);
-                          } catch (e) {
-                            console.warn("Could not reactivate room:", e);
-                          }
+                        try {
+                          await dbClient.reactivateRoom(meetingCode);
+                        } catch (e) {
+                          console.warn("Could not reactivate room:", e);
                         }
                         handleJoinDirect("tutor", true);
                       }}

@@ -1129,6 +1129,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       )
       .then((joinRes) => {
         if (joinRes) {
+          // If server rejected non-host because class hasn't started or admission is required, boot back to lobby
+          if (!isHostRef.current && (joinRes.code === "CLASS_NOT_STARTED" || joinRes.code === "ADMISSION_REQUIRED" || (joinRes.error && !joinRes.isHost))) {
+            console.warn("[MeetingRoom] Room entry rejected by server:", joinRes);
+            toast.error(joinRes.error || "This class has not started yet. Waiting for tutor...");
+            try {
+              engine.disconnect();
+            } catch {}
+            onLeaveMeeting();
+            return;
+          }
+
           if (joinRes.tutorId) {
             engine.setAuthorizedTutorId(String(joinRes.tutorId));
           }
@@ -1802,8 +1813,55 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       engineRef.current?.leaveRoom();
       dbClient.recordParticipantLeave(meetingCode, myUserId, myName);
     } catch {}
-    onLeaveMeeting();
+    // Allow 150ms buffer flush so outbound PEER_LEFT socket packets traverse network
+    setTimeout(() => {
+      onLeaveMeeting();
+    }, 150);
   };
+
+  // Reconcile participant departures with authoritative database presence
+  useEffect(() => {
+    if (!meetingCode) return;
+    const interval = setInterval(async () => {
+      try {
+        const dbParticipants = await dbClient.getParticipants(meetingCode);
+        if (Array.isArray(dbParticipants) && remoteParticipants.length > 0) {
+          const leftUserIds = new Set(
+            dbParticipants
+              .filter((p) => p.left_at)
+              .map((p) => p.user_id)
+              .filter(Boolean)
+          );
+          const leftNames = new Set(
+            dbParticipants
+              .filter((p) => p.left_at)
+              .map((p) => (p.display_name || "").trim().toLowerCase())
+              .filter(Boolean)
+          );
+
+          if (leftUserIds.size > 0 || leftNames.size > 0) {
+            setRemoteParticipants((prev) =>
+              prev.filter((p) => {
+                const isLeft =
+                  leftUserIds.has(p.id) ||
+                  (p.userId && leftUserIds.has(p.userId)) ||
+                  (p.name && leftNames.has(p.name.trim().toLowerCase()));
+                if (isLeft) {
+                  console.log(`[MeetingRoom] Pruning departed participant: ${p.name} (${p.id})`);
+                  engineRef.current?.removeParticipant(p.id, p.name);
+                }
+                return !isLeft;
+              })
+            );
+          }
+        }
+      } catch {
+        // silent sync
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [meetingCode, remoteParticipants.length]);
 
   // End Meeting Handler
   const handleEndClassClick = async () => {

@@ -167,7 +167,7 @@ export const dbClient = {
   /**
    * Participants
    */
-  async recordParticipantJoin(participant: DbParticipant, customToken?: string): Promise<{ participant?: DbParticipant; isHost?: boolean; sessionId?: string; tutorId?: string } | null> {
+  async recordParticipantJoin(participant: DbParticipant, customToken?: string): Promise<{ participant?: DbParticipant; isHost?: boolean; sessionId?: string; tutorId?: string; error?: string; code?: string } | null> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(participant.room_code)}/participants`, {
         method: "POST",
@@ -181,10 +181,11 @@ export const dbClient = {
       if (res.ok) {
         return await res.json();
       }
-      return null;
-    } catch (err) {
+      const errData = await res.json().catch(() => ({}));
+      return { error: errData.error || "Failed to join room", code: errData.code || "JOIN_FAILED" };
+    } catch (err: any) {
       console.warn("[dbClient] Participant join error:", err);
-      return null;
+      return { error: err.message, code: "NETWORK_ERROR" };
     }
   },
 

@@ -225,6 +225,12 @@ roomsRouter.post("/:roomCode/reactivate", requireAuth, async (req: Request, res:
       [room.id, newSessionId, user.id, user.full_name || user.name || "Tutor"]
     );
 
+    // Invalidate stale knocks from prior sessions so new session requires fresh admission
+    await query(
+      "UPDATE room_knocks SET status = 'cancelled' WHERE room_code = $1 AND status NOT IN ('cancelled', 'denied');",
+      [sanitizedCode]
+    );
+
     // Initialize/sync active session in MongoDB
     const sessionsCol = getSessionsCollection();
     if (sessionsCol) {
@@ -507,8 +513,9 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
              ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
            )
            AND status = 'admitted'
+           AND ($4::timestamptz IS NULL OR responded_at >= $4::timestamptz)
          ORDER BY responded_at DESC LIMIT 1;`,
-        [sanitizedCode, isUserUUID ? userId : null, user.email || null]
+        [sanitizedCode, isUserUUID ? userId : null, user.email || null, room.started_at || null]
       );
 
       if (admissionRes.rows.length === 0) {
@@ -757,7 +764,7 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
       });
     }
 
-    // 2. Check if already admitted
+    // 2. Check if already admitted in this active session
     const alreadyAdmitted = await query(
       `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, responded_at
        FROM room_knocks
@@ -767,8 +774,9 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
            ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text))
          )
          AND status = 'admitted'
+         AND ($4::timestamptz IS NULL OR responded_at >= $4::timestamptz)
        ORDER BY responded_at DESC LIMIT 1;`,
-      [sanitizedCode, validUserId, email]
+      [sanitizedCode, validUserId, email, room.started_at || null]
     );
 
     if (alreadyAdmitted.rows.length > 0) {
@@ -1048,6 +1056,12 @@ roomsRouter.post("/:roomCode/end", requireAuth, async (req: Request, res: Respon
     // Mark all remaining participants as left
     await query(
       "UPDATE room_participants SET left_at = NOW() WHERE room_code = $1 AND left_at IS NULL",
+      [sanitizedCode]
+    );
+
+    // Invalidate all pending and admitted knocks so prior permissions do not leak into future sessions
+    await query(
+      "UPDATE room_knocks SET status = 'cancelled' WHERE room_code = $1 AND status NOT IN ('cancelled', 'denied')",
       [sanitizedCode]
     );
 

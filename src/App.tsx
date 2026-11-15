@@ -9,6 +9,7 @@ import { PlatformAdminView } from "./components/admin/PlatformAdminView";
 import { sanitizeRoomId } from "./lib/utils";
 import { sanitizeUrlToken } from "./types/embedProtocol";
 import { createDemoRoom } from "./services/roomService";
+import { dbClient } from "./lib/dbClient";
 import { Video, ArrowLeft, RefreshCw, Home, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -142,7 +143,7 @@ export default function App() {
           setIsHostFromLanding(wasHost);
           setInitialRole(wasHost ? "tutor" : "student");
 
-          // Keep user inside the meeting room on page reload
+          // Keep user inside the meeting room on page reload ONLY if host or if room is active
           const activeSession = sessionStorage.getItem(`mathsy_active_meet_${code}`);
           if (activeSession) {
             try {
@@ -150,10 +151,24 @@ export default function App() {
               if (wasHost) {
                 parsedOptions.isHost = true;
                 parsedOptions.role = "tutor";
+                setJoinOptions(parsedOptions);
+                setCurrentView("room");
+                return;
+              } else {
+                dbClient.getRoom(code).then((r) => {
+                  if (r && r.is_active) {
+                    setJoinOptions(parsedOptions);
+                    setCurrentView("room");
+                  } else {
+                    sessionStorage.removeItem(`mathsy_active_meet_${code}`);
+                    setCurrentView("lobby");
+                  }
+                }).catch(() => {
+                  sessionStorage.removeItem(`mathsy_active_meet_${code}`);
+                  setCurrentView("lobby");
+                });
+                return;
               }
-              setJoinOptions(parsedOptions);
-              setCurrentView("room");
-              return;
             } catch (e) {
               console.warn("Failed to parse saved meet session:", e);
             }
