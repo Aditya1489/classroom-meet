@@ -2,6 +2,7 @@ import React, { useRef, useEffect } from "react";
 
 interface VideoTrackPlayerProps {
   track: MediaStreamTrack | null;
+  audioTrack?: MediaStreamTrack | null;
   className?: string;
   style?: React.CSSProperties;
   mirror?: boolean;
@@ -10,6 +11,7 @@ interface VideoTrackPlayerProps {
 
 export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
   track,
+  audioTrack,
   className = "",
   style,
   mirror = false,
@@ -26,17 +28,31 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
       return;
     }
 
-    // Crucial for Safari / WebKit: set audio muting and inline playback attributes BEFORE attaching srcObject
-    el.muted = true;
-    el.defaultMuted = true;
     el.playsInline = true;
     el.setAttribute("playsinline", "true");
     el.setAttribute("webkit-playsinline", "true");
-    el.setAttribute("muted", "true");
 
-    // Only create and assign a new MediaStream if the track actually changed
-    if (!streamRef.current || streamRef.current.getVideoTracks()[0] !== track) {
-      const stream = new MediaStream([track]);
+    // Unified A/V sync: If an audioTrack is present, play it synchronously via this video element's media clock
+    if (audioTrack) {
+      el.muted = false;
+      el.defaultMuted = false;
+      el.volume = 1.0;
+      el.removeAttribute("muted");
+    } else {
+      el.muted = true;
+      el.defaultMuted = true;
+      el.setAttribute("muted", "true");
+    }
+
+    // Bind video and audio tracks together into the same MediaStream for hardware A/V clock synchronization
+    const currentVideo = streamRef.current?.getVideoTracks()[0];
+    const currentAudio = streamRef.current?.getAudioTracks()[0];
+    if (!streamRef.current || currentVideo !== track || currentAudio !== (audioTrack || undefined)) {
+      const tracksToAttach: MediaStreamTrack[] = [track];
+      if (audioTrack) {
+        tracksToAttach.push(audioTrack);
+      }
+      const stream = new MediaStream(tracksToAttach);
       streamRef.current = stream;
       el.srcObject = stream;
     }
@@ -45,11 +61,25 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
       if (el) {
         const promise = el.play();
         if (promise !== undefined) {
-          promise.catch(() => {
-            // Safari autoplay retry
-            setTimeout(() => {
-              if (el && el.paused) el.play().catch(() => {});
-            }, 300);
+          promise.catch((err) => {
+            // Autoplay policy fallback: if unmuted playback is blocked, play muted first then unlock on user gesture
+            if (!el.muted && err?.name === "NotAllowedError") {
+              el.muted = true;
+              el.play().catch(() => {});
+              const unlockAudio = () => {
+                if (el) {
+                  el.muted = false;
+                  el.play().catch(() => {});
+                }
+              };
+              window.addEventListener("click", unlockAudio, { once: true });
+              window.addEventListener("touchstart", unlockAudio, { once: true });
+            } else {
+              // Safari autoplay retry
+              setTimeout(() => {
+                if (el && el.paused) el.play().catch(() => {});
+              }, 300);
+            }
           });
         }
       }
@@ -66,15 +96,21 @@ export const VideoTrackPlayer: React.FC<VideoTrackPlayerProps> = ({
     };
 
     track.addEventListener("unmute", handleUnmute);
+    if (audioTrack) {
+      audioTrack.addEventListener("unmute", handleUnmute);
+    }
     el.addEventListener("canplay", handleCanPlay);
     el.addEventListener("loadedmetadata", handleCanPlay);
 
     return () => {
       track.removeEventListener("unmute", handleUnmute);
+      if (audioTrack) {
+        audioTrack.removeEventListener("unmute", handleUnmute);
+      }
       el.removeEventListener("canplay", handleCanPlay);
       el.removeEventListener("loadedmetadata", handleCanPlay);
     };
-  }, [track]);
+  }, [track, audioTrack]);
 
   if (!track) return null;
 

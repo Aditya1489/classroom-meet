@@ -238,4 +238,64 @@ describe("Screen Share System & Tab Audio Pipeline", () => {
       "RemoteParticipant interface must declare screenAudioTrack?: MediaStreamTrack"
     );
   });
+
+  // ── 9. A/V Lip-Sync: Low-latency Content Hints ──
+  it("TC-AVSYNC-01: Engine configures contentHint motion for video and music for audio to eliminate encoder buffer lag", async () => {
+    const fs = await import("node:fs/promises");
+    const code = await fs.readFile("src/engine/mediasoupClient.ts", "utf-8");
+
+    assert.ok(
+      code.includes('track.contentHint = "motion"'),
+      "Screen video track must set contentHint = motion to prevent encoder buffering lag"
+    );
+    assert.ok(
+      code.includes('audioTrack.contentHint = "music"'),
+      "Screen audio track must set contentHint = music for full-bandwidth real-time fidelity"
+    );
+  });
+
+  // ── 10. A/V Lip-Sync: Sender & Receiver Synchronization Group (streamId) ──
+  it("TC-AVSYNC-02: Producer and Consumer pipelines link screen video and audio with matching streamId", async () => {
+    const fs = await import("node:fs/promises");
+    const code = await fs.readFile("src/engine/mediasoupClient.ts", "utf-8");
+
+    assert.ok(
+      code.includes("syncStreamId") || code.includes("streamId: syncStreamId") || code.includes("screen-sync-"),
+      "Engine must pass unified streamId to produce for A/V synchronization"
+    );
+    assert.ok(
+      code.includes("playoutDelayHint") || code.includes("jitterBufferTarget"),
+      "Consumer must configure playout delay hint for minimum latency"
+    );
+  });
+
+  // ── 11. A/V Lip-Sync: Unified MediaStream in VideoTrackPlayer ──
+  it("TC-AVSYNC-03: VideoTrackPlayer accepts audioTrack and binds it to the same MediaStream for hardware A/V clock sync", async () => {
+    const fs = await import("node:fs/promises");
+    const vtpCode = await fs.readFile("src/components/meet/VideoTrackPlayer.tsx", "utf-8");
+
+    assert.ok(
+      vtpCode.includes("audioTrack?: MediaStreamTrack | null"),
+      "VideoTrackPlayer must accept optional audioTrack prop"
+    );
+    assert.ok(
+      vtpCode.includes("tracksToAttach") || vtpCode.includes("new MediaStream(tracksToAttach)") || vtpCode.includes("new MediaStream([track, audioTrack])"),
+      "VideoTrackPlayer must combine video and audio tracks into a single MediaStream"
+    );
+  });
+
+  // ── 12. A/V Lip-Sync: MeetingRoom Presentation Stage Wiring ──
+  it("TC-AVSYNC-04: MeetingRoom passes remoteScreenSharer.screenAudioTrack into VideoTrackPlayer for hardware lip-sync", async () => {
+    const fs = await import("node:fs/promises");
+    const mrCode = await fs.readFile("src/components/meet/MeetingRoom.tsx", "utf-8");
+
+    assert.ok(
+      mrCode.includes("audioTrack={localScreenTrack ? null : remoteScreenSharer?.screenAudioTrack}"),
+      "MeetingRoom must pass screen audio to VideoTrackPlayer for remote viewers while keeping local presenter muted"
+    );
+    assert.ok(
+      mrCode.includes("playScreenAudio={layoutMode !== \"screenshare\"}"),
+      "RemoteAudioElement must defer to VideoTrackPlayer during screen share to prevent audio doubling"
+    );
+  });
 });

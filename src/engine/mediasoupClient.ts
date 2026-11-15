@@ -1150,9 +1150,19 @@ export class MathsyMediasoupEngine {
 
         if (this.localScreenTrack && !this.producers.has("screen")) {
           try {
+            const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
             const prod = await this.sendTransport.produce({
               track: this.localScreenTrack,
-              appData: { mediaType: "screen", source: "screen" }
+              streamId: syncStreamId,
+              encodings: [
+                {
+                  maxBitrate: 3500000,
+                  maxFramerate: 30,
+                  priority: "high",
+                  networkPriority: "high",
+                },
+              ],
+              appData: { mediaType: "screen", source: "screen", syncStreamId }
             });
             this.producers.set("screen", prod);
             console.log("[MathsyMeet Engine] Auto-produced screen track:", prod.id);
@@ -1163,9 +1173,11 @@ export class MathsyMediasoupEngine {
 
         if (this.localScreenAudioTrack && !this.producers.has("screenAudio")) {
           try {
+            const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
             const prod = await this.sendTransport.produce({
               track: this.localScreenAudioTrack,
-              appData: { mediaType: "screenAudio", source: "screenAudio" }
+              streamId: syncStreamId,
+              appData: { mediaType: "screenAudio", source: "screenAudio", syncStreamId }
             });
             this.producers.set("screenAudio", prod);
             console.log("[MathsyMeet Engine] Auto-produced screenAudio track:", prod.id);
@@ -1239,12 +1251,41 @@ export class MathsyMediasoupEngine {
         return;
       }
 
+      const isScreenMedia =
+        source === "screen" ||
+        source === "screenAudio" ||
+        source === "screen-audio" ||
+        data?.appData?.mediaType === "screen" ||
+        data?.appData?.mediaType === "screenAudio" ||
+        data?.appData?.source === "screen" ||
+        data?.appData?.source === "screenAudio";
+
+      const syncStreamId = isScreenMedia
+        ? `screen-sync-${peerId || "shared"}`
+        : undefined;
+
       const consumer = await this.recvTransport.consume({
         id: data.id,
         producerId: data.producerId,
         kind: data.kind,
         rtpParameters: data.rtpParameters,
+        streamId: syncStreamId,
+        appData: { ...data.appData, source, mediaType: source || data?.appData?.mediaType },
       });
+
+      // Optimize receiver jitter buffer and playout delay for immediate lip-sync A/V rendering
+      if (consumer.rtpReceiver) {
+        try {
+          if ("playoutDelayHint" in consumer.rtpReceiver) {
+            (consumer.rtpReceiver as any).playoutDelayHint = 0;
+          }
+          if ("jitterBufferTarget" in consumer.rtpReceiver) {
+            (consumer.rtpReceiver as any).jitterBufferTarget = 0;
+          }
+        } catch (e) {
+          console.warn("[MathsyMeet Engine] Receiver playout hint note:", e);
+        }
+      }
 
       this.consumers.set(consumer.id, consumer);
       await this.request("resumeConsumer", { consumerId: consumer.id });
@@ -1483,6 +1524,11 @@ export class MathsyMediasoupEngine {
       const track = stream.getVideoTracks()[0];
       this.localScreenTrack = track;
 
+      // Configure low-latency motion hint to prevent encoder frame queue lag behind live audio
+      if ("contentHint" in track) {
+        track.contentHint = "motion";
+      }
+
       track.onended = () => {
         this.stopScreenShare();
       };
@@ -1491,6 +1537,9 @@ export class MathsyMediasoupEngine {
       if (audioTracks.length > 0) {
         const audioTrack = audioTracks[0];
         this.localScreenAudioTrack = audioTrack;
+        if ("contentHint" in audioTrack) {
+          audioTrack.contentHint = "music";
+        }
         audioTrack.onended = () => {
           this.stopScreenAudio();
         };
@@ -1499,10 +1548,21 @@ export class MathsyMediasoupEngine {
         console.log("[MathsyMeet Engine] Screen share started without tab/system audio");
       }
 
+      const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
+
       if (this.sendTransport) {
         const producer = await this.sendTransport.produce({
           track,
-          appData: { mediaType: "screen", source: "screen" }
+          streamId: syncStreamId,
+          encodings: [
+            {
+              maxBitrate: 3500000,
+              maxFramerate: 30,
+              priority: "high",
+              networkPriority: "high",
+            },
+          ],
+          appData: { mediaType: "screen", source: "screen", syncStreamId }
         });
         this.producers.set("screen", producer);
 
@@ -1510,10 +1570,11 @@ export class MathsyMediasoupEngine {
           try {
             const audioProducer = await this.sendTransport.produce({
               track: this.localScreenAudioTrack,
-              appData: { mediaType: "screenAudio", source: "screenAudio" }
+              streamId: syncStreamId,
+              appData: { mediaType: "screenAudio", source: "screenAudio", syncStreamId }
             });
             this.producers.set("screenAudio", audioProducer);
-            console.log("[MathsyMeet Engine] Produced screenAudio track:", audioProducer.id);
+            console.log("[MathsyMeet Engine] Produced screenAudio track with synchronized streamId:", audioProducer.id, syncStreamId);
           } catch (audioErr: any) {
             console.warn("[MathsyMeet Engine] Produce screen audio error:", audioErr.message);
           }

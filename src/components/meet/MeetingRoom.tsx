@@ -101,11 +101,14 @@ interface MeetingRoomProps {
   onLeaveMeeting: () => void;
 }
 
-const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ participant }) => {
+const RemoteAudioElement: React.FC<{
+  participant: RemoteParticipant;
+  playScreenAudio?: boolean;
+}> = ({ participant, playScreenAudio = true }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const screenAudioRef = useRef<HTMLAudioElement>(null);
 
-  // Play participant microphone audio
+  // Play participant microphone audio (Always active so tutor voice is never missed)
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
@@ -118,18 +121,18 @@ const RemoteAudioElement: React.FC<{ participant: RemoteParticipant }> = ({ part
     }
   }, [participant.audioTrack, participant.isAudioMuted]);
 
-  // Play participant shared screen / tab audio
+  // Play participant shared screen / tab audio as a fallback when screen share stage is not actively mounted
   useEffect(() => {
     const el = screenAudioRef.current;
     if (!el) return;
-    if (participant.screenAudioTrack) {
+    if (participant.screenAudioTrack && playScreenAudio) {
       const stream = new MediaStream([participant.screenAudioTrack]);
       el.srcObject = stream;
       el.play().catch((e) => console.warn(`[MathsyMeet ScreenAudioSink] play() error for ${participant.id}:`, e));
     } else {
       el.srcObject = null;
     }
-  }, [participant.screenAudioTrack]);
+  }, [participant.screenAudioTrack, playScreenAudio]);
 
   return (
     <>
@@ -1926,7 +1929,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       {/* Persistent Audio Sink: Guarantees remote student/tutor audio is always played regardless of active view layout (Whiteboard, Screen Share, Spotlight, or Grid) */}
       <div className="hidden" aria-hidden="true">
         {remoteParticipants.map((p) => (
-          <RemoteAudioElement key={p.id} participant={p} />
+          <RemoteAudioElement
+            key={p.id}
+            participant={p}
+            playScreenAudio={layoutMode !== "screenshare"}
+          />
         ))}
       </div>
 
@@ -2409,6 +2416,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 ) : (
                   <VideoTrackPlayer
                     track={activeScreenTrack}
+                    audioTrack={localScreenTrack ? null : remoteScreenSharer?.screenAudioTrack}
                     objectFit="contain"
                     className="w-full h-full object-contain select-none"
                   />
@@ -2896,6 +2904,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 >
                   <VideoTrackPlayer
                     track={activeScreenTrack}
+                    audioTrack={localScreenTrack ? null : remoteScreenSharer?.screenAudioTrack}
                     objectFit="contain"
                     className="w-full h-full object-contain select-none"
                   />
