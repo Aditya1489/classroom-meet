@@ -36,6 +36,7 @@ export const ClassInviteView: React.FC<ClassInviteViewProps> = ({
   const [showDeclineConfirm, setShowDeclineConfirm] = useState(initialAction === "decline");
 
   const handleAcceptInvite = async () => {
+    if (isSubmitting || hasAccepted) return;
     setIsSubmitting(true);
     try {
       const authToken = localStorage.getItem("mathsy_meet_token");
@@ -103,6 +104,7 @@ export const ClassInviteView: React.FC<ClassInviteViewProps> = ({
   }, [token]);
 
   const handleDeclineInvite = async () => {
+    if (isSubmitting || hasDeclined) return;
     setIsSubmitting(true);
     try {
       const authToken = localStorage.getItem("mathsy_meet_token");

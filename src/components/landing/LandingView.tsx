@@ -152,9 +152,12 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
       if (res.ok) {
         const data = await res.json();
         const attending: any[] = data.attendingClasses || [];
-        const pendingCount = attending.filter(
-          (c) => c.my_rsvp_status === "pending" && c.status !== "cancelled"
-        ).length;
+        const seenScheduleIds = new Set<string>();
+        const pendingCount = attending.filter((c) => {
+          if (!c || !c.id || seenScheduleIds.has(c.id)) return false;
+          seenScheduleIds.add(c.id);
+          return c.my_rsvp_status === "pending" && c.status !== "cancelled";
+        }).length;
         setScheduleNotificationCount(pendingCount);
       }
     } catch (e) {

@@ -185,10 +185,15 @@ export async function getMySchedule(userId: string, userEmail: string): Promise<
   const hostedClasses: ScheduledClassRecord[] = [];
   for (const row of hostedRes.rows) {
     const invitesRes = await query(
-      `SELECT ci.email, ci.rsvp_status, ci.rsvp_at, u.full_name as user_name, u.avatar_url as user_avatar
+      `SELECT DISTINCT ON (LOWER(ci.email))
+              ci.email, ci.rsvp_status, ci.rsvp_at, u.full_name as user_name, u.avatar_url as user_avatar
        FROM class_invitations ci
        LEFT JOIN users u ON ci.invitee_user_id = u.id
-       WHERE ci.schedule_id = $1;`,
+       WHERE ci.schedule_id = $1
+       ORDER BY LOWER(ci.email),
+                (CASE ci.rsvp_status WHEN 'accepted' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END) ASC,
+                ci.rsvp_at DESC NULLS LAST,
+                ci.created_at DESC;`,
       [row.id]
     );
     hostedClasses.push({
@@ -197,18 +202,25 @@ export async function getMySchedule(userId: string, userEmail: string): Promise<
     });
   }
 
-  // 2. Classes where user was invited (by email or user_id)
+  // 2. Classes where user was invited (by email or user_id) - strictly deduplicated by class schedule id
   const attendingRes = await query(
-    `SELECT cs.id, cs.room_code, cs.title, cs.subject, cs.description, cs.tutor_id,
-            cs.scheduled_at, cs.duration_minutes, cs.status, cs.created_at,
-            u.full_name as tutor_name, u.avatar_url as tutor_avatar,
-            ci.rsvp_status as my_rsvp_status, ci.token as invite_token
-     FROM class_invitations ci
-     JOIN class_schedules cs ON ci.schedule_id = cs.id
-     JOIN users u ON cs.tutor_id = u.id
-     WHERE (ci.invitee_user_id = $1 OR LOWER(ci.email) = $2)
-       AND cs.tutor_id != $1
-     ORDER BY cs.scheduled_at ASC;`,
+    `SELECT * FROM (
+       SELECT DISTINCT ON (cs.id)
+              cs.id, cs.room_code, cs.title, cs.subject, cs.description, cs.tutor_id,
+              cs.scheduled_at, cs.duration_minutes, cs.status, cs.created_at,
+              u.full_name as tutor_name, u.avatar_url as tutor_avatar,
+              ci.rsvp_status as my_rsvp_status, ci.token as invite_token
+       FROM class_invitations ci
+       JOIN class_schedules cs ON ci.schedule_id = cs.id
+       JOIN users u ON cs.tutor_id = u.id
+       WHERE (ci.invitee_user_id = $1 OR LOWER(ci.email) = $2)
+         AND cs.tutor_id != $1
+       ORDER BY cs.id,
+                (CASE ci.rsvp_status WHEN 'accepted' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END) ASC,
+                ci.rsvp_at DESC NULLS LAST,
+                ci.created_at DESC
+     ) sub
+     ORDER BY sub.scheduled_at ASC;`,
     [userId, normalizedEmail]
   );
 
@@ -310,8 +322,28 @@ export async function rsvpInviteByToken(params: {
     [params.rsvpStatus, validUserId, params.token]
   );
 
+  const updatedInvitation = updateRes.rows[0];
+
+  // Synchronize any duplicate invitations for this user and schedule to ensure consistent RSVP state
+  if (updatedInvitation && (validUserId || params.userEmail || invite.invited_email)) {
+    const userEmailToMatch = (params.userEmail || invite.invited_email || "").trim().toLowerCase();
+    await query(
+      `UPDATE class_invitations
+       SET rsvp_status = $1,
+           invitee_user_id = COALESCE(invitee_user_id, $2),
+           rsvp_at = NOW()
+       WHERE schedule_id = $3
+         AND id != $4
+         AND (
+           ($2::uuid IS NOT NULL AND invitee_user_id = $2::uuid)
+           OR ($5::text != '' AND LOWER(email) = $5::text)
+         );`,
+      [params.rsvpStatus, validUserId, updatedInvitation.schedule_id, updatedInvitation.id, userEmailToMatch]
+    );
+  }
+
   return {
-    invitation: updateRes.rows[0],
+    invitation: updatedInvitation,
     classDetails: invite,
   };
 }

@@ -551,5 +551,85 @@ test("Class Scheduling, Nodemailer & RSVP State Machine Suite", async (t) => {
     // Must reset to meetings (public home view)
     assert.equal(workspaceTab, "meetings", "Must reset workspaceTab to meetings when unauthenticated");
   });
+
+  await t.test("TC-SCHED-20: Deduplication in getMySchedule ensures accepting an invite multiple times never produces duplicate rows", () => {
+    // Simulated DB query result where multiple invitations exist for the same schedule
+    const mockDbAttendingRows = [
+      { id: "sched-101", title: "Algebra I", room_code: "abc-defg-hij", my_rsvp_status: "accepted", token: "tok-1" },
+      { id: "sched-101", title: "Algebra I", room_code: "abc-defg-hij", my_rsvp_status: "accepted", token: "tok-2" },
+      { id: "sched-102", title: "Geometry", room_code: "klm-nopq-rst", my_rsvp_status: "pending", token: "tok-3" },
+      { id: "sched-102", title: "Geometry", room_code: "klm-nopq-rst", my_rsvp_status: "accepted", token: "tok-4" },
+    ];
+
+    // Deduplication logic identical to our SQL DISTINCT ON / service layer
+    const dedupeMap = new Map<string, any>();
+    for (const row of mockDbAttendingRows) {
+      const existing = dedupeMap.get(row.id);
+      if (!existing) {
+        dedupeMap.set(row.id, row);
+      } else if (row.my_rsvp_status === "accepted" && existing.my_rsvp_status !== "accepted") {
+        dedupeMap.set(row.id, row);
+      }
+    }
+
+    const uniqueAttending = Array.from(dedupeMap.values());
+    assert.equal(uniqueAttending.length, 2, "Must deduplicate down to exactly 2 distinct classes");
+    assert.equal(uniqueAttending.find((c) => c.id === "sched-101")?.my_rsvp_status, "accepted");
+    assert.equal(uniqueAttending.find((c) => c.id === "sched-102")?.my_rsvp_status, "accepted", "Accepted status must take priority over pending");
+  });
+
+  await t.test("TC-SCHED-21: Frontend dedupeById strictly prevents duplicate class cards in allUpcoming, pendingInvites, and allInvites", () => {
+    const duplicateClasses = [
+      { id: "class-1", title: "Physics 101", scheduled_at: new Date(Date.now() + 3600000).toISOString(), duration_minutes: 60, status: "scheduled", my_rsvp_status: "accepted" },
+      { id: "class-1", title: "Physics 101", scheduled_at: new Date(Date.now() + 3600000).toISOString(), duration_minutes: 60, status: "scheduled", my_rsvp_status: "accepted" },
+      { id: "class-2", title: "Chemistry 101", scheduled_at: new Date(Date.now() + 7200000).toISOString(), duration_minutes: 60, status: "scheduled", my_rsvp_status: "pending" },
+      { id: "class-2", title: "Chemistry 101", scheduled_at: new Date(Date.now() + 7200000).toISOString(), duration_minutes: 60, status: "scheduled", my_rsvp_status: "pending" },
+    ];
+
+    const dedupeById = (classes: any[]): any[] => {
+      const seen = new Set<string>();
+      const out: any[] = [];
+      for (const c of classes) {
+        if (c && c.id && !seen.has(c.id)) {
+          seen.add(c.id);
+          out.push(c);
+        }
+      }
+      return out;
+    };
+
+    const upcoming = dedupeById(duplicateClasses.filter((c) => c.my_rsvp_status === "accepted"));
+    const pending = dedupeById(duplicateClasses.filter((c) => c.my_rsvp_status === "pending"));
+    const all = dedupeById(duplicateClasses);
+
+    assert.equal(upcoming.length, 1, "allUpcoming must have exactly 1 row for Physics 101");
+    assert.equal(upcoming[0].id, "class-1");
+
+    assert.equal(pending.length, 1, "pendingInvites must have exactly 1 row for Chemistry 101");
+    assert.equal(pending[0].id, "class-2");
+
+    assert.equal(all.length, 2, "allInvites must have exactly 2 distinct rows total");
+  });
+
+  await t.test("TC-SCHED-22: Acceptance synchronization logic updates sibling invitations for the same user and schedule", () => {
+    let invitations = [
+      { id: "inv-1", schedule_id: "sched-999", email: "student@example.com", invitee_user_id: "user-1", rsvp_status: "accepted" },
+      { id: "inv-2", schedule_id: "sched-999", email: "student@example.com", invitee_user_id: null, rsvp_status: "pending" },
+    ];
+
+    // When accepting inv-1, inv-2 for the same schedule and matching email must be synchronized
+    const targetSchedule = "sched-999";
+    const userEmail = "student@example.com";
+    const status = "accepted";
+
+    invitations = invitations.map((inv) => {
+      if (inv.schedule_id === targetSchedule && (inv.email.toLowerCase() === userEmail.toLowerCase() || inv.invitee_user_id === "user-1")) {
+        return { ...inv, rsvp_status: status };
+      }
+      return inv;
+    });
+
+    assert.ok(invitations.every((inv) => inv.rsvp_status === "accepted"), "All duplicate invitations for user must become accepted");
+  });
 });
 

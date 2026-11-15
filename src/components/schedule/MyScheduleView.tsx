@@ -86,8 +86,31 @@ export const MyScheduleView: React.FC<MyScheduleViewProps> = ({
 
       if (res.ok) {
         const data = await res.json();
-        const attending: ScheduledClass[] = data.attendingClasses || [];
-        setHostedClasses(data.hostedClasses || []);
+        const rawAttending: ScheduledClass[] = data.attendingClasses || [];
+        const rawHosted: ScheduledClass[] = data.hostedClasses || [];
+
+        // Deduplicate classes by unique ID, prioritizing 'accepted' RSVP status
+        const deduplicateClasses = (list: ScheduledClass[]): ScheduledClass[] => {
+          const map = new Map<string, ScheduledClass>();
+          for (const item of list) {
+            if (!item || !item.id) continue;
+            const existing = map.get(item.id);
+            if (!existing) {
+              map.set(item.id, item);
+            } else {
+              // Prefer 'accepted' over 'pending' or 'declined'
+              if (item.my_rsvp_status === "accepted" && existing.my_rsvp_status !== "accepted") {
+                map.set(item.id, item);
+              }
+            }
+          }
+          return Array.from(map.values());
+        };
+
+        const attending = deduplicateClasses(rawAttending);
+        const hosted = deduplicateClasses(rawHosted);
+
+        setHostedClasses(hosted);
         setAttendingClasses(attending);
         const pendingCount = attending.filter(
           (c) => c.my_rsvp_status === "pending" && c.status !== "cancelled"
@@ -254,36 +277,53 @@ export const MyScheduleView: React.FC<MyScheduleViewProps> = ({
     (c) => c.my_rsvp_status === "accepted" && c.status !== "cancelled"
   );
 
-  // Upcoming classes MUST ONLY contain classes hosted by the user OR invitations they have explicitly accepted
-  const allUpcoming = [...hostedClasses, ...acceptedAttendingClasses]
-    .filter(isClassUpcomingOrActive)
-    .sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
+  // Helper to strictly deduplicate array of classes by unique ID
+  const dedupeById = (classes: ScheduledClass[]): ScheduledClass[] => {
+    const seen = new Set<string>();
+    const out: ScheduledClass[] = [];
+    for (const c of classes) {
+      if (c && c.id && !seen.has(c.id)) {
+        seen.add(c.id);
+        out.push(c);
+      }
+    }
+    return out;
+  };
 
-  // Pending invitations waiting for tutor/student action
-  const pendingInvites = attendingClasses.filter(
-    (c) => c.my_rsvp_status === "pending" && c.status !== "cancelled"
+  // Upcoming classes MUST ONLY contain classes hosted by the user OR invitations they have explicitly accepted
+  // Strictly deduplicated by class ID so multiple invites or acceptances never produce duplicate rows
+  const allUpcoming = dedupeById(
+    [...hostedClasses, ...acceptedAttendingClasses].filter(isClassUpcomingOrActive)
+  ).sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
+
+  // Pending invitations waiting for tutor/student action (deduplicated by class id)
+  const pendingInvites = dedupeById(
+    attendingClasses.filter(
+      (c) => c.my_rsvp_status === "pending" && c.status !== "cancelled"
+    )
   );
 
   // All invitations received (pending, accepted, or declined) sorted by urgency: pending -> accepted -> declined
-  const allInvites = attendingClasses
-    .filter((c) => c.status !== "cancelled")
-    .sort((a, b) => {
-      const statusWeight: Record<string, number> = {
-        pending: 1,
-        accepted: 2,
-        declined: 3,
-      };
-      const weightA = statusWeight[a.my_rsvp_status || "pending"] || 99;
-      const weightB = statusWeight[b.my_rsvp_status || "pending"] || 99;
-      if (weightA !== weightB) {
-        return weightA - weightB;
-      }
-      return new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime();
-    });
+  // Strictly deduplicated so each class schedule appears at most once
+  const allInvites = dedupeById(
+    attendingClasses.filter((c) => c.status !== "cancelled")
+  ).sort((a, b) => {
+    const statusWeight: Record<string, number> = {
+      pending: 1,
+      accepted: 2,
+      declined: 3,
+    };
+    const weightA = statusWeight[a.my_rsvp_status || "pending"] || 99;
+    const weightB = statusWeight[b.my_rsvp_status || "pending"] || 99;
+    if (weightA !== weightB) {
+      return weightA - weightB;
+    }
+    return new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime();
+  });
 
-  const pastClasses = [...hostedClasses, ...acceptedAttendingClasses]
-    .filter((c) => !isClassUpcomingOrActive(c))
-    .sort((a, b) => new Date(b.scheduled_at).getTime() - new Date(a.scheduled_at).getTime());
+  const pastClasses = dedupeById(
+    [...hostedClasses, ...acceptedAttendingClasses].filter((c) => !isClassUpcomingOrActive(c))
+  ).sort((a, b) => new Date(b.scheduled_at).getTime() - new Date(a.scheduled_at).getTime());
 
   const formatScheduleTime = (isoString: string, durationMinutes: number) => {
     const d = new Date(isoString);
