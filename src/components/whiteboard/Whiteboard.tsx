@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   Tldraw,
   Editor,
@@ -180,6 +180,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   // Host Viewport Synchronization State (Ensures participants on any device see full host view)
   const lastHostViewportRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const lastBroadcastBoundsRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [hostViewportBounds, setHostViewportBounds] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const viewportTimerRef = useRef<any>(null);
 
   // File Importer State (PDF, PPT/PPTX, PNG/JPG)
@@ -476,6 +477,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         }
 
         lastBroadcastBoundsRef.current = { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h };
+        setHostViewportBounds({ x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
 
         engine.broadcastWhiteboard({
           type: "viewport",
@@ -871,6 +873,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         }
       } else if (data.type === "viewport" && data.bounds) {
         lastHostViewportRef.current = data.bounds;
+        setHostViewportBounds(data.bounds);
         if (!isHost && editor) {
           try {
             editor.zoomToBounds(data.bounds, {
@@ -1062,14 +1065,62 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     toast.info(hasSlides ? "Ink annotations cleared (document preserved)" : "Whiteboard canvas cleared", { id: "clear-canvas" });
   };
 
+  const WhiteboardCanvasBoundary: React.FC = () => {
+    // If presentation slides (PDF/PPT/images) are loaded, the slides define the presentation bounds
+    if (presentationSlides.length > 0) return null;
+
+    // Use reported host viewport, or standard 16:9 teaching canvas (1600x900)
+    const bounds = hostViewportBounds || lastHostViewportRef.current || { x: 0, y: 0, w: 1600, h: 900 };
+
+    return (
+      <div
+        data-testid="whiteboard-screen-boundary"
+        style={{
+          position: "absolute",
+          left: bounds.x,
+          top: bounds.y,
+          width: bounds.w,
+          height: bounds.h,
+          pointerEvents: "none",
+        }}
+        className="border-2 border-dashed border-amber-500/50 rounded-2xl shadow-[0_0_80px_rgba(0,0,0,0.06)] bg-white/20 select-none transition-all duration-300"
+      >
+        {/* Top-Left Boundary Label */}
+        <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg bg-[#16130f]/90 border border-amber-500/40 text-[#f59e0b] font-mono text-[11px] font-bold flex items-center gap-1.5 shadow-lg backdrop-blur-sm pointer-events-none">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span>{isHost ? "Whiteboard Screen (16:9)" : "Tutor Whiteboard Screen"}</span>
+        </div>
+
+        {/* 4 Precision Corner Brackets defining exact screen boundary */}
+        <div className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-amber-500/80 rounded-tl-xl" />
+        <div className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-amber-500/80 rounded-tr-xl" />
+        <div className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-amber-500/80 rounded-bl-xl" />
+        <div className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-amber-500/80 rounded-br-xl" />
+      </div>
+    );
+  };
+
+  const customComponents = useMemo(
+    () => ({
+      Toolbar: null,
+      NavigationPanel: null,
+      PageMenu: null,
+      MainMenu: null,
+      StylePanel: null,
+      QuickActions: null,
+      OnTheCanvas: WhiteboardCanvasBoundary,
+    }),
+    [presentationSlides.length, isHost, hostViewportBounds]
+  );
+
   return (
     <div
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`relative flex flex-col bg-[#1a1814] rounded-2xl border ${
-        isDraggingOver ? "border-[#f59e0b] ring-2 ring-[#f59e0b]/40" : "border-[#f3eee6]/10"
-      } shadow-2xl overflow-hidden transition-all duration-300 ${
+      className={`relative flex flex-col bg-[#16130f] rounded-2xl border-2 border-zinc-700/80 shadow-[0_8px_30px_rgb(0,0,0,0.5)] ring-1 ring-white/10 ${
+        isDraggingOver ? "border-[#f59e0b] ring-2 ring-[#f59e0b]/40" : ""
+      } overflow-hidden transition-all duration-300 ${
         isExpanded ? "fixed inset-3 z-50" : "w-full h-full"
       }`}
     >
@@ -1795,16 +1846,53 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           onMount={handleMount}
           autoFocus={false}
           hideUi={!canDraw || isZenMode} /* hideUi={!canDraw} */
-          components={{
-            Toolbar: null,
-            NavigationPanel: null,
-            PageMenu: null,
-            MainMenu: null,
-            StylePanel: null,
-            QuickActions: null,
-          }}
+          components={customComponents}
         />
       </div>
+
+      {/* Bottom Whiteboard Screen Frame / Boundary Bar */}
+      {!hideTopBar && (!isZenMode || isControlsVisible) && (
+        <div className="h-7 px-3 bg-[#16130f] border-t border-[#f3eee6]/10 flex items-center justify-between text-[10px] font-mono text-zinc-400 shrink-0 select-none z-20">
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5 text-zinc-300 font-semibold">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              Whiteboard
+            </span>
+            <span className="text-zinc-600">•</span>
+            <span className="text-zinc-400 truncate max-w-[140px] sm:max-w-none">
+              {presentationSlides.length > 0
+                ? `Slide ${currentSlideIndex + 1} of ${presentationSlides.length}`
+                : isHost
+                ? "16:9 Canvas Active"
+                : "Host Whiteboard View"}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleZoomToFit}
+              title="Align canvas to whiteboard screen boundary"
+              className="text-[#f59e0b] hover:text-amber-400 font-semibold flex items-center gap-1 cursor-pointer transition active:scale-95"
+            >
+              <Maximize2 className="w-3 h-3 text-[#f59e0b]" />
+              <span>Fit Screen</span>
+            </button>
+            {onToggleFullscreen && isMobile && (
+              <>
+                <span className="text-zinc-700">|</span>
+                <button
+                  onClick={onToggleFullscreen}
+                  title="Expand whiteboard to full screen"
+                  className="text-zinc-300 hover:text-white font-semibold flex items-center gap-1 cursor-pointer transition active:scale-95"
+                >
+                  <Minimize2 className="w-3 h-3 text-zinc-400" />
+                  <span>{isFullscreen ? "Exit Full" : "Full View"}</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -49,4 +49,18 @@ test("Whiteboard Host Viewport Sync & Mobile Full View Suite", async (t) => {
   await t.test("WHV-08: Tap for Full Screen button hides when already in focus mode", () => {
     assert.match(meetingRoomSrc, /!isFullscreen\s*&&\s*!isFocusMode/, "Fullscreen button must hide when already in focus mode");
   });
+
+  await t.test("WHV-09: Whiteboard renders canvas screen boundary on OnTheCanvas layer", () => {
+    assert.match(whiteboardSrc, /data-testid=["']whiteboard-screen-boundary["']/, "Must render whiteboard-screen-boundary on canvas");
+    assert.match(whiteboardSrc, /OnTheCanvas:\s*WhiteboardCanvasBoundary/, "Must hook WhiteboardCanvasBoundary into OnTheCanvas");
+  });
+
+  await t.test("WHV-10: Whiteboard renders bottom boundary bezel bar with status and fit actions", () => {
+    assert.match(whiteboardSrc, /Bottom Whiteboard Screen Frame \/ Boundary Bar/, "Must include bottom frame boundary bar");
+    assert.match(whiteboardSrc, /Fit Screen/, "Must provide Fit Screen action in bottom frame");
+  });
+
+  await t.test("WHV-11: Mobile whiteboard container applies high-contrast border and framing", () => {
+    assert.match(meetingRoomSrc, /border-2 border-zinc-700\/80 shadow-\[0_8px_30px_rgb\(0,0,0,0\.5\)\] ring-1 ring-white\/15/, "Must apply high-contrast border and framing on mobile");
+  });
 });

@@ -3088,12 +3088,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             </div>
           ) : showWhiteboard || layoutMode === "whiteboard" ? (
             /* COLLABORATIVE WHITEBOARD MODE WITH TLDraw & GEOMETRY TOOLS */
-            <div className={`w-full h-full relative ${isFocusMode ? "rounded-none border-0" : isMobile ? "rounded-lg" : "rounded-2xl"} overflow-hidden ${isFocusMode ? "" : "border border-white/10"}`}>
+            <div className={`w-full h-full relative flex flex-col ${
+              isFocusMode
+                ? "rounded-none border-0"
+                : isMobile
+                ? "rounded-2xl border-2 border-zinc-700/80 shadow-[0_8px_30px_rgb(0,0,0,0.5)] ring-1 ring-white/15"
+                : "rounded-2xl border border-white/15 shadow-2xl"
+            } overflow-hidden`}>
               {/* 1-Tap Mobile Fullscreen Trigger (Hides browser URL bar and status bar) */}
               {isMobile && !isFullscreen && !isFocusMode && (
                 <button
                   onClick={toggleFullscreen}
-                  className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
+                  className="absolute bottom-10 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-amber-500/95 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] sm:text-xs flex items-center gap-1.5 shadow-2xl shadow-amber-500/30 border border-amber-300/80 backdrop-blur-md cursor-pointer transition-transform active:scale-95 animate-pulse"
                   title="Enter Full Screen Mode (Hide Browser Address Bar)"
                 >
                   <Maximize2 className="w-3.5 h-3.5 shrink-0" />
