@@ -7,6 +7,8 @@ import {
   loadSnapshot,
   DefaultColorStyle,
   DefaultSizeStyle,
+  track,
+  useEditor,
 } from "tldraw";
 import "tldraw/tldraw.css";
 import { CompassShapeUtil } from "./shapes/CompassShapeUtil";
@@ -1065,40 +1067,61 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     toast.info(hasSlides ? "Ink annotations cleared (document preserved)" : "Whiteboard canvas cleared", { id: "clear-canvas" });
   };
 
-  const WhiteboardCanvasBoundary: React.FC = () => {
+  const WhiteboardCanvasBoundary = track(() => {
+    let ed: Editor | null = null;
+    try {
+      ed = useEditor();
+    } catch {}
+
     // If presentation slides (PDF/PPT/images) are loaded, the slides define the presentation bounds
     if (presentationSlides.length > 0) return null;
 
     // Use reported host viewport, or standard 16:9 teaching canvas (1600x900)
     const bounds = hostViewportBounds || lastHostViewportRef.current || { x: 0, y: 0, w: 1600, h: 900 };
 
+    let left = bounds.x;
+    let top = bounds.y;
+    let width = bounds.w;
+    let height = bounds.h;
+
+    if (ed) {
+      try {
+        const topLeft = ed.pageToViewport({ x: bounds.x, y: bounds.y });
+        const zoom = ed.getCamera().z;
+        left = topLeft.x;
+        top = topLeft.y;
+        width = bounds.w * zoom;
+        height = bounds.h * zoom;
+      } catch {}
+    }
+
     return (
       <div
         data-testid="whiteboard-screen-boundary"
         style={{
           position: "absolute",
-          left: bounds.x,
-          top: bounds.y,
-          width: bounds.w,
-          height: bounds.h,
+          left,
+          top,
+          width,
+          height,
           pointerEvents: "none",
         }}
-        className="border-2 border-dashed border-amber-500/50 rounded-2xl shadow-[0_0_80px_rgba(0,0,0,0.06)] bg-white/20 select-none transition-all duration-300"
+        className="border-2 border-dashed border-amber-500/70 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.08)] bg-white/5 select-none transition-all duration-75"
       >
         {/* Top-Left Boundary Label */}
-        <div className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg bg-[#16130f]/90 border border-amber-500/40 text-[#f59e0b] font-mono text-[11px] font-bold flex items-center gap-1.5 shadow-lg backdrop-blur-sm pointer-events-none">
+        <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-[#16130f]/90 border border-amber-500/40 text-[#f59e0b] font-mono text-[10px] font-bold flex items-center gap-1.5 shadow-lg backdrop-blur-sm pointer-events-none">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           <span>{isHost ? "Whiteboard Screen (16:9)" : "Tutor Whiteboard Screen"}</span>
         </div>
 
         {/* 4 Precision Corner Brackets defining exact screen boundary */}
-        <div className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-amber-500/80 rounded-tl-xl" />
-        <div className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-amber-500/80 rounded-tr-xl" />
-        <div className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-amber-500/80 rounded-bl-xl" />
-        <div className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-amber-500/80 rounded-br-xl" />
+        <div className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-amber-500/90 rounded-tl-lg" />
+        <div className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-amber-500/90 rounded-tr-lg" />
+        <div className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-amber-500/90 rounded-bl-lg" />
+        <div className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-amber-500/90 rounded-br-lg" />
       </div>
     );
-  };
+  });
 
   const customComponents = useMemo(
     () => ({
@@ -1824,7 +1847,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
       {/* TLDraw Interactive Surface */}
       <div
-        className="flex-1 w-full h-full relative bg-[#0e0d0b]"
+        className="flex-1 min-h-0 w-full relative bg-[#0e0d0b] overflow-hidden"
         onMouseMove={resetControlsTimeout}
       >
         {/* Zen Mode Exit Indicator */}

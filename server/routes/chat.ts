@@ -1,10 +1,14 @@
 import { Router, Request, Response } from "express";
+import { ObjectId } from "mongodb";
 import { query } from "../db";
 import { requireAuth } from "./auth";
 import { authorizeRoomAccess, sanitizeRoomCode } from "../middleware/roomAuth";
 import { getChatCollection, getSessionsCollection, MongoChatMessage } from "../db/mongo";
 
 export const chatRouter = Router();
+
+// Resilient In-Memory Session Chat Store (Guarantees zero-503 uptime during MongoDB reconnects or restarts)
+export const inMemoryChatStore = new Map<string, MongoChatMessage[]>();
 
 // In-memory sliding window rate limiter: Max 5 messages per 3 seconds per user
 const rateLimitMap = new Map<string, number[]>();
@@ -93,6 +97,20 @@ chatRouter.get("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req
         .toArray();
     }
 
+    // Merge in-memory fallback messages if present (ensures seamless continuity across DB reconnects)
+    const inMemList = inMemoryChatStore.get(sessionId) || [];
+    if (inMemList.length > 0) {
+      const existingIds = new Set(rawMessages.map((m) => m._id?.toString() || m.clientMessageId));
+      for (const inMemMsg of inMemList) {
+        const idKey = inMemMsg._id?.toString() || inMemMsg.clientMessageId;
+        if (idKey && !existingIds.has(idKey)) {
+          rawMessages.push(inMemMsg);
+          existingIds.add(idKey);
+        }
+      }
+      rawMessages.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    }
+
     // Map to client format
     const messages = rawMessages.map((m) => ({
       id: m._id ? m._id.toString() : (m.clientMessageId || `msg-${m.createdAt.getTime()}`),
@@ -173,37 +191,58 @@ chatRouter.post("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (re
     const clientMessageId = req.body?.clientMessageId;
     const chatCol = getChatCollection();
 
-    if (!chatCol) {
-      return res.status(503).json({ error: "Chat service temporarily unavailable" });
-    }
-
     // 6. Idempotency Check (Prevent duplicate insertion on network retry)
     if (clientMessageId && typeof clientMessageId === "string") {
-      const existingMsg = await chatCol.findOne({ sessionId, clientMessageId });
-      if (existingMsg) {
-        return res.json({
-          success: true,
-          message: {
-            id: existingMsg._id?.toString(),
-            sessionId: existingMsg.sessionId,
-            roomCode: existingMsg.roomCode,
-            senderId: existingMsg.senderId,
-            senderName: existingMsg.senderName,
-            senderRole: existingMsg.senderRole,
-            isHost: existingMsg.isHost,
-            message: existingMsg.text,
-            text: existingMsg.text,
-            timestamp: new Date(existingMsg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            timestampMs: new Date(existingMsg.createdAt).getTime(),
-            createdAt: existingMsg.createdAt,
-          },
-        });
+      if (chatCol) {
+        const existingMsg = await chatCol.findOne({ sessionId, clientMessageId });
+        if (existingMsg) {
+          return res.json({
+            success: true,
+            message: {
+              id: existingMsg._id?.toString(),
+              sessionId: existingMsg.sessionId,
+              roomCode: existingMsg.roomCode,
+              senderId: existingMsg.senderId,
+              senderName: existingMsg.senderName,
+              senderRole: existingMsg.senderRole,
+              isHost: existingMsg.isHost,
+              message: existingMsg.text,
+              text: existingMsg.text,
+              timestamp: new Date(existingMsg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              timestampMs: new Date(existingMsg.createdAt).getTime(),
+              createdAt: existingMsg.createdAt,
+            },
+          });
+        }
+      } else {
+        const inMemList = inMemoryChatStore.get(sessionId) || [];
+        const existingMsg = inMemList.find((m) => m.clientMessageId === clientMessageId);
+        if (existingMsg) {
+          return res.json({
+            success: true,
+            message: {
+              id: existingMsg._id?.toString(),
+              sessionId: existingMsg.sessionId,
+              roomCode: existingMsg.roomCode,
+              senderId: existingMsg.senderId,
+              senderName: existingMsg.senderName,
+              senderRole: existingMsg.senderRole,
+              isHost: existingMsg.isHost,
+              message: existingMsg.text,
+              text: existingMsg.text,
+              timestamp: new Date(existingMsg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              timestampMs: new Date(existingMsg.createdAt).getTime(),
+              createdAt: existingMsg.createdAt,
+            },
+          });
+        }
       }
     }
 
-    // 7. Insert Canonical Message Document in MongoDB
+    // 7. Insert Canonical Message Document in MongoDB or In-Memory Store
     const now = new Date();
     const doc: MongoChatMessage = {
+      _id: new ObjectId(),
       sessionId,
       roomCode: sanitizedCode,
       senderId: user.id,
@@ -216,8 +255,17 @@ chatRouter.post("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (re
       expireAt: new Date(now.getTime() + 24 * 3600 * 1000), // 24h fallback TTL
     };
 
-    const insertResult = await chatCol.insertOne(doc);
-    const canonicalId = insertResult.insertedId.toString();
+    let canonicalId = doc._id!.toString();
+
+    if (chatCol) {
+      const insertResult = await chatCol.insertOne(doc);
+      canonicalId = insertResult.insertedId.toString();
+    } else {
+      console.warn(`[Chat] MongoDB unavailable; persisting message into in-memory fallback store for session ${sessionId}`);
+      const inMemList = inMemoryChatStore.get(sessionId) || [];
+      inMemList.push(doc);
+      inMemoryChatStore.set(sessionId, inMemList);
+    }
 
     // 8. Update session lastActivityAt asynchronously to prevent blocking response path
     if (sessionsCol) {

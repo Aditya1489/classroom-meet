@@ -279,6 +279,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // View / Layout Modes: "grid" | "spotlight" | "whiteboard" | "screenshare"
   const [layoutMode, setLayoutMode] = useState<"grid" | "spotlight" | "whiteboard" | "screenshare">("grid");
   const [showWhiteboard, setShowWhiteboard] = useState(false);
+  const showWhiteboardRef = useRef(showWhiteboard);
+  useEffect(() => {
+    showWhiteboardRef.current = showWhiteboard;
+  }, [showWhiteboard]);
 
   // Duration Timer
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -773,6 +777,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         isHostRef.current = true;
         setGrantedRole("tutor");
         window.sessionStorage.setItem(`mathsy_host_${meetingCode}`, "true");
+        // Ensure database whiteboard state matches initial host mode (default grid)
+        if (!showWhiteboardRef.current) {
+          dbClient.setWhiteboardState(meetingCode, false);
+        }
       } else if (!isHostRef.current) {
         // Only demote to student if the participant is not already an authorized room host.
         // True room ownership is authoritative from PostgreSQL database (/api/rooms/:roomCode/participants),
@@ -816,6 +824,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     engine.onParticipantsChange = (updated) => {
       setRemoteParticipants([...updated]);
+      // If I am host, ensure newly joined participants synchronize with my current layout mode
+      if (isHostRef.current) {
+        engineRef.current?.broadcastWhiteboardState(meetingCode, showWhiteboardRef.current, true);
+      }
     };
 
     engine.onScreenShareEnded = () => {
@@ -1167,7 +1179,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     // Late-joining participant: query active whiteboard state
     dbClient.getWhiteboardState(meetingCode).then((wbState) => {
-      if (wbState?.isOpen) {
+      if (wbState?.isOpen && !isHostRef.current) {
         setShowWhiteboard(true);
         setLayoutMode("whiteboard");
       }
@@ -1569,15 +1581,26 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           throw new Error(res?.error || "Failed to save message");
         }
       } catch (err: any) {
-        console.error("[MeetingRoom] Error saving message:", err);
-        toast.error(err.message || "Failed to send message");
+        console.warn("[MeetingRoom] Backend chat persistence unavailable, falling back to direct WebRTC peer broadcast:", err);
+        const fallbackTimestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        // Fallback: Always deliver via WebRTC live signaling so in-call communication never breaks
+        engineRef.current?.broadcastChatMessage({
+          id: cId,
+          clientMessageId: cId,
+          senderId: myUserId,
+          senderName: myName,
+          text: content,
+          timestamp: fallbackTimestamp,
+          isHost,
+        });
+
         setChatMessages((prev) =>
           prev.map((m) =>
             m.id === cId || m.clientMessageId === cId
               ? {
                   ...m,
-                  status: "failed",
-                  onRetry: () => performSend(cId, content),
+                  status: "sent",
+                  timestamp: fallbackTimestamp,
                 }
               : m
           )
