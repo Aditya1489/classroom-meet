@@ -314,10 +314,16 @@ async function triggerAutoRecovery(): Promise<void> {
     if (audioTrack) tracks.push(audioTrack);
     const stream = new MediaStream(tracks);
 
+    const chosenMime = MediaRecorder.isTypeSupported("video/webm;codecs=h264,opus")
+      ? "video/webm;codecs=h264,opus"
+      : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+      ? "video/webm;codecs=vp8,opus"
+      : "video/webm";
+
     const recorder = new MediaRecorder(stream, {
-      mimeType: "video/webm;codecs=vp8,opus",
-      videoBitsPerSecond: 2_500_000,
-      audioBitsPerSecond: 128_000,
+      mimeType: chosenMime,
+      videoBitsPerSecond: 1_000_000,
+      audioBitsPerSecond: 96_000,
     });
 
     recorder.ondataavailable = async (e: BlobEvent) => {
@@ -372,9 +378,14 @@ export async function startYouTubeLiveStreaming(
     onError,
   } = options;
 
-  // B3: Preflight MediaRecorder VP8/Opus support check
-  if (!MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")) {
-    toast.error("Live streaming needs desktop Chrome or Edge (VP8/Opus MediaRecorder support required).");
+  // Preflight MediaRecorder video/webm support check
+  const isWebmSupported =
+    MediaRecorder.isTypeSupported("video/webm;codecs=h264,opus") ||
+    MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus") ||
+    MediaRecorder.isTypeSupported("video/webm");
+
+  if (!isWebmSupported) {
+    toast.error("Live streaming needs desktop Chrome or Edge (WebM MediaRecorder support required).");
     onStatusChange?.("idle");
     return null;
   }
@@ -455,11 +466,17 @@ export async function startYouTubeLiveStreaming(
   if (mixedAudioTrack) combinedTracks.push(mixedAudioTrack);
   const compositeStream = new MediaStream(combinedTracks);
 
-  // Initialize MediaRecorder (B2, B3)
+  // Initialize MediaRecorder with optimized bitrate and H.264/VP8 detection
+  const chosenMime = MediaRecorder.isTypeSupported("video/webm;codecs=h264,opus")
+    ? "video/webm;codecs=h264,opus"
+    : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+    ? "video/webm;codecs=vp8,opus"
+    : "video/webm";
+
   const recorder = new MediaRecorder(compositeStream, {
-    mimeType: "video/webm;codecs=vp8,opus",
-    videoBitsPerSecond: 2_500_000,
-    audioBitsPerSecond: 128_000,
+    mimeType: chosenMime,
+    videoBitsPerSecond: 1_000_000,
+    audioBitsPerSecond: 96_000,
   });
   activeRecorder = recorder;
 

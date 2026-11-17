@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Mic, MicOff, Pin, PinOff, Hand, Shield, LogOut, VideoOff, MoreVertical } from "lucide-react";
+import { Mic, MicOff, Pin, PinOff, Hand, Shield, LogOut, Video, VideoOff, MoreVertical } from "lucide-react";
 import { GoogleMeetAudioVisualizer } from "./GoogleMeetAudioVisualizer";
 import { VideoTrackPlayer } from "./VideoTrackPlayer";
 
@@ -24,6 +24,8 @@ interface VideoTileProps {
   onLowerHand?: () => void;
   onForceMute?: () => void;
   onExpel?: () => void;
+  isCameraPermitted?: boolean;
+  onToggleCamera?: () => void;
   className?: string;
 }
 
@@ -48,6 +50,8 @@ export const VideoTile: React.FC<VideoTileProps> = ({
   onLowerHand,
   onForceMute,
   onExpel,
+  isCameraPermitted = false,
+  onToggleCamera,
   className = "",
 }) => {
   const [showTouchMenu, setShowTouchMenu] = useState(false);
@@ -211,6 +215,21 @@ export const VideoTile: React.FC<VideoTileProps> = ({
                       {isPinned ? "Unpin" : "Pin Tile"}
                     </button>
                   )}
+                  {onToggleCamera && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleCamera();
+                        setShowTouchMenu(false);
+                      }}
+                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                        isCameraPermitted ? "text-emerald-400 hover:bg-emerald-500/20" : "text-zinc-300 hover:bg-white/10"
+                      }`}
+                    >
+                      {isCameraPermitted ? <Video className="w-3.5 h-3.5" /> : <VideoOff className="w-3.5 h-3.5" />}
+                      {isCameraPermitted ? "Revoke Camera" : "Allow Camera"}
+                    </button>
+                  )}
                   {onForceMute && (
                     <button
                       onClick={(e) => {
@@ -247,6 +266,23 @@ export const VideoTile: React.FC<VideoTileProps> = ({
       {/* Host Hover Action Overlay for Desktop Mouse Users */}
       {isViewerHost && !isHost && !isLocal && (
         <div className="hidden md:flex absolute inset-0 z-30 bg-zinc-950/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-200 items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
+          {onToggleCamera && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleCamera();
+              }}
+              className={`p-2.5 rounded-full shadow-xl transition-all hover:scale-110 active:scale-95 cursor-pointer ${
+                isCameraPermitted
+                  ? "bg-emerald-600/90 hover:bg-emerald-500 text-white border border-emerald-400/50"
+                  : "bg-zinc-800/90 hover:bg-zinc-700 text-zinc-300 border border-white/20"
+              }`}
+              title={isCameraPermitted ? `Revoke ${name}'s camera` : `Allow ${name}'s camera`}
+            >
+              {isCameraPermitted ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+            </button>
+          )}
+
           {onForceMute && (
             <button
               onClick={(e) => {

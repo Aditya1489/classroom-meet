@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { RemoteParticipant } from "../../engine/mediasoupClient";
-import { Users, X, Mic, MicOff, Hand, Copy, Shield, VolumeX, Check } from "lucide-react";
+import { Users, X, Mic, MicOff, Hand, Copy, Shield, VolumeX, Check, Video, VideoOff } from "lucide-react";
 import { toast } from "sonner";
 
 interface ParticipantsDrawerProps {
@@ -10,6 +10,8 @@ interface ParticipantsDrawerProps {
   meetingCode: string;
   isHost: boolean;
   onMuteAll?: () => void;
+  videoAllowedPeers?: Set<string>;
+  onToggleCameraPermission?: (peerId: string, allow: boolean) => void;
 }
 
 export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
@@ -19,6 +21,8 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
   meetingCode,
   isHost,
   onMuteAll,
+  videoAllowedPeers,
+  onToggleCameraPermission,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const totalCount = participants.length + 1;
@@ -123,6 +127,27 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {isHost && onToggleCameraPermission && (
+                <button
+                  onClick={() => onToggleCameraPermission(p.id, !videoAllowedPeers?.has(p.id))}
+                  className={`p-1.5 rounded-lg border transition cursor-pointer ${
+                    videoAllowedPeers?.has(p.id)
+                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
+                      : "bg-white/5 text-gray-400 border-white/10 hover:text-white hover:bg-white/10"
+                  }`}
+                  title={
+                    videoAllowedPeers?.has(p.id)
+                      ? "Revoke student's camera permission"
+                      : "Allow student to turn on camera"
+                  }
+                >
+                  {videoAllowedPeers?.has(p.id) ? (
+                    <Video className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <VideoOff className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
               {p.isHandRaised && (
                 <span className="p-1 rounded-full bg-amber-500/20 text-amber-400 animate-bounce">
                   <Hand className="w-3.5 h-3.5" />

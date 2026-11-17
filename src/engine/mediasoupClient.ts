@@ -233,6 +233,10 @@ export class MathsyMediasoupEngine {
   public onPinnedMessageChange?: (message: { text: string; senderName: string } | null) => void;
   public onClassEnded?: () => void;
   public onScreenShareEnded?: () => void;
+  public onCameraPermissionChange?: (allowed: boolean) => void;
+  public onForceCameraOff?: () => void;
+  public onPeerVideoPermission?: (peerId: string, allowed: boolean) => void;
+  public isAudioOnlyMode: boolean = false;
 
   public activeToken: string = "";
   public isChatLocked: boolean = false;
@@ -471,7 +475,26 @@ export class MathsyMediasoupEngine {
         console.error("[MathsyMeet Engine] Server error notification:", err);
         if (err?.code === "ROOM_FULL") {
           failConnect(new Error(err.message || "Room is full (max participants reached)"));
+        } else if (err?.code === "SERVER_BUSY") {
+          failConnect(new Error(err.message || "Server is currently at maximum capacity. Please try again shortly."));
         }
+      });
+
+      this.socket.on("cameraAllowed", (data: any) => {
+        console.log("[MathsyMeet Engine] Camera permission granted by tutor:", data);
+        this.onCameraPermissionChange?.(true);
+      });
+
+      this.socket.on("forceCameraOff", (data: any) => {
+        console.log("[MathsyMeet Engine] Camera turned off by tutor:", data);
+        this.disableVideo();
+        this.onCameraPermissionChange?.(false);
+        this.onForceCameraOff?.();
+      });
+
+      this.socket.on("peerVideoPermission", (data: any) => {
+        console.log("[MathsyMeet Engine] Peer video permission updated:", data);
+        this.onPeerVideoPermission?.(data.peerId, data.allowed);
       });
 
       this.socket.on("demoRoomEnded", () => {
@@ -1253,12 +1276,18 @@ export class MathsyMediasoupEngine {
         // Produce any already-active local tracks that were enabled prior to transport readiness
         if (this.localVideoTrack && !this.producers.has("video")) {
           try {
+            const videoEncodings = [
+              { scaleResolutionDownBy: 4, maxBitrate: 150000, maxFramerate: 15 },
+              { scaleResolutionDownBy: 2, maxBitrate: 350000, maxFramerate: 20 },
+              { scaleResolutionDownBy: 1, maxBitrate: 800000, maxFramerate: 30 }
+            ];
             const prod = await this.sendTransport.produce({
               track: this.localVideoTrack,
+              encodings: videoEncodings,
               appData: { mediaType: "video" }
             });
             this.producers.set("video", prod);
-            console.log("[MathsyMeet Engine] Auto-produced local video track:", prod.id);
+            console.log("[MathsyMeet Engine] Auto-produced local video track with simulcast:", prod.id);
             this.broadcastMuteState(undefined, false);
           } catch (e: any) {
             console.warn("[MathsyMeet Engine] Auto-produce video note:", e.message);
@@ -1286,12 +1315,8 @@ export class MathsyMediasoupEngine {
               track: this.localScreenTrack,
               streamId: syncStreamId,
               encodings: [
-                {
-                  maxBitrate: 3500000,
-                  maxFramerate: 30,
-                  priority: "high",
-                  networkPriority: "high",
-                },
+                { scaleResolutionDownBy: 2, maxBitrate: 400000, maxFramerate: 10 },
+                { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20, priority: "high", networkPriority: "high" },
               ],
               appData: { mediaType: "screen", source: "screen", syncStreamId }
             });
@@ -1419,10 +1444,22 @@ export class MathsyMediasoupEngine {
       }
 
       this.consumers.set(consumer.id, consumer);
-      await this.request("resumeConsumer", { consumerId: consumer.id });
-      try {
-        consumer.resume();
-      } catch {}
+      if (this.isAudioOnlyMode && kind === "video" && !isScreenMedia) {
+        try {
+          consumer.pause();
+          await this.request("pauseConsumer", { consumerId: consumer.id });
+        } catch {}
+      } else {
+        await this.request("resumeConsumer", { consumerId: consumer.id });
+        try {
+          consumer.resume();
+        } catch {}
+      }
+
+      if (kind === "video" && !isScreenMedia && !this.isHostUser) {
+        // Students consume spatial layer 1 (middle ~360p) by default to save server egress CPU & bandwidth
+        this.setPreferredLayers(consumer.id, 1, 2);
+      }
 
       let participant: RemoteParticipant | undefined = undefined;
       if (peerId) {
@@ -1592,9 +1629,18 @@ export class MathsyMediasoupEngine {
 
       if (this.sendTransport) {
         try {
-          const producer = await this.sendTransport.produce({ track, appData: { mediaType: "video" } });
+          const videoEncodings = [
+            { scaleResolutionDownBy: 4, maxBitrate: 150000, maxFramerate: 15 },
+            { scaleResolutionDownBy: 2, maxBitrate: 350000, maxFramerate: 20 },
+            { scaleResolutionDownBy: 1, maxBitrate: 800000, maxFramerate: 30 }
+          ];
+          const producer = await this.sendTransport.produce({
+            track,
+            encodings: videoEncodings,
+            appData: { mediaType: "video" }
+          });
           this.producers.set("video", producer);
-          console.log("[MathsyMeet Engine] Video producer created:", producer.id);
+          console.log("[MathsyMeet Engine] Video producer created with simulcast:", producer.id);
           this.broadcastMuteState(undefined, false);
         } catch (prodErr: any) {
           console.warn("[MathsyMeet Engine] Produce video error:", prodErr.message);
@@ -1686,12 +1732,8 @@ export class MathsyMediasoupEngine {
           track,
           streamId: syncStreamId,
           encodings: [
-            {
-              maxBitrate: 3500000,
-              maxFramerate: 30,
-              priority: "high",
-              networkPriority: "high",
-            },
+            { scaleResolutionDownBy: 2, maxBitrate: 400000, maxFramerate: 10 },
+            { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20, priority: "high", networkPriority: "high" },
           ],
           appData: { mediaType: "screen", source: "screen", syncStreamId }
         });
@@ -2186,6 +2228,81 @@ export class MathsyMediasoupEngine {
 
   private notifyParticipants() {
     this.onParticipantsChange?.(Array.from(this.participants.values()));
+  }
+
+  public async pauseConsumer(consumerId: string) {
+    const consumer = this.consumers.get(consumerId);
+    if (consumer && !consumer.paused) {
+      try {
+        consumer.pause();
+        await this.request("pauseConsumer", { consumerId });
+      } catch (e: any) {
+        console.warn("[MathsyMeet Engine] pauseConsumer error:", e.message);
+      }
+    }
+  }
+
+  public async resumeConsumer(consumerId: string) {
+    const consumer = this.consumers.get(consumerId);
+    if (consumer && consumer.paused) {
+      try {
+        await this.request("resumeConsumer", { consumerId });
+        consumer.resume();
+      } catch (e: any) {
+        console.warn("[MathsyMeet Engine] resumeConsumer error:", e.message);
+      }
+    }
+  }
+
+  public async setPreferredLayers(consumerId: string, spatialLayer: number, temporalLayer?: number) {
+    try {
+      await this.request("setConsumerPreferredLayers", { consumerId, spatialLayer, temporalLayer });
+    } catch (e: any) {
+      console.warn("[MathsyMeet Engine] setPreferredLayers error:", e.message);
+    }
+  }
+
+  public setAudioOnlyMode(enabled: boolean) {
+    this.isAudioOnlyMode = enabled;
+    for (const [id, consumer] of this.consumers.entries()) {
+      if (consumer.kind === "video" && consumer.appData?.mediaType !== "screen") {
+        if (enabled) {
+          this.pauseConsumer(id);
+        } else {
+          this.resumeConsumer(id);
+        }
+      }
+    }
+  }
+
+  public allowStudentCamera(peerId: string) {
+    this.socket?.emit("camera:allow", { peerId });
+    this.socket?.emit("chatMessage", {
+      isControl: true,
+      controlAction: "CAMERA_RESPONSE",
+      peerId,
+      allowed: true,
+      timestamp: Date.now()
+    });
+  }
+
+  public revokeStudentCamera(peerId: string) {
+    this.socket?.emit("camera:revoke", { peerId });
+    this.socket?.emit("chatMessage", {
+      isControl: true,
+      controlAction: "FORCE_CAMERA_OFF",
+      peerId,
+      timestamp: Date.now()
+    });
+  }
+
+  public getConsumerForTrack(trackId: string): string | undefined {
+    for (const [id, consumer] of this.consumers.entries()) {
+      if (consumer.track.id === trackId) {
+        return id;
+      }
+    }
+    return undefined;
   }
 
   private request(type: string, data = {}): Promise<any> {

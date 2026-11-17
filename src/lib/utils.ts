@@ -24,7 +24,10 @@ export function sanitizeRoomId(input: string): string {
   const cleaned = input.trim().toLowerCase();
   // If user pasted a full URL
   if (cleaned.includes("/meet/")) {
-    return cleaned.split("/meet/")[1].split("?")[0].replace(/[^a-z0-9-]/g, "");
+    return cleaned.split("/meet/")[1].split("?")[0].replace(/[^a-z0-9_-]/g, "");
   }
-  return cleaned.replace(/[^a-z0-9-]/g, "");
+  if (cleaned.includes("/embed/")) {
+    return cleaned.split("/embed/")[1].split("?")[0].replace(/[^a-z0-9_-]/g, "");
+  }
+  return cleaned.replace(/[^a-z0-9_-]/g, "");
 }

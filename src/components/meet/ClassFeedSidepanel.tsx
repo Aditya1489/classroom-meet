@@ -114,6 +114,8 @@ interface ClassFeedSidepanelProps {
   onAdmitKnock?: (knockId: string, name: string) => void;
   onDenyKnock?: (knockId: string, name: string) => void;
   onAdmitAllKnocks?: () => void;
+  videoAllowedPeers?: Set<string>;
+  onToggleCameraPermission?: (peerId: string, allow: boolean) => void;
 }
 
 export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
@@ -151,6 +153,8 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
   onAdmitKnock,
   onDenyKnock,
   onAdmitAllKnocks,
+  videoAllowedPeers,
+  onToggleCameraPermission,
 }) => {
   // Chat Input State
   const [inputText, setInputText] = useState("");
@@ -972,9 +976,29 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
                       </button>
                     )}
 
-                    {/* Center hover action overlay for Tutor (Mute & Expel) — hidden while hand is raised */}
+                    {/* Center hover action overlay for Tutor (Camera, Mute & Expel) — hidden while hand is raised */}
                     {isHost && !isTutorRole && !isMe && !hasHandRaised && (
                       <div className="absolute inset-0 z-30 bg-zinc-950/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center gap-2 pointer-events-none group-hover:pointer-events-auto">
+                        {onToggleCameraPermission && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleCameraPermission(p.id, !videoAllowedPeers?.has(p.id));
+                            }}
+                            className={`p-1.5 rounded-full shadow-xl transition-all hover:scale-110 active:scale-95 cursor-pointer ${
+                              videoAllowedPeers?.has(p.id)
+                                ? "bg-emerald-600/90 hover:bg-emerald-500 text-white border border-emerald-400/50"
+                                : "bg-zinc-800/90 hover:bg-zinc-700 text-zinc-300 border border-white/20"
+                            }`}
+                            title={videoAllowedPeers?.has(p.id) ? `Revoke ${p.name}'s camera` : `Allow ${p.name}'s camera`}
+                          >
+                            {videoAllowedPeers?.has(p.id) ? (
+                              <Video className="w-3.5 h-3.5" />
+                            ) : (
+                              <VideoOff className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

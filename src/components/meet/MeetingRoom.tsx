@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   MathsyMediasoupEngine,
   RemoteParticipant,
@@ -70,6 +70,8 @@ import {
   ZoomIn,
   Search,
   FileUp,
+  Zap,
+  ChevronRight,
 } from "lucide-react";
 import {
   isMobileDevice,
@@ -260,9 +262,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [demoRemainingSec, setDemoRemainingSec] = useState<number | null>(meetingCode.startsWith("demo-") ? 1800 : null);
   const [isDemoEnded, setIsDemoEnded] = useState<boolean>(false);
 
-  // Media States (students join with microphone muted by default)
+  // Media States (students join with microphone muted and camera OFF by default)
   const [isMicEnabled, setIsMicEnabled] = useState(Boolean(isHost && !initialOptions.micMuted));
-  const [isCamEnabled, setIsCamEnabled] = useState(!initialOptions.camOff);
+  const [isCamEnabled, setIsCamEnabled] = useState(Boolean(isHost && !initialOptions.camOff));
+  const [hasCameraPermission, setHasCameraPermission] = useState<boolean>(isHost);
+  const [videoAllowedPeers, setVideoAllowedPeers] = useState<Set<string>>(new Set());
+  const [isAudioOnlyMode, setIsAudioOnlyMode] = useState<boolean>(false);
+  const [gridPage, setGridPage] = useState<number>(0);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isHandRaised, setIsHandRaised] = useState(false);
 
@@ -830,6 +836,32 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     };
 
+    engine.onCameraPermissionChange = (allowed: boolean) => {
+      setHasCameraPermission(allowed);
+      if (allowed) {
+        toast.success("Tutor granted you permission to turn on your camera! 📹", { id: "cam-perm" });
+      } else {
+        toast.info("Camera permission was revoked by the tutor.", { id: "cam-perm" });
+        setIsCamEnabled(false);
+        setLocalVideoTrack(null);
+      }
+    };
+
+    engine.onForceCameraOff = () => {
+      setIsCamEnabled(false);
+      setLocalVideoTrack(null);
+      toast.info("Your camera was turned off by the tutor.", { id: "cam-force-off" });
+    };
+
+    engine.onPeerVideoPermission = (peerId: string, allowed: boolean) => {
+      setVideoAllowedPeers((prev) => {
+        const next = new Set(prev);
+        if (allowed) next.add(peerId);
+        else next.delete(peerId);
+        return next;
+      });
+    };
+
     engine.onScreenShareEnded = () => {
       console.log("[MeetingRoom] Engine notified screen share ended");
       setLocalScreenTrack(null);
@@ -1359,14 +1391,49 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     } else {
       if (!isCamEnabled) {
+        if (!hasCameraPermission) {
+          toast.info("Camera is locked by the tutor. Please raise your hand to request camera permission.", { id: "cam-perm-needed" });
+          return;
+        }
         const track = await engine.enableVideo();
         setLocalVideoTrack(track);
         setIsCamEnabled(true);
         setShowCameraGateModal(false);
       } else {
-        // Turning camera OFF triggers policy warning
-        setShowCameraOffWarningModal(true);
+        engine.disableVideo();
+        setLocalVideoTrack(null);
+        setIsCamEnabled(false);
       }
+    }
+  };
+
+  const handleToggleStudentCamera = (peerId: string, allow: boolean) => {
+    if (!isHost) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    if (allow) {
+      engine.allowStudentCamera(peerId);
+      setVideoAllowedPeers((prev) => new Set(prev).add(peerId));
+      toast.success("Student camera permitted");
+    } else {
+      engine.revokeStudentCamera(peerId);
+      setVideoAllowedPeers((prev) => {
+        const next = new Set(prev);
+        next.delete(peerId);
+        return next;
+      });
+      toast.info("Student camera revoked");
+    }
+  };
+
+  const handleToggleAudioOnly = () => {
+    const next = !isAudioOnlyMode;
+    setIsAudioOnlyMode(next);
+    engineRef.current?.setAudioOnlyMode(next);
+    if (next) {
+      toast.success("Data Saver enabled: video streaming paused ⚡");
+    } else {
+      toast.info("Data Saver disabled: video streaming resumed");
     }
   };
 
@@ -1956,6 +2023,39 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }),
   ];
 
+  // Grid Pagination & Bandwidth Optimization: Cap to 6 video tiles at a time
+  const TILES_PER_PAGE = 6;
+  const totalGridPages = Math.max(1, Math.ceil(allParticipants.length / TILES_PER_PAGE));
+  const visibleGridParticipants = useMemo(() => {
+    if (allParticipants.length <= TILES_PER_PAGE) return allParticipants;
+    const pageIndex = Math.min(gridPage, totalGridPages - 1);
+    const start = pageIndex * TILES_PER_PAGE;
+    return allParticipants.slice(start, start + TILES_PER_PAGE);
+  }, [allParticipants, gridPage, totalGridPages]);
+
+  // Pause video consumers for off-screen tiles or during Audio-Only Mode to preserve CPU/bandwidth
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    const visibleTrackIds = new Set(
+      visibleGridParticipants.map((p) => p.videoTrack?.id).filter(Boolean)
+    );
+
+    remoteParticipants.forEach((p) => {
+      if (p.videoTrack) {
+        const consumerId = engine.getConsumerForTrack(p.videoTrack.id);
+        if (consumerId) {
+          if (visibleTrackIds.has(p.videoTrack.id) && !isAudioOnlyMode) {
+            engine.resumeConsumer(consumerId);
+          } else {
+            engine.pauseConsumer(consumerId);
+          }
+        }
+      }
+    });
+  }, [visibleGridParticipants, remoteParticipants, isAudioOnlyMode]);
+
   // Active Screen Share track (local presenter or remote peer)
   const remoteScreenSharer = remoteParticipants.find((p) => Boolean(p.screenTrack));
   const activeScreenTrack = localScreenTrack || remoteScreenSharer?.screenTrack || null;
@@ -2373,6 +2473,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               <span>{isFocusMode ? "Exit" : "Focus"}</span>
             </button>
           )}
+
+          {/* Data Saver / Audio-Only Mode Toggle */}
+          <button
+            onClick={handleToggleAudioOnly}
+            className={`h-8 px-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
+              isAudioOnlyMode
+                ? "bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm"
+                : "bg-[#1a1814] text-[#a39e94] border-white/10 hover:text-[#f3eee6] hover:bg-[#221f1a]"
+            }`}
+            title={isAudioOnlyMode ? "Disable Data Saver (Resume Video)" : "Enable Data Saver (Audio Only, Saves Network)"}
+          >
+            <Zap className={`w-3.5 h-3.5 ${isAudioOnlyMode ? "text-amber-400" : "text-zinc-400"}`} />
+            <span className="hidden md:inline">{isAudioOnlyMode ? "Data Saver ON" : "Data Saver"}</span>
+          </button>
 
           {/* Fullscreen toggle */}
           <button
@@ -3306,6 +3420,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
                         onForceMute={() => handleForceMuteStudent(p.id, p.name)}
                         onExpel={() => handleExpelStudent(p.id, p.name)}
+                        isCameraPermitted={videoAllowedPeers.has(p.id)}
+                        onToggleCamera={() => handleToggleStudentCamera(p.id, !videoAllowedPeers.has(p.id))}
                         className="w-48 md:w-full aspect-video shrink-0"
                       />
                     ))}
@@ -3313,52 +3429,79 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               )}
             </div>
           ) : (
-            /* DYNAMIC RESPONSIVE GRID (GOOGLE MEET STYLE) */
-            <div
-              className={`w-full h-full grid gap-3 ${
-                allParticipants.length === 1
-                  ? "grid-cols-1"
-                  : allParticipants.length === 2
-                  ? "grid-cols-1 sm:grid-cols-2"
-                  : allParticipants.length <= 4
-                  ? "grid-cols-2 grid-rows-2"
-                  : allParticipants.length <= 6
-                  ? "grid-cols-2 md:grid-cols-3 grid-rows-2"
-                  : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
-              }`}
-            >
-              {allParticipants.map((p) => (
-                <VideoTile
-                  key={p.id}
-                  id={p.id}
-                  name={p.name}
-                  avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
-                  videoTrack={p.videoTrack}
-                  audioTrack={p.audioTrack}
-                  isAudioMuted={p.isAudioMuted}
-                  isVideoMuted={p.isVideoMuted}
-                  isLocal={p.id === myUserId}
-                  isHost={p.role === "host"}
-                  isViewerHost={isHost}
-                  isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
-                  isHandRaised={p.isHandRaised}
-                  isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
-                  onApproveMic={() => {
-                    const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
-                    handleApproveMic(m?.userId || p.id, p.name);
-                  }}
-                  onDenyMic={() => {
-                    const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
-                    handleDenyMic(m?.userId || p.id, p.name);
-                  }}
-                  isPinned={p.id === pinnedId}
-                  onTogglePin={() => setPinnedId(pinnedId === p.id ? null : p.id)}
-                  onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
-                  onForceMute={() => handleForceMuteStudent(p.id, p.name)}
-                  onExpel={() => handleExpelStudent(p.id, p.name)}
-                  className="w-full h-full"
-                />
-              ))}
+            /* DYNAMIC RESPONSIVE GRID (GOOGLE MEET STYLE - CAPPED TO 6 TILES MAX) */
+            <div className="w-full h-full flex flex-col min-h-0">
+              <div
+                className={`w-full flex-1 min-h-0 grid gap-3 ${
+                  visibleGridParticipants.length === 1
+                    ? "grid-cols-1"
+                    : visibleGridParticipants.length === 2
+                    ? "grid-cols-1 sm:grid-cols-2"
+                    : visibleGridParticipants.length <= 4
+                    ? "grid-cols-2 grid-rows-2"
+                    : "grid-cols-2 md:grid-cols-3 grid-rows-2"
+                }`}
+              >
+                {visibleGridParticipants.map((p) => (
+                  <VideoTile
+                    key={p.id}
+                    id={p.id}
+                    name={p.name}
+                    avatarUrl={p.id === myUserId ? profile?.avatarUrl : (p as any).avatarUrl}
+                    videoTrack={p.videoTrack}
+                    audioTrack={p.audioTrack}
+                    isAudioMuted={p.isAudioMuted}
+                    isVideoMuted={p.isVideoMuted}
+                    isLocal={p.id === myUserId}
+                    isHost={p.role === "host"}
+                    isViewerHost={isHost}
+                    isSpeaking={!p.isAudioMuted && Boolean(p.audioTrack)}
+                    isHandRaised={p.isHandRaised}
+                    isMicRequested={unmuteRequests.some((r) => r.userId === p.id || (p as any).userId === r.userId)}
+                    onApproveMic={() => {
+                      const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                      handleApproveMic(m?.userId || p.id, p.name);
+                    }}
+                    onDenyMic={() => {
+                      const m = unmuteRequests.find((r) => r.userId === p.id || (p as any).userId === r.userId);
+                      handleDenyMic(m?.userId || p.id, p.name);
+                    }}
+                    isPinned={p.id === pinnedId}
+                    onTogglePin={() => setPinnedId(pinnedId === p.id ? null : p.id)}
+                    onLowerHand={() => isHost && handleLowerStudentHand(p.id)}
+                    onForceMute={() => handleForceMuteStudent(p.id, p.name)}
+                    onExpel={() => handleExpelStudent(p.id, p.name)}
+                    isCameraPermitted={videoAllowedPeers.has(p.id)}
+                    onToggleCamera={() => handleToggleStudentCamera(p.id, !videoAllowedPeers.has(p.id))}
+                    className="w-full h-full"
+                  />
+                ))}
+              </div>
+
+              {/* Grid Pagination Controls for classrooms with > 6 students */}
+              {allParticipants.length > TILES_PER_PAGE && (
+                <div className="flex items-center justify-center gap-3 pt-2 shrink-0 z-20">
+                  <button
+                    onClick={() => setGridPage((prev) => Math.max(0, prev - 1))}
+                    disabled={gridPage <= 0}
+                    className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-white/10 hover:bg-zinc-800 disabled:opacity-30 disabled:pointer-events-none text-xs text-white font-medium flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Prev</span>
+                  </button>
+                  <span className="text-[11px] text-zinc-400 font-mono">
+                    Page {gridPage + 1} of {totalGridPages} ({allParticipants.length} students)
+                  </span>
+                  <button
+                    onClick={() => setGridPage((prev) => Math.min(totalGridPages - 1, prev + 1))}
+                    disabled={gridPage >= totalGridPages - 1}
+                    className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-white/10 hover:bg-zinc-800 disabled:opacity-30 disabled:pointer-events-none text-xs text-white font-medium flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -3443,6 +3586,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onAdmitKnock={handleAdmitKnock}
           onDenyKnock={handleDenyKnock}
           onAdmitAllKnocks={handleAdmitAllKnocks}
+          videoAllowedPeers={videoAllowedPeers}
+          onToggleCameraPermission={handleToggleStudentCamera}
         />
       </main>
 
