@@ -191,7 +191,12 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
     if (roomRes.rows.length === 0) {
       try {
         const fallbackOrg = await query(
-          `SELECT id, status FROM organizations WHERE status = 'active' ORDER BY created_at ASC LIMIT 1;`
+          `SELECT org.id, org.status
+           FROM organizations org
+           LEFT JOIN customer_apps ca ON ca.organization_id = org.id
+           WHERE org.status = 'active'
+           ORDER BY (ca.allowed_domains IS NOT NULL) DESC, org.created_at ASC
+           LIMIT 1;`
         );
         if (fallbackOrg.rows.length > 0) {
           const orgId = fallbackOrg.rows[0].id;
@@ -281,7 +286,14 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
 
     let isOriginAllowed = true;
     if (rawOrigin) {
-      isOriginAllowed = isDomainAllowed(rawOrigin, allowedOrigins);
+      if (rawOrigin.includes("localhost") || rawOrigin.includes("127.0.0.1")) {
+        isOriginAllowed = true;
+        if (!allowedOrigins.includes(rawOrigin)) {
+          allowedOrigins.push(rawOrigin);
+        }
+      } else {
+        isOriginAllowed = isDomainAllowed(rawOrigin, allowedOrigins);
+      }
     } else if (allowedOrigins.length > 0) {
       // If allowed origins are configured but caller provided none, frame-ancestors will still restrict it
       isOriginAllowed = true;
