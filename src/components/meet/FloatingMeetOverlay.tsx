@@ -33,6 +33,8 @@ interface FloatingMeetOverlayProps {
   onClosePiP: () => void;
   /** The mini-view also opens on a plain tab switch; "Stop Sharing" is only shown while presenting. */
   isScreenSharing?: boolean;
+  /** Screen being shared in the class (the host's own share or a participant's), shown above the tiles. */
+  screenTrack?: MediaStreamTrack | null;
 }
 
 /**
@@ -46,7 +48,8 @@ const PipVideoTile: React.FC<{
   isVideoMuted?: boolean;
   isSpeaking?: boolean;
   isLocal?: boolean;
-}> = ({ track, name, isAudioMuted = false, isVideoMuted = false, isSpeaking = false, isLocal = false }) => {
+  fit?: "cover" | "contain";
+}> = ({ track, name, isAudioMuted = false, isVideoMuted = false, isSpeaking = false, isLocal = false, fit = "cover" }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hasVideo = Boolean(track) && !isVideoMuted && track?.readyState === "live";
 
@@ -96,7 +99,7 @@ const PipVideoTile: React.FC<{
           autoPlay
           playsInline
           muted
-          className={`w-full h-full object-cover ${isLocal ? "-scale-x-100" : ""}`}
+          className={`w-full h-full ${fit === "contain" ? "object-contain bg-black" : "object-cover"} ${isLocal ? "-scale-x-100" : ""}`}
         />
       ) : (
         <div className="flex flex-col items-center justify-center gap-1.5 p-2">
@@ -147,6 +150,7 @@ export const FloatingMeetOverlay: React.FC<FloatingMeetOverlayProps> = ({
   onStopScreenShare,
   onClosePiP,
   isScreenSharing = true,
+  screenTrack = null,
 }) => {
   const [activeTab, setActiveTab] = useState<"video" | "chat">("video");
   const [chatInput, setChatInput] = useState("");
@@ -263,6 +267,13 @@ export const FloatingMeetOverlay: React.FC<FloatingMeetOverlayProps> = ({
         {activeTab === "video" ? (
           /* SECTION A: MINI VIDEO GRID */
           <div className="flex-1 p-2 grid grid-cols-1 sm:grid-cols-2 gap-2 overflow-y-auto no-scrollbar auto-rows-fr">
+            {/* Shared screen, full width above the camera tiles */}
+            {screenTrack && screenTrack.readyState === "live" && (
+              <div className="sm:col-span-2 min-h-[160px]">
+                <PipVideoTile track={screenTrack} name="Shared screen" fit="contain" />
+              </div>
+            )}
+
             {/* Local Presenter Tile */}
             <PipVideoTile
               track={localVideoTrack}

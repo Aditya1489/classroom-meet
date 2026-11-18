@@ -4592,6 +4592,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           }}
           onClosePiP={closePiP}
           isScreenSharing={isScreenSharing}
+          screenTrack={activeScreenTrack}
         />
       )}
     </div>
