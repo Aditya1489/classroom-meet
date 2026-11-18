@@ -4504,7 +4504,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         />
       )}
       <PostClassModal
-        open={showPostClassModal}
+        open={showPostClassModal && !pendingRecording} // save the recording first: leaving unmounts the save box and loses it
         onOpenChange={setShowPostClassModal}
         meetingCode={meetingCode}
         durationFormatted={formatDuration(elapsedSeconds)}
