@@ -1257,3 +1257,49 @@ roomsRouter.post("/:roomCode/end", requireAuth, async (req: Request, res: Respon
     return res.status(500).json({ error: "Failed to end room", details: err.message });
   }
 });
+
+// ── Class recordings ─────────────────────────────────────────────────────────
+const isSafeRecordingUrl = (value: unknown): value is string => {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+// Host saves where the recording lives (Drive upload or a pasted link).
+roomsRouter.post("/:roomCode/recordings", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const roomCode = String(req.params.roomCode || "").trim().toLowerCase();
+    const roomRes = await query("SELECT room_code, tutor_id, metadata FROM live_classes WHERE room_code = $1", [roomCode]);
+    const room = roomRes.rows[0];
+    if (!room) return res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+    const user = (req as any).user;
+    if (!isUserRoomHost(room, user)) return res.status(403).json({ error: "Only the host can add recordings", code: "HOST_ONLY" });
+
+    const { url, source, title } = req.body || {};
+    if (!isSafeRecordingUrl(url)) return res.status(400).json({ error: "A valid https link is required", code: "INVALID_URL" });
+    const result = await query(
+      `INSERT INTO room_recordings (room_code, url, source, title, created_by)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, room_code, url, source, title, created_at;`,
+      [roomCode, url, source === "drive" ? "drive" : "link", typeof title === "string" ? title.slice(0, 200) : null, String(user?.id || "")]
+    );
+    return res.status(201).json({ recording: result.rows[0] });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to save recording" });
+  }
+});
+
+// Anyone in the room (tutor or admitted student) can list its recordings.
+roomsRouter.get("/:roomCode/recordings", authorizeRoomAccess({ requireParticipant: true }), async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      "SELECT id, url, source, title, created_at FROM room_recordings WHERE room_code = $1 ORDER BY created_at DESC;",
+      [(req as any).room.room_code]
+    );
+    return res.json({ recordings: result.rows });
+  } catch {
+    return res.status(500).json({ error: "Failed to fetch recordings" });
+  }
+});

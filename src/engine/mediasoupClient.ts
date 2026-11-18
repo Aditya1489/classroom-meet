@@ -660,6 +660,12 @@ export class MathsyMediasoupEngine {
         this.peerLastSeen.set(pId, Date.now());
         if (pUserId) this.peerLastSeen.set(pUserId, Date.now());
         if (peer.name) this.peerLastSeen.set(peer.name.trim().toLowerCase(), Date.now());
+        // Same person reconnecting (e.g. host moving from the CRM frame to its own tab): the newest
+        // connection wins, so a stale copy never shows twice or grabs their screen share.
+        const baseOf = (v: string) => v.replace(/-[a-z0-9]{5}$/i, "");
+        for (const key of Array.from(this.participants.keys())) {
+          if (key !== pId && baseOf(key) === baseOf(pId)) this.participants.delete(key);
+        }
         this.participants.set(pId, {
           id: pId,
           userId: pUserId,

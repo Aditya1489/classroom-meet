@@ -223,6 +223,14 @@ export class LocalMeetingRecorder {
   }
 
   /** Stops and downloads the recording. Returns the file name, or null if there was nothing to save. */
+  /** Stops and returns the file without downloading, so the caller can upload or download it. */
+  async stopAndGetFile(): Promise<{ blob: Blob; fileName: string } | null> {
+    const mime = this.mimeType;
+    const blob = await this.stop();
+    if (!blob || blob.size === 0) return null;
+    return { blob, fileName: buildRecordingFileName(this.meetingCode, mime || blob.type) };
+  }
+
   async stopAndDownload(): Promise<string | null> {
     const mime = this.mimeType;
     const blob = await this.stop();
@@ -259,4 +267,17 @@ export class LocalMeetingRecorder {
     this.chunks = [];
     this.stopping = null;
   }
+}
+
+/** Saves a recording to the user's Downloads. */
+export function downloadRecording(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

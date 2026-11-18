@@ -17,6 +17,7 @@ import { ClassFeedSidepanel, ChatMsg, PollItem } from "./ClassFeedSidepanel";
 import { InfoDrawer } from "./InfoDrawer";
 import { Whiteboard } from "../whiteboard/Whiteboard";
 import { RecordingModal } from "../recording/RecordingModal";
+import { SaveRecordingDialog } from "../recording/SaveRecordingDialog";
 import { LocalMeetingRecorder } from "../../services/localRecorder";
 import { useDocumentPiP } from "../../hooks/useDocumentPiP";
 import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
@@ -286,6 +287,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [isAudioOnlyMode, setIsAudioOnlyMode] = useState<boolean>(false);
   const [gridPage, setGridPage] = useState<number>(0);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  // Embedded (e.g. inside the CRM) the floating mini-view cannot open: browsers only allow Document PiP
+  // from a top-level page. The host chooses normal sharing here, or continuing in a new tab with the popup.
+  const isEmbeddedFrame = typeof window !== "undefined" && window.self !== window.top;
+  const [showSharePrompt, setShowSharePrompt] = useState(false);
+  const [movedToTab, setMovedToTab] = useState(false);
   const [isHandRaised, setIsHandRaised] = useState(false);
 
   // Local tracks
@@ -706,6 +712,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // ── Local recording (saved to this computer) ──
   const localRecorderRef = useRef<LocalMeetingRecorder | null>(null);
+  // Finished recording waiting for the tutor to upload, download or share it.
+  const [pendingRecording, setPendingRecording] = useState<{ blob: Blob; fileName: string } | null>(null);
   const getRecordingAudio = () => ({
     // Only record the local mic while it's switched on in the meeting.
     localMic: isMicEnabled ? localAudioTrack : null,
@@ -718,9 +726,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     setIsRecordingActive(false);
     if (!recorder) return;
     try {
-      const fileName = await recorder.stopAndDownload();
-      if (fileName) {
-        toast.success(`Recording saved to your Downloads: ${fileName}`, { id: "rec-saved", duration: 6000 });
+      const file = await recorder.stopAndGetFile();
+      if (file) {
+        setPendingRecording(file);
       } else {
         toast.info("Recording stopped. Nothing was captured, so no file was saved.", { id: "rec-saved" });
       }
@@ -744,7 +752,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     localRecorderRef.current = recorder;
     setIsRecordingActive(true);
     setIsRecordingModalOpen(false);
-    toast.success("Recording started. Choose \"Stop & Save\" to download the file.", { id: "rec-started" });
+    toast.success("Recording started. Stop it to upload to Google Drive or download.", { id: "rec-started" });
   };
 
   // Keep the recording's audio mix in step with mic on/off and people joining or leaving.
@@ -1635,8 +1643,55 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   };
 
   // Screen Share Handler
-  const handleToggleScreenShare = async () => {
+  const continueShareInNewTab = () => {
+    setShowSharePrompt(false);
+    const token =
+      window.sessionStorage.getItem(`mathsy_meet_embed_token_${meetingCode}`) ||
+      window.sessionStorage.getItem("mathsy_meet_embed_token") ||
+      "";
+    // Reuse this embed route + token so the tutor rejoins as the same host with no new sign-in.
+    // parentOrigin carries the CRM origin so the embed domain check still passes in a top-level tab.
+    const ancestors = (window.location as any).ancestorOrigins as DOMStringList | undefined;
+    let parentOrigin = ancestors && ancestors.length ? ancestors[ancestors.length - 1] : "";
+    if (!parentOrigin && document.referrer) {
+      try {
+        parentOrigin = new URL(document.referrer).origin;
+      } catch {}
+    }
+    const params = new URLSearchParams({ sharePopup: "1" });
+    if (parentOrigin) params.set("parentOrigin", parentOrigin);
+    const url = `${window.location.origin}${window.location.pathname}?${params}${
+      token ? `#token=${encodeURIComponent(token)}` : ""
+    }`;
+    const tab = window.open(url, "_blank");
+    if (!tab) {
+      toast.error("Your browser blocked the new tab. Allow pop-ups for this site and try again.");
+      return;
+    }
+    // Leave here so the host is not in the room twice; the new tab rejoins as the same host.
+    try {
+      engineRef.current?.leaveRoom();
+      (engineRef.current as any)?.disconnect?.(); // close the socket so the server drops this copy now
+    } catch {}
+    setMovedToTab(true);
+  };
+
+  // New tab opened for the floating popup: offer one click to start sharing (screen capture needs a click).
+  const sharePopupOffered = useRef(false);
+  useEffect(() => {
+    if (isEmbeddedFrame || sharePopupOffered.current || connectionState !== "connected") return;
+    if (new URLSearchParams(window.location.search).get("sharePopup") !== "1") return;
+    sharePopupOffered.current = true;
+    toast("Ready to share with the floating popup", {
+      duration: 60000,
+      action: { label: "Share screen", onClick: () => handleToggleScreenShare() },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionState]);
+
+  const handleToggleScreenShare = async (opts?: { skipEmbedPrompt?: boolean } | React.SyntheticEvent) => {
     const engine = engineRef.current;
+    const skipEmbedPrompt = Boolean(opts && "skipEmbedPrompt" in opts && opts.skipEmbedPrompt);
     if (!engine) return;
 
     if (isScreenSharing) {
@@ -1656,6 +1711,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           "Screen sharing is not supported by your mobile browser. Please join from a desktop or laptop computer to share your screen.",
           { duration: 5000 }
         );
+        return;
+      }
+
+      if (isEmbeddedFrame && !skipEmbedPrompt) {
+        setShowSharePrompt(true);
         return;
       }
 
@@ -4382,6 +4442,47 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       )}
 
       {/* Post-Class Workflow Modal (Host) */}
+      {showSharePrompt && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-5 text-white shadow-2xl">
+            <h3 className="text-base font-semibold">How do you want to share?</h3>
+            <p className="mt-1 text-sm text-zinc-400">
+              The floating popup (to see students while presenting) only works when the class is open in its own tab.
+            </p>
+            <div className="mt-4 flex flex-col gap-2">
+              <Button
+                onClick={() => {
+                  setShowSharePrompt(false);
+                  handleToggleScreenShare({ skipEmbedPrompt: true });
+                }}
+              >
+                Share normally here
+              </Button>
+              <Button variant="outline" onClick={continueShareInNewTab}>
+                Open in new tab with floating popup
+              </Button>
+              <Button variant="ghost" onClick={() => setShowSharePrompt(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {movedToTab && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-zinc-950 p-4 text-center text-white">
+          <div>
+            <p className="text-base font-semibold">Your class continues in the new tab.</p>
+            <p className="mt-1 text-sm text-zinc-400">Close that tab and reload this page to come back here.</p>
+          </div>
+        </div>
+      )}
+      {pendingRecording && (
+        <SaveRecordingDialog
+          meetingCode={meetingCode}
+          file={pendingRecording}
+          onClose={() => setPendingRecording(null)}
+        />
+      )}
       <PostClassModal
         open={showPostClassModal}
         onOpenChange={setShowPostClassModal}

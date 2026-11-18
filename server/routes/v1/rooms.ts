@@ -485,3 +485,24 @@ v1RoomsRouter.post("/:roomId/tokens", requirePermission("tokens:write"), tokenMi
     return res.status(500).json({ error: "Failed to issue participant token", details: err.message });
   }
 });
+
+// Recordings for a room (used by the integrating site to show them to enrolled students after class).
+v1RoomsRouter.get("/:roomId/recordings", requirePermission("rooms:read"), async (req: Request, res: Response) => {
+  try {
+    const organization = (req as any).organization;
+    const roomRes = await query(
+      `SELECT room_code FROM live_classes WHERE (id::text = $1 OR room_code = $1) AND organization_id = $2;`,
+      [String(req.params.roomId).trim().toLowerCase(), organization.id]
+    );
+    if (roomRes.rows.length === 0) {
+      return res.status(404).json({ error: "Room not found or does not belong to this organization", code: "ROOM_NOT_FOUND" });
+    }
+    const result = await query(
+      "SELECT id, url, source, title, created_at FROM room_recordings WHERE room_code = $1 ORDER BY created_at DESC;",
+      [roomRes.rows[0].room_code]
+    );
+    return res.json({ recordings: result.rows });
+  } catch {
+    return res.status(500).json({ error: "Failed to fetch recordings" });
+  }
+});

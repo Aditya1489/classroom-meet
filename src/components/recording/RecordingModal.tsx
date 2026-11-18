@@ -59,7 +59,7 @@ export const RecordingModal: React.FC<RecordingModalProps> = ({
   streamStats,
   onSessionWatchUrlChange,
 }) => {
-  const [activeTab, setActiveTab] = useState<"youtube" | "local">("youtube");
+  const [activeTab, setActiveTab] = useState<"youtube" | "local">("local");
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [connectedChannel, setConnectedChannel] = useState<ConnectedChannelInfo | null>(null);
 

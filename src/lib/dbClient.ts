@@ -204,6 +204,20 @@ export const dbClient = {
     }
   },
 
+  /** Saves where a class recording lives (host only). */
+  async saveRecording(roomCode: string, rec: { url: string; source: "drive" | "link"; title?: string }): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/recordings`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(undefined, roomCode), "Content-Type": "application/json" },
+        body: JSON.stringify(rec),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+
   async recordParticipantLeave(roomCode: string, userId?: string, displayName?: string): Promise<void> {
     try {
       await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/leave`, {
