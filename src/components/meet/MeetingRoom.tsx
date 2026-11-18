@@ -2160,7 +2160,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const reconcileWithDb = async () => {
       try {
         const dbParticipants = await dbClient.getParticipants(meetingCode);
-        if (Array.isArray(dbParticipants)) {
+        if (Array.isArray(dbParticipants) && dbParticipants.length > 0) {
           const activeUserIds = new Set(dbParticipants.map((p) => p.user_id).filter(Boolean));
           const activeNames = new Set(
             dbParticipants.map((p) => (p.display_name || "").trim().toLowerCase()).filter(Boolean)
@@ -2169,8 +2169,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           setRemoteParticipants((prev) => {
             const next = prev.filter((p) => {
               const hasActiveMedia = Boolean(p.audioTrack || p.videoTrack || p.screenTrack);
+              const baseId = String(p.id || "").replace(/-[a-z0-9]{5}$/i, ""); // peer ids carry a connection suffix
               const isDbActive =
                 activeUserIds.has(p.id) ||
+                activeUserIds.has(baseId) ||
                 (p.userId && activeUserIds.has(p.userId)) ||
                 (p.name && activeNames.has(p.name.trim().toLowerCase()));
 

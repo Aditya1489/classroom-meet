@@ -189,17 +189,18 @@ export const dbClient = {
     }
   },
 
-  async getParticipants(roomCode: string): Promise<DbParticipant[]> {
+  // Returns null when the list could not be loaded, so callers never mistake an outage for an empty room.
+  async getParticipants(roomCode: string): Promise<DbParticipant[] | null> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/participants`, {
         headers: getAuthHeaders(undefined, roomCode),
       });
-      if (!res.ok) return [];
+      if (!res.ok) return null;
       const data = await res.json();
-      return data?.participants || [];
+      return Array.isArray(data?.participants) ? data.participants : null;
     } catch (err) {
       console.warn("[dbClient] Error fetching participants:", err);
-      return [];
+      return null;
     }
   },
 

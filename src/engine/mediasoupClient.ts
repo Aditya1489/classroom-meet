@@ -337,14 +337,12 @@ export class MathsyMediasoupEngine {
     } catch {}
 
     const isBrowser = typeof window !== "undefined" && Boolean(window.location);
-    const isTunnelOrRemote = isBrowser && (
-      window.location.hostname.includes("ngrok") ||
-      (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1" && !window.location.hostname.includes("sslip.io"))
-    );
+    // Same-origin signaling only works behind the Vite dev proxy (ngrok/tunnels). Static hosts such as
+    // Vercel cannot proxy websockets, so production must talk to VITE_MEDIASOUP_SERVER_URL directly.
+    const viaOrigin = (import.meta as any).env?.VITE_SIGNALING_VIA_ORIGIN === "true";
+    const isTunnel = isBrowser && /ngrok|loca\.lt|trycloudflare/i.test(window.location.hostname);
 
-    // If accessing via ngrok or tunnel, route signaling through window.location.origin (same-origin proxy)
-    // so Vite proxies /socket.io and rewrites the Origin header to http://localhost:5174, satisfying the SFU CORS whitelist.
-    const defaultUrl = isTunnelOrRemote
+    const defaultUrl = isBrowser && (viaOrigin || isTunnel)
       ? window.location.origin
       : (envMediasoupUrl || derivedFromApi || (isBrowser ? window.location.origin : ""));
 
