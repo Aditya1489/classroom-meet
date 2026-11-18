@@ -2334,6 +2334,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           base((p as any).userId) !== base(myUserId)
         );
       })
+      // One tile per person: the same person on two connections (e.g. the tutor's old class frame and
+      // the new tab) keeps the connection with live audio/video, else the newest one.
+      .filter((p, _i, arr) => {
+        const base = (v: unknown) => String(v || "").replace(/-[a-z0-9]{5}$/i, "");
+        const same = arr.filter((x) => base(x.id) === base(p.id));
+        if (same.length === 1) return true;
+        const score = (x: any) => (x.screenTrack ? 4 : 0) + (x.videoTrack ? 2 : 0) + (x.audioTrack ? 1 : 0);
+        const best = same.reduce((a, c) => (score(c) >= score(a) ? c : a));
+        return best === p;
+      })
       .map((p) => {
         const isPeerHost = p.role === "host" || p.role === "tutor" || (p as any).isHost === true;
         return {
