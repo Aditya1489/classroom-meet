@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { query, pool } from "../server/db";
 import { connectMongo, getChatCollection, getSessionsCollection, closeMongo } from "../server/db/mongo";
 import { generateToken } from "../server/routes/auth";
+import crypto from "node:crypto";
+
+/**
+ * Chat is limited to accounts that joined the class, so every virtual user is a real account with an
+ * attendance row. Labels map to deterministic UUIDs so each virtual user stays a distinct person
+ * (the per-user chat rate limit still applies per user, as in production).
+ */
+function vuId(label: string): string {
+  const h = crypto.createHash("sha256").update(`chat-load-vu:${label}`).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+const VU_LABELS = [
+  ...Array.from({ length: 10 }, (_, i) => `student-base-${i}`),
+  ...Array.from({ length: 100 }, (_, i) => `student-ramp-${i}`),
+  ...Array.from({ length: 1000 }, (_, i) => `student-vu-${i}`),
+  ...Array.from({ length: 150 }, (_, i) => `student-burst-${i}`),
+];
 
 const API_BASE = process.env.API_BASE || "http://localhost:5001/api";
 
@@ -72,6 +90,22 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
       }),
     });
     assert.equal(res.status, 200);
+
+    // Register every virtual student as an account that has joined this class session.
+    const ids = VU_LABELS.map(vuId);
+    await query(
+      `INSERT INTO users (id, email, full_name, role)
+       SELECT id, 'vu-' || id::text || '@load.test', 'Load Student', 'student'
+       FROM unnest($1::uuid[]) AS id
+       ON CONFLICT (id) DO NOTHING;`,
+      [ids]
+    );
+    await query(
+      `INSERT INTO room_participants (room_code, user_id, display_name, role, joined_at)
+       SELECT $1, id, 'Load Student', 'student', NOW()
+       FROM unnest($2::uuid[]) AS id;`,
+      [loadRoomCode, ids]
+    );
   });
 
   it("Stage 1: Baseline Load (10 requests)", async () => {
@@ -80,7 +114,7 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
 
     for (let i = 0; i < 10; i++) {
       const studentToken = generateToken({
-        id: `student-base-${i}`,
+        id: vuId(`student-base-${i}`),
         role: "student",
         name: `Student Base ${i}`,
       });
@@ -111,7 +145,7 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
 
     const tasks = Array.from({ length: 100 }, async (_, i) => {
       const studentToken = generateToken({
-        id: `student-ramp-${i}`,
+        id: vuId(`student-ramp-${i}`),
         role: "student",
         name: `Student Ramp ${i}`,
       });
@@ -146,7 +180,7 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
     // Pre-generate tokens so synchronous HMAC signing does not distort HTTP I/O latency
     const studentTokens = Array.from({ length: 1000 }, (_, i) =>
       generateToken({
-        id: `student-vu-${i}`,
+        id: vuId(`student-vu-${i}`),
         role: "student",
         name: `VU Student ${i}`,
       })
@@ -198,7 +232,7 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
 
     const burstTasks = Array.from({ length: 150 }, async (_, i) => {
       const studentToken = generateToken({
-        id: `student-burst-${i}`,
+        id: vuId(`student-burst-${i}`),
         role: "student",
         name: `Burst Student ${i}`,
       });
@@ -238,6 +272,7 @@ describe("Chat API Scalability & Load Testing (Rule 8 Target: 1,000 Virtual User
 
     await query("DELETE FROM live_classes WHERE room_code = $1", [loadRoomCode]);
     await query("DELETE FROM users WHERE id = $1", [tutorId]);
+    await query("DELETE FROM users WHERE id = ANY($1::uuid[])", [VU_LABELS.map(vuId)]);
     await closeMongo();
     await pool.end();
     setTimeout(() => process.exit(0), 500);

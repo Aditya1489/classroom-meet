@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { requireAuth } from "./auth";
 import { query } from "../db";
+import { isUuid } from "../services/validation";
 import {
   createApiKey,
   listApiKeys,
@@ -23,9 +24,24 @@ export async function requireOrgRole(req: Request, res: Response, allowedRoles =
     return false;
   }
 
+  // Organization IDs are Postgres UUIDs: reject malformed IDs up front instead of letting the query fail with a 500.
+  if (!isUuid(orgId)) {
+    res.status(404).json({ error: "Organization not found", code: "ORG_NOT_FOUND" });
+    return false;
+  }
+
   // First-party system organization check: allow system admins only (SEC-GAP-01)
   if (orgId === "00000000-0000-0000-0000-000000000001" && user.role === "admin") {
     return true;
+  }
+
+  // Non-UUID identities (e.g. embed participant tokens) can never be organization members.
+  if (!isUuid(String(user?.id ?? ""))) {
+    res.status(403).json({
+      error: "Forbidden: You do not have permission to manage this organization or its credentials",
+      code: "ORG_ACCESS_DENIED",
+    });
+    return false;
   }
 
   const memberRes = await query(

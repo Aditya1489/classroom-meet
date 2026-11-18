@@ -87,7 +87,12 @@ export function useDocumentPiP(options: UseDocumentPiPOptions = {}) {
     onClose?.();
   }, [onClose]);
 
-  const openPiP = useCallback(async (customOpts?: { width?: number; height?: number }): Promise<Window | null> => {
+  /**
+   * Opens the floating mini-view. allowPopupFallback (default true) lets browsers without Document PiP
+   * fall back to a small popup window; automatic opens (tab switch, after screen-share selection) pass
+   * false, because a window.open() outside a click is either blocked or appears as a stray window.
+   */
+  const openPiP = useCallback(async (customOpts?: { width?: number; height?: number; allowPopupFallback?: boolean }): Promise<Window | null> => {
     const targetWidth = customOpts?.width || width;
     const targetHeight = customOpts?.height || height;
 
@@ -123,6 +128,10 @@ export function useDocumentPiP(options: UseDocumentPiPOptions = {}) {
       } catch (err: any) {
         console.warn("[DocumentPiP] requestWindow failed:", err?.message || err);
       }
+    }
+
+    if (customOpts?.allowPopupFallback === false) {
+      return null;
     }
 
     // Fallback for non-Chromium browsers (Firefox, Safari): open compact popup window

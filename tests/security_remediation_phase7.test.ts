@@ -21,7 +21,7 @@ import { isRoomHost } from "../server/routes/chat";
 import { MathsyMeetServerClient } from "../sdk/dist/server.mjs";
 import { MathsyMediasoupEngine } from "../src/engine/mediasoupClient";
 
-const API_BASE = "http://localhost:5001";
+const API_BASE = (process.env.API_BASE || "http://localhost:5001/api").replace(/\/api\/?$/, "");
 
 describe("Phase 7: Security Remediation Checkpoint 1 Test Suite", () => {
   let orgAId: string;

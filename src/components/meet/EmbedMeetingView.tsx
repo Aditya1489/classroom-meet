@@ -397,6 +397,7 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
   const initialOptions = {
     displayName: claims.name || (isTutorRole ? "Tutor" : "Student"),
     role: (isTutorRole ? "tutor" : "student") as "tutor" | "student",
+    isHost: isTutorRole,
     // Authoritatively constrained: cannot auto-unmute if server permissions forbid it
     micMuted: isTutorRole ? false : !permissions.canPublishAudio,
     camOff: !permissions.canPublishVideo,

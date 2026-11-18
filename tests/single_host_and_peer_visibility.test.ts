@@ -5,7 +5,7 @@ import { generateToken } from "../server/routes/auth.ts";
 import { query } from "../server/db/index.ts";
 import { io } from "socket.io-client";
 
-const BASE_URL = "http://localhost:5001/api";
+const BASE_URL = process.env.API_BASE || "http://localhost:5001/api";
 
 describe("Single-Host Room Ownership & Peer Visibility Suite", () => {
   const hostId = crypto.randomUUID();

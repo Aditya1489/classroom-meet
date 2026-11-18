@@ -64,7 +64,7 @@ export function isRoomHost(user: any, room: any): boolean {
  * Retrieves complete active-session chat history from MongoDB.
  * Strictly requires authentication and an active meeting session.
  */
-chatRouter.get("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req: Request, res: Response) => {
+chatRouter.get("/:roomCode/chat", requireAuth, authorizeRoomAccess({ requireParticipant: true }), async (req: Request, res: Response) => {
   try {
     const room = (req as any).room;
     const sanitizedCode = sanitizeRoomCode(room.room_code);
@@ -145,7 +145,7 @@ chatRouter.get("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req
  * Persists a new temporary message to MongoDB.
  * Strictly requires authentication; derives sender identity and role server-side.
  */
-chatRouter.post("/:roomCode/chat", requireAuth, authorizeRoomAccess(), async (req: Request, res: Response) => {
+chatRouter.post("/:roomCode/chat", requireAuth, authorizeRoomAccess({ requireParticipant: true }), async (req: Request, res: Response) => {
   try {
     const room = (req as any).room;
     const user = (req as any).user;

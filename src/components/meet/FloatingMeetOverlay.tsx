@@ -31,6 +31,8 @@ interface FloatingMeetOverlayProps {
   onToggleVideo: () => void;
   onStopScreenShare: () => void;
   onClosePiP: () => void;
+  /** The mini-view also opens on a plain tab switch; "Stop Sharing" is only shown while presenting. */
+  isScreenSharing?: boolean;
 }
 
 /**
@@ -144,6 +146,7 @@ export const FloatingMeetOverlay: React.FC<FloatingMeetOverlayProps> = ({
   onToggleVideo,
   onStopScreenShare,
   onClosePiP,
+  isScreenSharing = true,
 }) => {
   const [activeTab, setActiveTab] = useState<"video" | "chat">("video");
   const [chatInput, setChatInput] = useState("");
@@ -396,19 +399,21 @@ export const FloatingMeetOverlay: React.FC<FloatingMeetOverlayProps> = ({
           </button>
         </div>
 
-        {/* Stop Sharing Button (Red) */}
-        <button
-          type="button"
-          onClick={() => {
-            onStopScreenShare();
-            onClosePiP();
-          }}
-          title="Stop Screen Sharing"
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold rounded-xl shadow-lg shadow-rose-900/30 transition cursor-pointer"
-        >
-          <StopCircle className="w-3.5 h-3.5 fill-current" />
-          <span>Stop Sharing</span>
-        </button>
+        {/* Stop Sharing Button (Red) — only while presenting */}
+        {isScreenSharing && (
+          <button
+            type="button"
+            onClick={() => {
+              onStopScreenShare();
+              onClosePiP();
+            }}
+            title="Stop Screen Sharing"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold rounded-xl shadow-lg shadow-rose-900/30 transition cursor-pointer"
+          >
+            <StopCircle className="w-3.5 h-3.5 fill-current" />
+            <span>Stop Sharing</span>
+          </button>
+        )}
       </div>
     </div>
   );

@@ -4,17 +4,18 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5174",
+    "dev": "vite",
     "server": "tsx server/index.ts",
     "server:dev": "tsx watch server/index.ts",
-    "dev:all": "concurrently \"npm run server:dev\" \"npm run dev\"",
+    "dev:all": "node scripts/setup-local-env.mjs && concurrently -n api,web -c cyan,magenta \"npm run server:dev\" \"node scripts/wait-for-backend.mjs && npm run dev\"",
     "build": "tsc && vite build",
     "build:server": "esbuild server/index.ts --platform=node --format=esm --target=node20 --bundle --packages=external --outdir=dist-server && node -e \"const fs = require('fs'); fs.mkdirSync('dist-server/db/migrations', { recursive: true }); fs.copyFileSync('server/db/schema.sql', 'dist-server/db/schema.sql'); fs.readdirSync('server/db/migrations').forEach(f => fs.copyFileSync('server/db/migrations/' + f, 'dist-server/db/migrations/' + f));\"",
     "build:all": "npm run build && npm run build:server",
     "start:server": "node dist-server/index.js",
     "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
     "preview": "vite preview",
-    "test": "tsx --test --test-concurrency=1 'tests/**/*.test.ts'"
+    "test": "tsx --test --test-concurrency=1 'tests/**/*.test.ts'",
+    "setup:env": "node scripts/setup-local-env.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.23",

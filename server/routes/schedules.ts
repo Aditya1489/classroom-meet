@@ -8,6 +8,7 @@ import {
   cancelSchedule,
 } from "../services/scheduleService";
 import { verifyGoogleEmail } from "../services/googleEmailVerifier";
+import { isUuid } from "../services/validation";
 
 export const schedulesRouter = Router();
 
@@ -222,10 +223,18 @@ schedulesRouter.delete("/:id", requireAuth, async (req: Request, res: Response) 
       return res.status(401).json({ error: "Authentication required" });
     }
 
+    const notFound = { error: "Schedule not found or you are not authorized to cancel it" };
+    if (!isUuid(id) || !isUuid(String(user.id))) {
+      return res.status(404).json(notFound);
+    }
+
     const cancelled = await cancelSchedule(id, user.id);
     return res.json({ success: true, cancelled });
   } catch (err: any) {
+    if (err?.message === "Schedule not found or you are not authorized to cancel it") {
+      return res.status(404).json({ error: err.message });
+    }
     console.error("[SchedulesRouter] Failed to cancel class:", err);
-    return res.status(500).json({ error: err.message || "Failed to cancel class" });
+    return res.status(500).json({ error: "Failed to cancel class" });
   }
 });

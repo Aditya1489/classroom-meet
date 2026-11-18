@@ -249,13 +249,15 @@ export const dbClient = {
 
   async getChatHistory(
     roomCode: string
-  ): Promise<{ messages: any[]; isChatLocked: boolean; pinnedMessage: any | null; sessionId?: string }> {
+  ): Promise<{ messages: any[]; isChatLocked?: boolean; pinnedMessage?: any | null; sessionId?: string; unavailable?: boolean }> {
     try {
       const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(roomCode)}/chat`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) {
-        return { messages: [], isChatLocked: false, pinnedMessage: null };
+        // Leave lock / pin state undefined so callers keep what they already have (e.g. from the room
+        // sync) instead of resetting it, e.g. when history is requested just before attendance is recorded.
+        return { messages: [], unavailable: true };
       }
       const data = await res.json();
       return {
@@ -266,7 +268,7 @@ export const dbClient = {
       };
     } catch (err) {
       console.warn("[dbClient] Error fetching chat history:", err);
-      return { messages: [], isChatLocked: false, pinnedMessage: null };
+      return { messages: [], unavailable: true };
     }
   },
 

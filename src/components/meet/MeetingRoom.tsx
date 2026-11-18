@@ -17,11 +17,12 @@ import { ClassFeedSidepanel, ChatMsg, PollItem } from "./ClassFeedSidepanel";
 import { InfoDrawer } from "./InfoDrawer";
 import { Whiteboard } from "../whiteboard/Whiteboard";
 import { RecordingModal } from "../recording/RecordingModal";
+import { LocalMeetingRecorder } from "../../services/localRecorder";
 import { useDocumentPiP } from "../../hooks/useDocumentPiP";
 import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { useAuth } from "../../auth/authContext";
-import { dbClient, DbRoomKnock } from "../../lib/dbClient";
+import { dbClient, DbRoomKnock, API_BASE } from "../../lib/dbClient";
 import { Button } from "../ui/button";
 import {
   Mic,
@@ -179,6 +180,11 @@ function playKnockChime() {
   }
 }
 
+/** A person's id without the per-connection suffix the SFU adds ("<userId>-ab12c"). */
+function basePeerId(id: string | undefined | null): string {
+  return String(id || "").toLowerCase().replace(/_/g, "-").replace(/-[a-z0-9]{5}$/, "");
+}
+
 export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   meetingCode,
   initialOptions,
@@ -264,9 +270,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Media States (students join with microphone muted and camera OFF by default)
   const [isMicEnabled, setIsMicEnabled] = useState(Boolean(isHost && !initialOptions.micMuted));
-  const [isCamEnabled, setIsCamEnabled] = useState(Boolean(isHost && !initialOptions.camOff));
+  const [isCamEnabled, setIsCamEnabled] = useState(Boolean(!initialOptions.camOff));
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean>(isHost);
   const [videoAllowedPeers, setVideoAllowedPeers] = useState<Set<string>>(new Set());
+  // Reconnect resilience. The SFU forgets a student's camera/speaking approval when their connection
+  // drops and they rejoin, so the host remembers approvals per person (peer id without its per-connection
+  // suffix) and re-sends them when that person reappears. Students remember whether they wanted their
+  // camera on, so it comes back by itself once the approval is restored.
+  const grantedCameraUsersRef = useRef<Set<string>>(new Set());
+  const grantedMicUsersRef = useRef<Set<string>>(new Set());
+  const presentPeerIdsRef = useRef<Set<string>>(new Set());
+  const studentWantsCameraRef = useRef(false);
+  // True once this user's camera has actually been accepted by the SFU in this class.
+  const cameraWasLiveRef = useRef(false);
   const [isAudioOnlyMode, setIsAudioOnlyMode] = useState<boolean>(false);
   const [gridPage, setGridPage] = useState<number>(0);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -321,36 +337,39 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     height: 480,
   });
 
-  // Automatically support Document PiP on tab-switch / mediaSession in Chrome 120+
+  // Google Meet-style floating mini-view. While the meeting is connected, Chrome (with camera/mic in use)
+  // fires the MediaSession "enterpictureinpicture" action when the user switches away from this tab,
+  // including the switch to the shared tab right after screen-share selection. The handler is registered
+  // for the whole meeting so it's already in place at that moment; opening Document PiP is allowed inside
+  // this action without a click. A window opened this way closes again when the user returns.
+  const autoPiPOpenedRef = useRef(false);
   useEffect(() => {
-    if (!isScreenSharing) {
-      if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
-        try {
-          (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", null);
-        } catch {}
-      }
-      return;
+    if (connectionState !== "connected") return;
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    try {
+      (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", async () => {
+        const win = await openPiP({ width: 340, height: 480, allowPopupFallback: false });
+        autoPiPOpenedRef.current = Boolean(win);
+      });
+    } catch (e) {
+      // Browser doesn't support this MediaSession action; the manual "floating view" button still works.
     }
 
-    if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
-      try {
-        (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", async () => {
-          console.log("[MeetingRoom] mediaSession enterpictureinpicture triggered");
-          await openPiP({ width: 340, height: 480 });
-        });
-      } catch (e) {
-        console.warn("[MeetingRoom] mediaSession setActionHandler enterpictureinpicture error:", e);
-      }
-    }
-
-    return () => {
-      if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
-        try {
-          (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", null);
-        } catch {}
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && autoPiPOpenedRef.current) {
+        autoPiPOpenedRef.current = false;
+        closePiP();
       }
     };
-  }, [isScreenSharing, openPiP]);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      try {
+        (navigator.mediaSession as any).setActionHandler("enterpictureinpicture", null);
+      } catch {}
+    };
+  }, [connectionState, openPiP, closePiP]);
 
   // Mobile Fullscreen & Landscape Orientation for student attendees
   const isMobile = isMobileDevice();
@@ -610,6 +629,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Polls State
   const [activePoll, setActivePoll] = useState<PollItem | null>(null);
+  // Host-only answer key for the live poll. The answer is never put in a broadcast while the poll is
+  // running (anything sent over the room signal reaches every student's browser); it is revealed and
+  // used to grade votes only when the host ends the poll.
+  const pollAnswerKeyRef = useRef<{ pollId: string; correctOptionIndex: number | null } | null>(null);
   const [hasVotedPoll, setHasVotedPoll] = useState(false);
 
   // Floating Reactions State
@@ -618,6 +641,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // Mobile Responsive State
   const [showMobileLayoutMenu, setShowMobileLayoutMenu] = useState(false);
+  const mobileLayoutMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close the mobile layout menu on any tap outside it. The in-header backdrop alone can't do this:
+  // the header's backdrop-filter makes it the containing block for `fixed` children, so the backdrop
+  // only covers the header strip, not the stage/whiteboard below.
+  useEffect(() => {
+    if (!showMobileLayoutMenu) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      if (mobileLayoutMenuRef.current && !mobileLayoutMenuRef.current.contains(e.target as Node)) {
+        setShowMobileLayoutMenu(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [showMobileLayoutMenu]);
   const [showMobileMoreSheet, setShowMobileMoreSheet] = useState(false);
 
   // Recording State
@@ -664,6 +702,65 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     };
     window.addEventListener("mathsy-update-live-url", handleUrlUpdate);
     return () => window.removeEventListener("mathsy-update-live-url", handleUrlUpdate);
+  }, []);
+
+  // ── Local recording (saved to this computer) ──
+  const localRecorderRef = useRef<LocalMeetingRecorder | null>(null);
+  const getRecordingAudio = () => ({
+    // Only record the local mic while it's switched on in the meeting.
+    localMic: isMicEnabled ? localAudioTrack : null,
+    remote: remoteParticipants.flatMap((p) => [p.audioTrack, p.screenAudioTrack]),
+  });
+
+  const stopLocalRecording = useCallback(async () => {
+    const recorder = localRecorderRef.current;
+    localRecorderRef.current = null;
+    setIsRecordingActive(false);
+    if (!recorder) return;
+    try {
+      const fileName = await recorder.stopAndDownload();
+      if (fileName) {
+        toast.success(`Recording saved to your Downloads: ${fileName}`, { id: "rec-saved", duration: 6000 });
+      } else {
+        toast.info("Recording stopped. Nothing was captured, so no file was saved.", { id: "rec-saved" });
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Could not save the recording.", { id: "rec-saved" });
+    }
+  }, []);
+
+  const startLocalRecording = async () => {
+    if (localRecorderRef.current?.isRecording) return;
+    const recorder = new LocalMeetingRecorder(meetingCode, {
+      onCaptureEnded: () => {
+        // The browser's own "Stop sharing" ends the capture: save what was recorded.
+        void stopLocalRecording();
+      },
+      onError: (message) => toast.error(message, { id: "rec-error" }),
+    });
+    // Called directly from the click so the browser's capture picker is allowed to open.
+    const started = await recorder.start(getRecordingAudio());
+    if (!started) return;
+    localRecorderRef.current = recorder;
+    setIsRecordingActive(true);
+    setIsRecordingModalOpen(false);
+    toast.success("Recording started. Choose \"Stop & Save\" to download the file.", { id: "rec-started" });
+  };
+
+  // Keep the recording's audio mix in step with mic on/off and people joining or leaving.
+  useEffect(() => {
+    if (!isRecordingActive) return;
+    localRecorderRef.current?.updateAudio(getRecordingAudio());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecordingActive, isMicEnabled, localAudioTrack, remoteParticipants]);
+
+  // Leaving the meeting while recording still saves the file.
+  useEffect(() => {
+    return () => {
+      const recorder = localRecorderRef.current;
+      localRecorderRef.current = null;
+      if (recorder) void recorder.stopAndDownload();
+    };
   }, []);
 
   // Recording Timer
@@ -724,6 +821,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const loadChatHistory = async () => {
       try {
         const history = await dbClient.getChatHistory(meetingCode);
+        if (history?.unavailable) return;
         if (history && Array.isArray(history.messages)) {
           const mapped: ChatMsg[] = history.messages.map((m: any) => ({
             id: m._id || m.id,
@@ -830,6 +928,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     engine.onParticipantsChange = (updated) => {
       setRemoteParticipants([...updated]);
+      const nowPresent = new Set(updated.map((p) => p.id));
+      if (isHostRef.current) {
+        for (const p of updated) {
+          if (presentPeerIdsRef.current.has(p.id)) continue; // not a (re)join
+          const person = basePeerId(p.userId || p.id);
+          if (grantedCameraUsersRef.current.has(person)) engine.allowStudentCamera(p.id);
+          if (grantedMicUsersRef.current.has(person)) engine.respondMicRequest(p.id, true, myName);
+        }
+      }
+      presentPeerIdsRef.current = nowPresent;
       // If I am host, ensure newly joined participants synchronize with my current layout mode
       if (isHostRef.current) {
         engineRef.current?.broadcastWhiteboardState(meetingCode, showWhiteboardRef.current, true);
@@ -838,12 +946,44 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     engine.onCameraPermissionChange = (allowed: boolean) => {
       setHasCameraPermission(allowed);
-      if (allowed) {
+      if (allowed && studentWantsCameraRef.current) {
+        // Approval restored after a reconnect: bring the camera back the way it was.
+        engine.enableVideo().then((track) => {
+          if (track) {
+            setLocalVideoTrack(track);
+            setIsCamEnabled(true);
+          }
+        });
+      } else if (allowed) {
         toast.success("Tutor granted you permission to turn on your camera! 📹", { id: "cam-perm" });
       } else {
+        studentWantsCameraRef.current = false;
         toast.info("Camera permission was revoked by the tutor.", { id: "cam-perm" });
         setIsCamEnabled(false);
         setLocalVideoTrack(null);
+      }
+    };
+
+    engine.onPublished = (source: string) => {
+      if (source === "video") cameraWasLiveRef.current = true;
+    };
+
+    engine.onPublishRejected = (source: string) => {
+      if (source === "video") {
+        setLocalVideoTrack(null);
+        setIsCamEnabled(false);
+        if (studentWantsCameraRef.current && cameraWasLiveRef.current) {
+          // Typically a reconnect: the tutor's app re-approves automatically and the camera comes back.
+          toast.info("Reconnecting your camera…", { id: "cam-perm-needed" });
+        } else {
+          toast.info("Your camera is locked by the tutor. Raise your hand to ask for camera permission.", { id: "cam-perm-needed" });
+        }
+      } else if (source === "audio") {
+        setLocalAudioTrack(null);
+        setIsMicEnabled(false);
+        toast.info("You need the tutor's permission to speak. Raise your hand to ask.", { id: "mic-perm-needed" });
+      } else if (source === "screen") {
+        toast.error("Screen sharing isn't allowed for your role in this class.", { id: "screen-perm-needed" });
       }
     };
 
@@ -1206,6 +1346,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             setUnmuteRequestStatus("none");
             window.sessionStorage.removeItem(`mathsy_host_${meetingCode}`);
           }
+
+          // Chat history is limited to people who have joined this session. The media connection can come
+          // up before this join is recorded, so the load on "connected" may have been refused; load it
+          // again now that attendance exists.
+          loadChatHistory();
         }
       });
 
@@ -1221,7 +1366,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     const handleBeforeUnload = () => {
       try {
         engine.leaveRoom();
-        const payload = JSON.stringify({ user_id: myUserId, display_name: myName });
+        // sendBeacon can't set an Authorization header, so the session token travels in the body;
+        // the server takes identity only from this verified token.
+        const payload = JSON.stringify({ token: authToken });
         const blob = new Blob([payload], { type: "application/json" });
         navigator.sendBeacon(`/api/rooms/${encodeURIComponent(meetingCode)}/leave`, blob);
       } catch (e) {
@@ -1231,19 +1378,64 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     window.addEventListener("beforeunload", handleBeforeUnload);
     window.addEventListener("pagehide", handleBeforeUnload);
 
+    // The SFU only accepts participant tokens (embed/SaaS) or Supabase tokens. A direct /meet
+    // app session token is exchanged for a short-lived participant token first.
+    const resolveSfuToken = async (): Promise<string> => {
+      if (!authToken) return authToken;
+      try {
+        const b64 = authToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        const claims = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
+        if (claims.iss === "mathsy-meet-saas" || claims.aud === "mathsy-meet-sfu" || claims.iss?.includes("supabase")) {
+          return authToken;
+        }
+      } catch {
+        return authToken;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/rooms/${encodeURIComponent(meetingCode)}/sfu-token`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.token) return data.token as string;
+        } else {
+          console.warn("[MeetingRoom] SFU token exchange rejected:", res.status);
+        }
+      } catch (err: any) {
+        console.warn("[MeetingRoom] SFU token exchange failed:", err?.message);
+      }
+      return authToken;
+    };
+
+    // Set by this effect's cleanup. Connecting is asynchronous (token exchange), so a mount that is torn
+    // down before it finishes (React StrictMode double mount, quick navigation) must not go on to join.
+    let disposed = false;
+
     // Connect to room session with verified server-issued session token
-    engine
-      .connect({
-        roomId: meetingCode,
-        userId: myUserId,
-        userName: myName,
-        role: isHost ? "host" : "student",
-        token: authToken,
+    resolveSfuToken()
+      .then((sfuToken) => {
+        if (disposed) throw new Error("Connection cancelled");
+        return engine.connect({
+          roomId: meetingCode,
+          userId: myUserId,
+          userName: myName,
+          role: isHost ? "host" : "student",
+          token: sfuToken,
+        });
       })
       .then(async () => {
+        if (disposed) {
+          engine.disconnect();
+          return;
+        }
+        // Start the camera if it was on in the lobby. Some SFU versions require the tutor's approval for
+        // student cameras; if the SFU refuses, onPublishRejected turns it off and explains why.
         if (!initialOptions.camOff) {
+          if (!isHost) studentWantsCameraRef.current = true;
           const vTrack = await engine.enableVideo();
           setLocalVideoTrack(vTrack);
+          if (!vTrack) setIsCamEnabled(false);
         }
         // Students join muted by default and cannot publish audio before tutor permission
         if (isHost && !initialOptions.micMuted) {
@@ -1266,10 +1458,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         }
       })
       .catch((err) => {
+        if (disposed || err?.message === "Connection cancelled") return;
         console.warn("[MeetingRoom] Engine connect caught:", err);
       });
 
     return () => {
+      disposed = true;
       window.removeEventListener("beforeunload", handleBeforeUnload);
       window.removeEventListener("pagehide", handleBeforeUnload);
       try {
@@ -1391,15 +1585,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       }
     } else {
       if (!isCamEnabled) {
-        if (!hasCameraPermission) {
-          toast.info("Camera is locked by the tutor. Please raise your hand to request camera permission.", { id: "cam-perm-needed" });
-          return;
-        }
+        // Whether students may publish video is decided by the SFU (some versions require the tutor's
+        // approval). If it refuses, onPublishRejected turns the camera back off and explains why.
+        studentWantsCameraRef.current = true;
         const track = await engine.enableVideo();
         setLocalVideoTrack(track);
-        setIsCamEnabled(true);
+        setIsCamEnabled(Boolean(track));
+        studentWantsCameraRef.current = Boolean(track);
         setShowCameraGateModal(false);
       } else {
+        studentWantsCameraRef.current = false;
         engine.disableVideo();
         setLocalVideoTrack(null);
         setIsCamEnabled(false);
@@ -1413,10 +1608,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     if (!engine) return;
     if (allow) {
       engine.allowStudentCamera(peerId);
+      grantedCameraUsersRef.current.add(basePeerId(peerId));
       setVideoAllowedPeers((prev) => new Set(prev).add(peerId));
       toast.success("Student camera permitted");
     } else {
       engine.revokeStudentCamera(peerId);
+      grantedCameraUsersRef.current.delete(basePeerId(peerId));
       setVideoAllowedPeers((prev) => {
         const next = new Set(prev);
         next.delete(peerId);
@@ -1496,12 +1693,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           toast("Sharing screen (Tip: select 'Also share tab audio' to play video sound)", { icon: "ℹ️", id: "screen-audio-hint" });
         }
 
-        // Immediately launch floating always-on-top Document PiP mini-meet overlay
-        try {
-          await openPiP({ width: 340, height: 480 });
-          toast.success("Floating mini-view opened (Always on top)", { id: "pip-launched" });
-        } catch (pipErr) {
-          console.warn("[MeetingRoom] Error launching Document PiP window:", pipErr);
+        // Open the floating mini-view now only if the click that started sharing still counts as a user
+        // gesture (choosing a screen in the browser picker usually takes longer). Otherwise Chrome opens
+        // it automatically when this tab is hidden (see the enterpictureinpicture handler above).
+        const hasUserActivation = Boolean((navigator as any).userActivation?.isActive);
+        if (hasUserActivation && document.visibilityState === "visible") {
+          try {
+            const win = await openPiP({ width: 340, height: 480, allowPopupFallback: false });
+            if (win) toast.success("Floating mini-view opened (Always on top)", { id: "pip-launched" });
+          } catch (pipErr) {
+            console.warn("[MeetingRoom] Error launching Document PiP window:", pipErr);
+          }
         }
       }
     }
@@ -1699,11 +1901,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       voters: [],
     };
 
+    pollAnswerKeyRef.current = {
+      pollId: newPoll.id,
+      correctOptionIndex: typeof pollData.correctOptionIndex === "number" ? pollData.correctOptionIndex : null,
+    };
+
     setActivePoll(newPoll);
     setHasVotedPoll(false);
     setIsSideDrawerOpen(true);
     setActiveSideTab("polls");
-    engineRef.current?.emitSignal("poll:update", newPoll);
+    engineRef.current?.emitSignal("poll:update", { ...newPoll, correctOptionIndex: null });
     toast.success("Poll launched to all students!", { id: "poll-launch" });
   };
 
@@ -1713,7 +1920,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     const currentVotes = { ...activePoll.votes };
     currentVotes[optionIndex] = (currentVotes[optionIndex] || 0) + 1;
-    const isCorrect = activePoll.correctOptionIndex === optionIndex;
+    // Students don't know the answer while the poll is live; the host grades votes when it ends.
+    const isCorrect =
+      typeof activePoll.correctOptionIndex === "number" ? activePoll.correctOptionIndex === optionIndex : undefined;
 
     const updatedPoll: PollItem = {
       ...activePoll,
@@ -1733,14 +1942,30 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     setActivePoll(updatedPoll);
     setHasVotedPoll(true);
-    engineRef.current?.emitSignal("poll:vote", updatedPoll);
+    engineRef.current?.emitSignal("poll:vote", {
+      ...updatedPoll,
+      correctOptionIndex: null,
+      voters: updatedPoll.voters.map(({ isCorrect: _isCorrect, ...voter }) => voter),
+    });
     toast.success("Vote recorded!");
   };
 
   // End Poll (Reveals answers and final scores to all participants)
   const handleEndPoll = () => {
     if (!activePoll) return;
-    const endedPoll = { ...activePoll, isActive: false };
+    const answerKey =
+      pollAnswerKeyRef.current?.pollId === activePoll.id
+        ? pollAnswerKeyRef.current.correctOptionIndex
+        : activePoll.correctOptionIndex ?? null;
+    const endedPoll: PollItem = {
+      ...activePoll,
+      isActive: false,
+      correctOptionIndex: answerKey,
+      voters: activePoll.voters.map((voter) => ({
+        ...voter,
+        isCorrect: typeof answerKey === "number" ? voter.optionIndex === answerKey : undefined,
+      })),
+    };
     setActivePoll(endedPoll);
     engineRef.current?.emitSignal("poll:update", endedPoll);
     toast.info("Poll ended. Leaderboard revealed to everyone!");
@@ -1749,6 +1974,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // Approve speaking request (Host)
   const handleApproveMic = (studentId: string, studentName: string) => {
     engineRef.current?.respondMicRequest(studentId, true, myName);
+    grantedMicUsersRef.current.add(basePeerId(studentId));
     const norm = (studentId || "").toLowerCase().replace(/_/g, "-");
     setUnmuteRequests((prev) => prev.filter((r) => {
       const rNorm = (r.userId || "").toLowerCase().replace(/_/g, "-");
@@ -1788,6 +2014,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   // Force Mute Single Student (Tutor Only)
   const handleForceMuteStudent = (studentId: string, studentName: string) => {
     engineRef.current?.forceMuteParticipant?.(studentId);
+    grantedMicUsersRef.current.delete(basePeerId(studentId));
     toast.success(`Muted ${studentName}`);
   };
 
@@ -2167,22 +2394,24 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
       {/* ── CLASSROOM HEADER ── */}
       <header
-        className={`h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between z-20 backdrop-blur-md gap-2 ${
+        className={`h-14 shrink-0 bg-[#16130f] border-b border-[#f3eee6]/[0.08] px-2.5 sm:px-4 flex items-center justify-between ${
+          showMobileLayoutMenu ? "z-[60]" : "z-20"
+        } backdrop-blur-md gap-2 ${
           isFocusMode ? "mathsy-focus-mode-header hidden" : ""
         } ${isMobileLandscapeSplit ? "hidden" : ""}`}
       >
         {/* Left: Room Badge & Duration */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
           <button
             onClick={() => {
               setIsInfoDrawerOpen(!isInfoDrawerOpen);
               if (!isInfoDrawerOpen) setIsSideDrawerOpen(false);
             }}
             title="Meeting details (Click to view code & link)"
-            className="flex items-center gap-1.5 sm:gap-2 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-2.5 sm:px-3 py-1 rounded-full text-xs transition cursor-pointer group"
+            className="flex items-center gap-1.5 sm:gap-2 min-w-0 bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/10 px-2.5 sm:px-3 py-1 rounded-full text-xs transition cursor-pointer group"
           >
             <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-[#10b981] animate-pulse shrink-0" />
-            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate group-hover:text-[#f59e0b] transition max-w-[100px] sm:max-w-none">
+            <span className="text-xs font-mono font-bold text-[#f3eee6] tracking-wide truncate group-hover:text-[#f59e0b] transition min-w-0 max-w-[100px] sm:max-w-[160px] xl:max-w-none">
               {meetingCode}
             </span>
             <Info className="w-3.5 h-3.5 text-[#a39e94] group-hover:text-[#f59e0b] transition ml-0.5 shrink-0" />
@@ -2195,12 +2424,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
           {/* Role Badge */}
           {isHost ? (
-            <span className="hidden sm:inline-flex items-center gap-1 bg-[#f59e0b]/15 text-[#f59e0b] border border-[#f59e0b]/30 px-2.5 py-1 rounded-full text-[11px] font-mono font-bold">
+            <span className="hidden xl:inline-flex items-center gap-1 bg-[#f59e0b]/15 text-[#f59e0b] border border-[#f59e0b]/30 px-2.5 py-1 rounded-full text-[11px] font-mono font-bold">
               <GraduationCap className="w-3.5 h-3.5" />
               Tutor (Host)
             </span>
           ) : (
-            <span className="hidden sm:inline-flex items-center gap-1 bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded-full text-[11px] font-mono font-bold">
+            <span className="hidden xl:inline-flex items-center gap-1 bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded-full text-[11px] font-mono font-bold">
               <BookOpen className="w-3.5 h-3.5" />
               Student
             </span>
@@ -2228,6 +2457,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         <div className="hidden md:flex items-center gap-1 bg-[#1a1814] border border-[#f3eee6]/10 p-1 rounded-xl">
           <button
             onClick={() => switchToLayout("grid")}
+            aria-label="Grid layout"
+            title="Grid layout"
             className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
               layoutMode === "grid" && !showWhiteboard
                 ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
@@ -2235,11 +2466,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             }`}
           >
             <LayoutGrid className="w-3.5 h-3.5" />
-            Grid
+            <span className="hidden lg:inline">Grid</span>
           </button>
 
           <button
             onClick={() => switchToLayout("spotlight")}
+            aria-label="Spotlight layout"
+            title="Spotlight layout"
             className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
               layoutMode === "spotlight" && !showWhiteboard
                 ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
@@ -2247,12 +2480,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             }`}
           >
             <Radio className="w-3.5 h-3.5" />
-            Spotlight
+            <span className="hidden lg:inline">Spotlight</span>
           </button>
 
           {isHost && (
             <button
               onClick={() => switchToLayout("whiteboard")}
+              aria-label="Whiteboard"
+              title="Whiteboard"
               className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
                 showWhiteboard || layoutMode === "whiteboard"
                   ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
@@ -2260,13 +2495,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              Whiteboard
+              <span className="hidden lg:inline">Whiteboard</span>
             </button>
           )}
 
           {isAnyoneScreenSharing && (
             <button
               onClick={() => switchToLayout("screenshare")}
+              aria-label="Screen share layout"
+              title="Screen share layout"
               className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
                 layoutMode === "screenshare" && !showWhiteboard
                   ? "bg-[#f59e0b] text-[#0e0d0b] shadow-sm"
@@ -2274,15 +2511,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               }`}
             >
               <Monitor className="w-3.5 h-3.5" />
-              Screen
+              <span className="hidden lg:inline">Screen</span>
             </button>
           )}
         </div>
 
         {/* Center: Mobile Layout Selector Dropdown */}
-        <div className="flex md:hidden items-center relative">
+        <div
+          ref={mobileLayoutMenuRef}
+          className="flex md:hidden items-center relative shrink-0 [&>button>span]:hidden min-[420px]:[&>button>span]:inline"
+        >
           <button
             onClick={() => setShowMobileLayoutMenu(!showMobileLayoutMenu)}
+            aria-label="Switch view layout"
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-[#1a1814] border border-[#f3eee6]/10 text-[#f3eee6] hover:bg-[#221f1a] transition cursor-pointer"
             title="Switch view layout"
           >
@@ -2394,7 +2635,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               title="Pair iPad or Android tablet to draw on live whiteboard"
             >
               <Tablet className="w-3.5 h-3.5 text-[#f59e0b]" />
-              <span className="hidden sm:inline">Pair Tablet</span>
+              <span className="hidden xl:inline">Pair Tablet</span>
             </Button>
           )}
 
@@ -2408,7 +2649,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               title="Connect YouTube Channel & Stream Key"
             >
               <Youtube className="w-3.5 h-3.5 text-red-500" />
-              <span className="hidden sm:inline">YouTube</span>
+              <span className="hidden xl:inline">YouTube</span>
             </Button>
           )}
 
@@ -2419,6 +2660,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 variant="outline"
                 size="sm"
                 onClick={() => setIsRecordingModalOpen(true)}
+                aria-label="Record or go live"
+                title="Record or go live"
                 className={`hidden sm:inline-flex h-8 px-2.5 rounded-xl text-xs font-bold gap-1.5 border transition ${
                   isYouTubeLive
                     ? "bg-red-600 text-white border-red-500 animate-pulse shadow-md shadow-red-500/25"
@@ -2435,7 +2678,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 ) : (
                   <>
                     <Disc className={`w-3.5 h-3.5 ${isRecordingActive ? "text-red-400" : "text-zinc-400"}`} />
-                    <span className="hidden sm:inline">
+                    <span className={isRecordingActive ? "hidden sm:inline" : "hidden xl:inline"}>
                       {isRecordingActive ? `REC ${formatDuration(recordingSeconds)}` : "Record / Live"}
                     </span>
                   </>
@@ -2470,7 +2713,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               title={isFocusMode ? "Exit Focus Mode" : "Focus Mode (Full Canvas)"}
             >
               <Maximize2 className="w-3.5 h-3.5" />
-              <span>{isFocusMode ? "Exit" : "Focus"}</span>
+              <span className="hidden min-[420px]:inline">{isFocusMode ? "Exit" : "Focus"}</span>
             </button>
           )}
 
@@ -2485,7 +2728,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
             title={isAudioOnlyMode ? "Disable Data Saver (Resume Video)" : "Enable Data Saver (Audio Only, Saves Network)"}
           >
             <Zap className={`w-3.5 h-3.5 ${isAudioOnlyMode ? "text-amber-400" : "text-zinc-400"}`} />
-            <span className="hidden md:inline">{isAudioOnlyMode ? "Data Saver ON" : "Data Saver"}</span>
+            <span className="hidden xl:inline">{isAudioOnlyMode ? "Data Saver ON" : "Data Saver"}</span>
           </button>
 
           {/* Fullscreen toggle */}
@@ -4152,14 +4395,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         isRecording={isRecordingActive}
         recordingSeconds={recordingSeconds}
         onStartLocalRecording={() => {
-          setIsRecordingActive(true);
-          setIsRecordingModalOpen(false);
-          toast.success("HD local recording started");
+          void startLocalRecording();
         }}
         onStopLocalRecording={() => {
-          setIsRecordingActive(false);
           setIsRecordingModalOpen(false);
-          toast.info("Recording saved");
+          void stopLocalRecording();
         }}
         isLiveStreaming={isYouTubeLive}
         isLiveConnecting={isLiveConnecting}
@@ -4193,8 +4433,12 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           onSendMessage={handleSendMessage}
           onToggleMute={handleToggleMic}
           onToggleVideo={handleCameraToggle}
-          onStopScreenShare={handleToggleScreenShare}
+          onStopScreenShare={() => {
+            // This control only ever stops presenting; it must not start a new share from the mini-view.
+            if (isScreenSharing) handleToggleScreenShare();
+          }}
           onClosePiP={closePiP}
+          isScreenSharing={isScreenSharing}
         />
       )}
     </div>

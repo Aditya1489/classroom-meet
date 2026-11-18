@@ -87,9 +87,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
             return res.status(403).json({ error: "User account is suspended" });
           }
           const userRow = userRes.rows[0];
-          const needsSelection = decoded.needsRoleSelection !== undefined
-            ? Boolean(decoded.needsRoleSelection)
-            : (userRow.onboarding_completed === false);
+          // The database is authoritative for onboarding state. A token minted during onboarding keeps
+          // needsRoleSelection=true for its whole lifetime, so trusting the claim would let an already
+          // onboarded user replay it against PATCH /role to self-promote to tutor.
+          const needsSelection = userRow.onboarding_completed === false;
           (req as any).user = {
             ...userRow,
             needsRoleSelection: needsSelection,
@@ -113,9 +114,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
             return res.status(403).json({ error: "User account is suspended" });
           }
           const userRow = userByEmailRes.rows[0];
-          const needsSelection = decoded.needsRoleSelection !== undefined
-            ? Boolean(decoded.needsRoleSelection)
-            : (userRow.onboarding_completed === false);
+          // The database is authoritative for onboarding state. A token minted during onboarding keeps
+          // needsRoleSelection=true for its whole lifetime, so trusting the claim would let an already
+          // onboarded user replay it against PATCH /role to self-promote to tutor.
+          const needsSelection = userRow.onboarding_completed === false;
           (req as any).user = {
             ...userRow,
             needsRoleSelection: needsSelection,
@@ -139,9 +141,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         );
         if (insertRes.rows.length > 0) {
           const userRow = insertRes.rows[0];
-          const needsSelection = decoded.needsRoleSelection !== undefined
-            ? Boolean(decoded.needsRoleSelection)
-            : (userRow.onboarding_completed === false);
+          // The database is authoritative for onboarding state. A token minted during onboarding keeps
+          // needsRoleSelection=true for its whole lifetime, so trusting the claim would let an already
+          // onboarded user replay it against PATCH /role to self-promote to tutor.
+          const needsSelection = userRow.onboarding_completed === false;
           (req as any).user = {
             ...userRow,
             needsRoleSelection: needsSelection,

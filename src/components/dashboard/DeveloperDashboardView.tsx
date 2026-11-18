@@ -342,43 +342,45 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
       )}
 
       {/* Top Navbar */}
-      <header className="sticky top-0 z-40 px-6 lg:px-12 h-16 flex items-center justify-between bg-[#0e0d0b]/90 backdrop-blur-md border-b border-[#f3eee6]/10">
-        <div className="flex items-center gap-4">
+      <header className="sticky top-0 z-40 px-4 sm:px-6 lg:px-12 h-16 flex items-center justify-between gap-2 bg-[#0e0d0b]/90 backdrop-blur-md border-b border-[#f3eee6]/10">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
           <button
             onClick={onBackToHome}
-            className="flex items-center gap-2 text-xs font-medium text-[#a39e94] hover:text-[#f3eee6] px-2.5 py-1.5 rounded-lg hover:bg-[#1a1814] transition cursor-pointer"
+            aria-label="Back to meetings"
+            className="flex items-center gap-2 shrink-0 text-xs font-medium text-[#a39e94] hover:text-[#f3eee6] px-2 sm:px-2.5 py-1.5 rounded-lg hover:bg-[#1a1814] transition cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>Meetings</span>
+            <span className="hidden sm:inline">Meetings</span>
           </button>
 
-          <div className="h-4 w-px bg-[#f3eee6]/15" />
+          <div className="hidden sm:block h-4 w-px bg-[#f3eee6]/15" />
 
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center font-bold shadow-md shadow-[#f59e0b]/20">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-7 h-7 shrink-0 rounded-lg bg-gradient-to-br from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center font-bold shadow-md shadow-[#f59e0b]/20">
               <Key className="w-3.5 h-3.5" />
             </div>
-            <span className="font-bold text-sm tracking-tight text-[#f3eee6]">
+            <span className="hidden min-[420px]:inline font-bold text-sm tracking-tight text-[#f3eee6] truncate">
               Developer<span className="text-[#f59e0b]">Console</span>
             </span>
-            <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/20">
+            <span className="hidden md:inline text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/20 whitespace-nowrap">
               Phase 4 SaaS
             </span>
           </div>
         </div>
 
         {/* Organization Switcher */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           {organizations.length > 0 ? (
-            <div className="flex items-center gap-2">
-              <div className="relative">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="relative min-w-0">
                 <select
+                  aria-label="Select organization"
                   value={selectedOrg?.id || ""}
                   onChange={(e) => {
                     const found = organizations.find((o) => o.id === e.target.value);
                     if (found) setSelectedOrg(found);
                   }}
-                  className="bg-[#1a1814] border border-[#f3eee6]/15 rounded-xl px-3 py-1.5 text-xs text-[#f3eee6] font-medium pr-8 focus:outline-none focus:border-[#f59e0b] cursor-pointer appearance-none"
+                  className="w-full max-w-[150px] sm:max-w-[260px] truncate bg-[#1a1814] border border-[#f3eee6]/15 rounded-xl px-3 py-1.5 text-xs text-[#f3eee6] font-medium pr-8 focus:outline-none focus:border-[#f59e0b] cursor-pointer appearance-none"
                 >
                   {organizations.map((org) => (
                     <option key={org.id} value={org.id}>
@@ -392,7 +394,8 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
               <button
                 onClick={() => setShowCreateOrgModal(true)}
                 title="Create New Organization"
-                className="p-1.5 rounded-xl bg-[#1a1814] hover:bg-[#25221c] border border-[#f3eee6]/15 text-[#a39e94] hover:text-[#f3eee6] transition cursor-pointer"
+                aria-label="Create new organization"
+                className="p-1.5 shrink-0 rounded-xl bg-[#1a1814] hover:bg-[#25221c] border border-[#f3eee6]/15 text-[#a39e94] hover:text-[#f3eee6] transition cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
               </button>
@@ -400,10 +403,11 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
           ) : (
             <button
               onClick={() => setShowCreateOrgModal(true)}
-              className="px-3 py-1.5 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold transition flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap"
             >
               <Plus className="w-3.5 h-3.5" />
-              Create Organization
+              <span className="sm:hidden">Create</span>
+              <span className="hidden sm:inline">Create Organization</span>
             </button>
           )}
 
@@ -414,17 +418,18 @@ export const DeveloperDashboardView: React.FC<DeveloperDashboardViewProps> = ({
                 window.dispatchEvent(new PopStateEvent("popstate"));
               }}
               title="Open Platform Superadmin Console"
-              className="px-2.5 py-1.5 rounded-xl bg-[#f59e0b]/15 hover:bg-[#f59e0b]/25 border border-[#f59e0b]/30 text-[#f59e0b] text-xs font-semibold transition cursor-pointer flex items-center gap-1.5"
+              aria-label="Open Platform Superadmin Console"
+              className="px-2.5 py-1.5 shrink-0 rounded-xl bg-[#f59e0b]/15 hover:bg-[#f59e0b]/25 border border-[#f59e0b]/30 text-[#f59e0b] text-xs font-semibold transition cursor-pointer flex items-center gap-1.5"
             >
               <Shield className="w-3.5 h-3.5" />
-              <span>Platform Admin</span>
+              <span className="hidden sm:inline">Platform Admin</span>
             </button>
           )}
         </div>
       </header>
 
       {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 lg:p-10 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-10 space-y-6">
         {/* If no organizations */}
         {!loading && organizations.length === 0 ? (
           <div className="bg-[#14120e] border border-[#f3eee6]/10 rounded-3xl p-12 text-center max-w-lg mx-auto mt-12 shadow-2xl">

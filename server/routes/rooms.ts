@@ -3,9 +3,24 @@ import crypto from "crypto";
 import { query } from "../db";
 import { requireAuth, authMiddleware } from "./auth";
 import { getChatCollection, getSessionsCollection } from "../db/mongo";
-import { invalidateRoomCache } from "../middleware/roomAuth";
+import { invalidateRoomCache, authorizeRoomAccess } from "../middleware/roomAuth";
+import { isUuid } from "../services/validation";
+import { issueParticipantToken } from "../services/participantTokenService";
+import { createRateLimiter, InMemorySlidingWindowStore } from "../middleware/rateLimiter";
 
 export const roomsRouter = Router();
+
+export const knockRateLimitStore = new InMemorySlidingWindowStore();
+
+/** Limits admission requests per signed-in user (falls back to IP) to stop waiting-list flooding. */
+export const knockRateLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 20,
+  store: knockRateLimitStore,
+  keyGenerator: (req) => `knock:${(req as any).user?.id || req.ip || "unknown"}`,
+  errorCode: "KNOCK_RATE_LIMIT_EXCEEDED",
+  errorMessage: "Too many requests to join. Please wait a moment and try again.",
+});
 
 /**
  * Generate a cryptographically secure random room code (e.g. ptq-rtvq-rox)
@@ -604,16 +619,18 @@ roomsRouter.post("/:roomCode/participants", requireAuth, async (req: Request, re
  * GET /api/rooms/:roomCode/participants
  * Fetches active participants currently in the room.
  */
-roomsRouter.get("/:roomCode/participants", requireAuth, async (req: Request, res: Response) => {
+roomsRouter.get("/:roomCode/participants", authorizeRoomAccess({ requireParticipant: true }), async (req: Request, res: Response) => {
   try {
-    const { roomCode } = req.params;
-    const sanitizedCode = sanitizeCode(roomCode);
+    const sanitizedCode = (req as any).room.room_code;
 
+    // De-duplicate per person. Rows without an account (user_id NULL) are keyed by display name so they
+    // don't all collapse into a single row.
     const result = await query(
-      `SELECT DISTINCT ON (user_id) id, room_code, user_id, display_name, role, camera_allowed, joined_at, left_at
+      `SELECT DISTINCT ON (COALESCE(user_id::text, 'name:' || display_name))
+              id, room_code, user_id, display_name, role, camera_allowed, joined_at, left_at
        FROM room_participants
        WHERE room_code = $1 AND left_at IS NULL
-       ORDER BY user_id, joined_at DESC;`,
+       ORDER BY COALESCE(user_id::text, 'name:' || display_name), joined_at DESC;`,
       [sanitizedCode]
     );
 
@@ -627,28 +644,43 @@ roomsRouter.get("/:roomCode/participants", requireAuth, async (req: Request, res
  * POST /api/rooms/:roomCode/leave
  * Records participant departure.
  */
-roomsRouter.post("/:roomCode/leave", authMiddleware, async (req: Request, res: Response) => {
+/**
+ * navigator.sendBeacon (used when a tab closes) cannot set an Authorization header, so the leave
+ * endpoint also accepts the caller's own session token as `token` in the JSON body.
+ */
+function beaconBodyTokenToHeader(req: Request, _res: Response, next: () => void) {
+  const bodyToken = req.body?.token;
+  if (!req.headers.authorization && typeof bodyToken === "string" && bodyToken.length > 0) {
+    req.headers.authorization = `Bearer ${bodyToken}`;
+  }
+  next();
+}
+
+roomsRouter.post("/:roomCode/leave", beaconBodyTokenToHeader, requireAuth, async (req: Request, res: Response) => {
   try {
     const { roomCode } = req.params;
     const sanitizedCode = sanitizeCode(roomCode);
     const user = (req as any).user;
-    const userId = user?.id || req.body?.user_id;
-    const displayName = req.body?.display_name;
 
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
-    if (isUUID) {
+    // Identity comes only from the verified token. Body user_id / display_name are ignored so a caller
+    // can never mark someone else as having left.
+    if (isUuid(String(user.id))) {
       await query(
         `UPDATE room_participants
          SET left_at = NOW()
          WHERE room_code = $1 AND user_id = $2 AND left_at IS NULL;`,
-        [sanitizedCode, userId]
+        [sanitizedCode, user.id]
       );
-    } else if (displayName) {
+    } else if (user.isParticipantToken && user.full_name) {
+      // Participant-token users have no account row; their attendance row is keyed by their token name.
+      if (user.room_code && String(user.room_code).toLowerCase() !== sanitizedCode) {
+        return res.status(403).json({ error: "Participant token is not valid for this room" });
+      }
       await query(
         `UPDATE room_participants
          SET left_at = NOW()
-         WHERE room_code = $1 AND display_name = $2 AND left_at IS NULL;`,
-        [sanitizedCode, displayName]
+         WHERE room_code = $1 AND user_id IS NULL AND display_name = $2 AND left_at IS NULL;`,
+        [sanitizedCode, user.full_name]
       );
     }
 
@@ -662,7 +694,7 @@ roomsRouter.post("/:roomCode/leave", authMiddleware, async (req: Request, res: R
  * POST /api/rooms/:roomCode/knock
  * Non-host participant asks to join the room ("Knocking").
  */
-roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: Response) => {
+roomsRouter.post("/:roomCode/knock", requireAuth, knockRateLimiter, async (req: Request, res: Response) => {
   try {
     const { roomCode } = req.params;
     const sanitizedCode = sanitizeCode(roomCode);
@@ -714,14 +746,17 @@ roomsRouter.post("/:roomCode/knock", authMiddleware, async (req: Request, res: R
       return res.json({ status: "host", isHost: true, message: "Host joins directly without admission" });
     }
 
-    const userId = user?.id || req.body.user_id || null;
-    const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(userId));
+    // Identity is taken only from the verified session. Body fields (display_name, email, role, user_id)
+    // are ignored so nobody can appear in the host's waiting list as someone else.
+    const userId = user.id;
+    const isUserUUID = isUuid(String(userId));
     let validUserId: string | null = null;
 
-    const displayName = (user?.full_name || user?.name || req.body.display_name || "Guest").trim();
-    const email = (user?.email || req.body.email || null)?.trim().toLowerCase() || null;
-    const avatarUrl = user?.avatar_url || user?.avatarUrl || req.body.avatar_url || null;
-    const role = (user?.role || req.body.role || "student") === "tutor" ? "tutor" : "student";
+    const displayName = String(user.full_name || user.name || "Participant").trim() || "Participant";
+    const email = (typeof user.email === "string" && user.email.trim() ? user.email.trim().toLowerCase() : null);
+    const avatarUrl = user.avatar_url || null;
+    // A knocking user is by definition not the host, so the request is always recorded as a student.
+    const role = "student";
 
     if (isUserUUID) {
       try {
@@ -875,6 +910,10 @@ roomsRouter.get("/:roomCode/knock/:knockId", async (req: Request, res: Response)
     const { roomCode, knockId } = req.params;
     const sanitizedCode = sanitizeCode(roomCode);
 
+    if (!isUuid(knockId)) {
+      return res.status(404).json({ error: "Knock request not found", code: "KNOCK_NOT_FOUND" });
+    }
+
     const knockRes = await query(
       `SELECT id, room_code, user_id, display_name, email, avatar_url, role, status, responded_at, created_at
        FROM room_knocks
@@ -900,6 +939,10 @@ roomsRouter.post("/:roomCode/knock/:knockId/cancel", async (req: Request, res: R
   try {
     const { roomCode, knockId } = req.params;
     const sanitizedCode = sanitizeCode(roomCode);
+
+    if (!isUuid(knockId)) {
+      return res.status(404).json({ error: "Knock request not found", code: "KNOCK_NOT_FOUND" });
+    }
 
     await query(
       `UPDATE room_knocks
@@ -953,6 +996,84 @@ roomsRouter.get("/:roomCode/knocks", requireAuth, async (req: Request, res: Resp
 });
 
 /**
+ * POST /api/rooms/:roomCode/sfu-token
+ * Direct /meet joins: exchange the signed-in app session for a short-lived participant token
+ * the SFU accepts. Hosts get a tutor token; others only after the host has admitted them.
+ */
+roomsRouter.post("/:roomCode/sfu-token", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const sanitizedCode = sanitizeCode(req.params.roomCode);
+    const user = (req as any).user;
+
+    // Embedded/SaaS participants already hold an SFU-verifiable token
+    if (user?.isParticipantToken) {
+      return res.status(400).json({ error: "Participant tokens are already SFU tokens", code: "ALREADY_PARTICIPANT" });
+    }
+
+    const roomRes = await query(
+      "SELECT id, room_code, tutor_id, organization_id, metadata, is_active, started_at FROM live_classes WHERE room_code = $1",
+      [sanitizedCode]
+    );
+    const room = roomRes.rows[0];
+    if (!room) {
+      return res.status(404).json({ error: "Class room does not exist", code: "ROOM_NOT_FOUND" });
+    }
+
+    let isHost = isUserRoomHost(room, user);
+    if (!isHost) {
+      const sched = await query("SELECT tutor_id FROM class_schedules WHERE room_code = $1", [sanitizedCode]);
+      isHost = sched.rows.length > 0 && String(sched.rows[0].tutor_id) === String(user.id);
+    }
+
+    if (!room.is_active) {
+      if (!isHost) {
+        return res.status(403).json({ error: "Class has not started yet.", code: "CLASS_NOT_STARTED" });
+      }
+      await query(
+        "UPDATE live_classes SET is_active = TRUE, started_at = NOW(), ended_at = NULL WHERE room_code = $1;",
+        [sanitizedCode]
+      );
+      room.is_active = true;
+      room.started_at = new Date();
+    }
+
+    if (!isHost) {
+      const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id));
+      const admitted = await query(
+        `SELECT 1 FROM room_knocks
+         WHERE room_code = $1
+           AND (($2::uuid IS NOT NULL AND user_id = $2::uuid) OR ($3::text IS NOT NULL AND LOWER(email) = LOWER($3::text)))
+           AND status = 'admitted'
+           AND responded_at >= COALESCE($4::timestamptz, NOW())
+           AND responded_at >= NOW() - INTERVAL '6 hours'
+         LIMIT 1;`,
+        [sanitizedCode, isUserUUID ? user.id : null, user.email || null, room.started_at || null]
+      );
+      if (admitted.rows.length === 0) {
+        return res.status(403).json({
+          error: "Admission required: The meeting host must admit you before you can enter this call.",
+          code: "ADMISSION_REQUIRED",
+        });
+      }
+    }
+
+    const issued = issueParticipantToken({
+      organizationId: room.organization_id ? String(room.organization_id) : "direct",
+      room: { id: String(room.id), room_code: sanitizedCode, is_active: true },
+      participantId: String(user.id),
+      name: String(user.full_name || user.name || user.email || "Participant"),
+      role: isHost ? "tutor" : "student",
+      expiresInSeconds: 14400,
+    });
+
+    return res.json({ token: issued.token, expiresAt: issued.expiresAt, role: isHost ? "tutor" : "student" });
+  } catch (err: any) {
+    return res.status(500).json({ error: "Failed to issue classroom token", details: err.message });
+  }
+});
+
+
+/**
  * POST /api/rooms/:roomCode/knock/:knockId/respond
  * Host only: Admits or denies a knocking participant.
  */
@@ -979,6 +1100,10 @@ roomsRouter.post("/:roomCode/knock/:knockId/respond", requireAuth, async (req: R
     const room = roomRes.rows[0];
     if (!isUserRoomHost(room, user)) {
       return res.status(403).json({ error: "Only the meeting host can admit or deny participants", code: "FORBIDDEN" });
+    }
+
+    if (!isUuid(knockId)) {
+      return res.status(404).json({ error: "Pending knock request not found or already handled", code: "KNOCK_NOT_FOUND" });
     }
 
     const newStatus = action === "admit" ? "admitted" : "denied";

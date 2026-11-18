@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { query } from "../db";
 import { requireAuth } from "../routes/auth";
+import { isUuid } from "../services/validation";
 
 export interface RoomAuthOptions {
   requireTutor?: boolean;
@@ -23,6 +24,29 @@ export function sanitizeRoomCode(code: any): string {
  * 
  * invalidateRoomCache is retained as a safe no-op for backward compatibility.
  */
+/**
+ * True when this account joined the room during its current session.
+ * Matches on the verified account id only: display names are user-chosen and not unique, so matching
+ * on them would let any account with the same name in. Joins from earlier sessions of a reused room
+ * code don't count. Callers handle hosts and participant tokens before calling this.
+ */
+export async function isCurrentSessionParticipant(
+  roomCode: string,
+  userId: unknown,
+  roomStartedAt: Date | string | null | undefined
+): Promise<boolean> {
+  if (!isUuid(String(userId ?? ""))) return false;
+  const res = await query(
+    `SELECT 1 FROM room_participants
+     WHERE room_code = $1
+       AND user_id = $2::uuid
+       AND joined_at >= COALESCE($3::timestamptz, '-infinity'::timestamptz)
+     LIMIT 1;`,
+    [roomCode, String(userId), roomStartedAt ?? null]
+  );
+  return res.rows.length > 0;
+}
+
 export function invalidateRoomCache(_roomCode?: string): void {
   // No-op: Room authorization is strictly stateless and authoritative
 }
@@ -62,7 +86,7 @@ export function authorizeRoomAccess(options: RoomAuthOptions = {}) {
 
         // 2. Fetch room record
         const roomRes = await query(
-          `SELECT id, room_code, title, tutor_id, tutor_name, organization_id, is_active, metadata
+          `SELECT id, room_code, title, tutor_id, tutor_name, organization_id, is_active, metadata, started_at
            FROM live_classes
            WHERE room_code = $1;`,
           [roomCode]
@@ -124,14 +148,9 @@ export function authorizeRoomAccess(options: RoomAuthOptions = {}) {
 
         // 5. Verify Participant Membership if required
         if (options.requireParticipant && !isOwner) {
-          const participantRes = await query(
-            `SELECT 1 FROM room_participants
-             WHERE room_code = $1 AND (user_id = $2 OR display_name = $3)
-             LIMIT 1;`,
-            [roomCode, user.id, user.full_name || ""]
-          );
+          const isParticipant = await isCurrentSessionParticipant(roomCode, user.id, room.started_at);
 
-          if (participantRes.rows.length === 0) {
+          if (!isParticipant) {
             return res.status(403).json({
               error: "You must be a registered participant in this room to perform this action",
               code: "FORBIDDEN_NOT_IN_ROOM",

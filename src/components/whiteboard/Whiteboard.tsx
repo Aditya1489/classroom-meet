@@ -69,6 +69,9 @@ const customShapeUtils = [
   SetSquareShapeUtil,
 ];
 
+/** The whiteboard is a fixed 16:9 slide in page coordinates (not an infinite canvas). */
+const WHITEBOARD_SLIDE_BOUNDS = { x: 0, y: 0, w: 1600, h: 900 };
+
 export const PEN_COLORS = [
   { id: "black", label: "Black", hex: "#1e1e1e" },
   { id: "grey", label: "Grey", hex: "#757575" },
@@ -309,7 +312,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       const shape = editor.getShape(targetSlide.shapeId);
       const bounds = shape ? editor.getShapePageBounds(targetSlide.shapeId) : targetSlide.bounds;
       if (bounds) {
-        editor.zoomToBounds(bounds, { inset: 0, animation: { duration: 300 }, force: true });
+        editor.zoomToBounds(bounds, { inset: 0, animation: { duration: 300 } });
       }
     } catch (e) {
       console.warn("[Whiteboard] Error zooming to slide:", e);
@@ -463,8 +466,15 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       const ed = editorRef.current || editor;
       if (!isHost || !ed || !engine || !roomCode) return;
       try {
-        const bounds = ed.getViewportPageBounds();
-        if (!bounds || bounds.w <= 0 || bounds.h <= 0) return;
+        // Share a frame that is independent of the host's window size: same top-left corner and
+        // zoom as the host, but a fixed 16:9 reference size. Resizing the host's window (class feed,
+        // fullscreen, side panels) therefore no longer re-zooms every student's board.
+        const visible = ed.getViewportPageBounds();
+        if (!visible || visible.w <= 0 || visible.h <= 0) return;
+        const zoom = ed.getZoomLevel() || 1;
+        const REF_W = 1600;
+        const REF_H = 900;
+        const bounds = { x: visible.x, y: visible.y, w: REF_W / zoom, h: REF_H / zoom };
 
         const last = lastBroadcastBoundsRef.current;
         if (
@@ -504,6 +514,95 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     return () => clearInterval(interval);
   }, [isHost, editor, broadcastViewport]);
 
+  // ── Fixed slide (no infinite canvas) ──
+  // The board is a fixed 16:9 slide (or, with an imported PDF/PPT, the current page). The camera is
+  // constrained to it: it scales to fit any screen size, users may zoom in for detail, but cannot pan or
+  // zoom out past the slide.
+  const getActiveSlideBounds = useCallback(
+    (ed: Editor) => {
+      const slide = slidesRef.current[currentSlideIndex] || presentationSlides[currentSlideIndex];
+      if (slide) {
+        try {
+          const live = ed.getShape(slide.shapeId) ? ed.getShapePageBounds(slide.shapeId) : null;
+          if (live && live.w > 0 && live.h > 0) return { x: live.x, y: live.y, w: live.w, h: live.h };
+        } catch {}
+        if (slide.bounds?.w > 0 && slide.bounds?.h > 0) return slide.bounds;
+      }
+      return WHITEBOARD_SLIDE_BOUNDS;
+    },
+    [currentSlideIndex, presentationSlides]
+  );
+
+  const fitActiveSlide = useCallback(
+    (ed: Editor, animate = true) => {
+      const bounds = getActiveSlideBounds(ed);
+      ed.setCameraOptions({
+        constraints: {
+          bounds,
+          padding: { x: isMobile ? 4 : 12, y: isMobile ? 4 : 12 },
+          origin: { x: 0.5, y: 0.5 },
+          initialZoom: "fit-max",
+          baseZoom: "fit-max",
+          behavior: "contain",
+        },
+        // Relative to the fitted (base) zoom: 1 = whole slide visible, up to 8x zoom-in.
+        zoomSteps: [1, 1.5, 2, 3, 4, 6, 8],
+      });
+      ed.zoomToBounds(bounds, { inset: 0, ...(animate ? { animation: { duration: 200 } } : {}) });
+    },
+    [getActiveSlideBounds, isMobile]
+  );
+
+  useEffect(() => {
+    if (!editor) return;
+    try {
+      fitActiveSlide(editor, false);
+    } catch (err) {
+      console.warn("[Whiteboard] Could not apply slide camera:", err);
+    }
+  }, [editor, fitActiveSlide]);
+
+  // Keep the slide fitted when the board's container changes size (window resize, rotation, side panel),
+  // unless the user has deliberately zoomed in.
+  useEffect(() => {
+    if (!editor || typeof ResizeObserver === "undefined") return;
+    const container = editor.getContainer();
+    if (!container) return;
+    let wasAtFit = true;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        try {
+          // Make tldraw pick up the new container size first; otherwise the fit is computed for the old
+          // size and the slide ends up off-center.
+          editor.updateViewportScreenBounds(container);
+          if (wasAtFit) {
+            fitActiveSlide(editor, false);
+          } else if (!isHost && lastHostViewportRef.current) {
+            // Students who follow the tutor's zoomed view keep following it after a resize.
+            editor.zoomToBounds(lastHostViewportRef.current, { inset: 0 });
+          }
+        } catch {}
+      });
+    });
+    const unlisten = editor.store.listen(
+      () => {
+        try {
+          // The fitted view sits a few percent above tldraw's base zoom (padding), so allow 10%.
+          wasAtFit = editor.getZoomLevel() <= editor.getBaseZoom() * 1.1;
+        } catch {}
+      },
+      { scope: "session" }
+    );
+    observer.observe(container);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      unlisten();
+    };
+  }, [editor, fitActiveSlide, isHost]);
+
   const handleZoomToFit = () => {
     if (!editor) return;
     try {
@@ -516,7 +615,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           editor.zoomToBounds(bounds, {
             inset: isMobile ? 4 : 12,
             animation: { duration: 250 },
-            force: true,
           });
           toast.info("Slide centered to fit screen", { id: "zoom-fit" });
           return;
@@ -528,26 +626,14 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         editor.zoomToBounds(lastHostViewportRef.current, {
           inset: isMobile ? 8 : 16,
           animation: { duration: 250 },
-          force: true,
         });
         toast.info("Whiteboard aligned to host view", { id: "zoom-fit" });
         return;
       }
 
-      // 3. Fit to all page drawings with padding and bounds check
-      const pageBounds = editor.getCurrentPageBounds();
-      if (pageBounds && pageBounds.w > 20 && pageBounds.h > 20) {
-        editor.zoomToBounds(pageBounds, {
-          inset: isMobile ? 12 : 24,
-          animation: { duration: 250 },
-          force: true,
-        });
-        toast.info("Canvas centered to drawings", { id: "zoom-fit" });
-        return;
-      }
-
-      editor.zoomToFit({ animation: { duration: 250 } });
-      toast.info("Canvas centered to drawings", { id: "zoom-fit" });
+      // 3. Fit the whole whiteboard slide
+      fitActiveSlide(editor, true);
+      toast.info("Whiteboard slide fitted to screen", { id: "zoom-fit" });
     } catch (err) {
       console.warn("[Whiteboard] zoomToFit error:", err);
     }
@@ -599,14 +685,14 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               slidesRef.current = reconstructed;
               const targetIdx = initialSlideIndex !== undefined && initialSlideIndex < reconstructed.length ? initialSlideIndex : 0;
               setCurrentSlideIndex(targetIdx);
-              ed.zoomToBounds(reconstructed[targetIdx].bounds, { inset: 0, animation: { duration: 250 }, force: true });
+              ed.zoomToBounds(reconstructed[targetIdx].bounds, { inset: 0, animation: { duration: 250 } });
             } else if (slidesRef.current.length > 0) {
               const targetIdx = initialSlideIndex !== undefined && initialSlideIndex < slidesRef.current.length ? initialSlideIndex : currentSlideIndex;
               if (slidesRef.current[targetIdx]) {
-                ed.zoomToBounds(slidesRef.current[targetIdx].bounds, { inset: 0, animation: { duration: 250 }, force: true });
+                ed.zoomToBounds(slidesRef.current[targetIdx].bounds, { inset: 0, animation: { duration: 250 } });
               }
             } else {
-              ed.zoomToFit({ animation: { duration: 200 } });
+              ed.zoomToBounds(WHITEBOARD_SLIDE_BOUNDS, { inset: 0 });
             }
           } catch {}
         }, 150);
@@ -616,7 +702,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     } else {
       setTimeout(() => {
         try {
-          ed.zoomToFit({ animation: { duration: 200 } });
+          ed.zoomToBounds(WHITEBOARD_SLIDE_BOUNDS, { inset: 0 });
         } catch {}
       }, 150);
     }
@@ -652,9 +738,9 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                   const targetIdx = initialSlideIndex !== undefined && initialSlideIndex < reconstructed.length ? initialSlideIndex : 0;
                   setCurrentSlideIndex(targetIdx);
                   onStateChange?.(snapshot, reconstructed, targetIdx);
-                  ed.zoomToBounds(reconstructed[targetIdx].bounds, { inset: 0, animation: { duration: 250 }, force: true });
+                  ed.zoomToBounds(reconstructed[targetIdx].bounds, { inset: 0, animation: { duration: 250 } });
                 } else {
-                  ed.zoomToFit({ animation: { duration: 200 } });
+                  ed.zoomToBounds(WHITEBOARD_SLIDE_BOUNDS, { inset: 0 });
                 }
               } catch {}
             }, 150);
@@ -881,7 +967,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             editor.zoomToBounds(data.bounds, {
               inset: isMobile ? 8 : 16,
               animation: { duration: 250 },
-              force: true,
             });
           } catch (err) {
             console.warn("[Whiteboard] Error aligning to host viewport:", err);
@@ -917,7 +1002,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                 setPresentationSlides(reconstructed);
                 slidesRef.current = reconstructed;
                 onStateChange?.(data.snapshot, reconstructed, 0);
-                editor.zoomToBounds(reconstructed[0].bounds, { inset: 0, animation: { duration: 250 }, force: true });
+                editor.zoomToBounds(reconstructed[0].bounds, { inset: 0, animation: { duration: 250 } });
               } else {
                 editor.zoomToFit({ animation: { duration: 200 } });
               }
@@ -949,7 +1034,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         if (targetSlide) {
           setTimeout(() => {
             try {
-              editor.zoomToBounds(targetSlide.bounds, { inset: 0, animation: { duration: 300 }, force: true });
+              editor.zoomToBounds(targetSlide.bounds, { inset: 0, animation: { duration: 300 } });
             } catch {}
           }, 150);
         }
@@ -973,7 +1058,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         const targetSlide = slidesRef.current[data.slideIndex];
         if (targetSlide) {
           try {
-            editor.zoomToBounds(targetSlide.bounds, { inset: 0, animation: { duration: 250 }, force: true });
+            editor.zoomToBounds(targetSlide.bounds, { inset: 0, animation: { duration: 250 } });
           } catch {}
         }
       }
@@ -1076,49 +1161,40 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     // If presentation slides (PDF/PPT/images) are loaded, the slides define the presentation bounds
     if (presentationSlides.length > 0) return null;
 
-    // Use reported host viewport, or standard 16:9 teaching canvas (1600x900)
-    const bounds = hostViewportBounds || lastHostViewportRef.current || { x: 0, y: 0, w: 1600, h: 900 };
-
-    let left = bounds.x;
-    let top = bounds.y;
-    let width = bounds.w;
-    let height = bounds.h;
-
-    if (ed) {
-      try {
-        const topLeft = ed.pageToViewport({ x: bounds.x, y: bounds.y });
-        const zoom = ed.getCamera().z;
-        left = topLeft.x;
-        top = topLeft.y;
-        width = bounds.w * zoom;
-        height = bounds.h * zoom;
-      } catch {}
-    }
+    // tldraw's OnTheCanvas layer already moves and scales with the camera, so the frame is positioned in
+    // page coordinates. (Converting to viewport coordinates here applied the camera twice, drawing the
+    // frame in the wrong place and at the wrong size whenever the zoom wasn't 100%.)
+    const bounds = WHITEBOARD_SLIDE_BOUNDS;
+    let zoom = 1;
+    try {
+      zoom = ed?.getZoomLevel() || 1;
+    } catch {}
+    // Keep the label and corner brackets the same on-screen size at any zoom.
+    const inv = 1 / zoom;
 
     return (
       <div
         data-testid="whiteboard-screen-boundary"
         style={{
           position: "absolute",
-          left,
-          top,
-          width,
-          height,
+          left: bounds.x,
+          top: bounds.y,
+          width: bounds.w,
+          height: bounds.h,
           pointerEvents: "none",
+          outline: `${2 * inv}px solid rgba(245, 158, 11, 0.6)`,
+          // Dim everything outside the slide so the drawable page is obvious.
+          boxShadow: `0 0 0 ${100000}px rgba(14, 13, 11, 0.55)`,
         }}
-        className="border-2 border-dashed border-amber-500/70 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.08)] bg-white/5 select-none transition-all duration-75"
+        className="select-none"
       >
-        {/* Top-Left Boundary Label */}
-        <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-[#16130f]/90 border border-amber-500/40 text-[#f59e0b] font-mono text-[10px] font-bold flex items-center gap-1.5 shadow-lg backdrop-blur-sm pointer-events-none">
+        <div
+          style={{ transform: `scale(${inv})`, transformOrigin: "top left" }}
+          className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-[#16130f]/90 border border-amber-500/40 text-[#f59e0b] font-mono text-[10px] font-bold flex items-center gap-1.5 shadow-lg pointer-events-none whitespace-nowrap"
+        >
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span>{isHost ? "Whiteboard Screen (16:9)" : "Tutor Whiteboard Screen"}</span>
+          <span>{isHost ? "Whiteboard Slide (16:9)" : "Tutor Whiteboard"}</span>
         </div>
-
-        {/* 4 Precision Corner Brackets defining exact screen boundary */}
-        <div className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-amber-500/90 rounded-tl-lg" />
-        <div className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-amber-500/90 rounded-tr-lg" />
-        <div className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-amber-500/90 rounded-bl-lg" />
-        <div className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-amber-500/90 rounded-br-lg" />
       </div>
     );
   });

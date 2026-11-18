@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { generateToken } from "../server/routes/auth";
 import { query } from "../server/db";
 
-const BASE_URL = "http://localhost:5001/api";
+const BASE_URL = process.env.API_BASE || "http://localhost:5001/api";
 
 describe("Room Start Admission Guard & Unstarted Room Containment", () => {
   const hostId = crypto.randomUUID();

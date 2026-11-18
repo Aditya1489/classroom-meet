@@ -124,10 +124,31 @@ function isSupabaseES256Token(token: string | undefined): boolean {
 }
 
 function getEffectiveToken(token: string | undefined, userId: string, role: string, userName: string): string {
-  if (isSupabaseES256Token(token)) {
+  if (isSupabaseES256Token(token) || isParticipantToken(token)) {
     return token!.trim();
   }
   return "";
+}
+
+// Server-issued SaaS participant token (HS256, iss "mathsy-meet-saas"), verified by the SFU.
+function isParticipantToken(token: string | undefined): boolean {
+  if (!token || typeof token !== "string") return false;
+  try {
+    const parts = token.trim().split(".");
+    if (parts.length !== 3) return false;
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const payloadStr = typeof atob === "function" ? atob(b64) : Buffer.from(b64, "base64").toString("utf8");
+    const payload = JSON.parse(payloadStr);
+    return payload.iss === "mathsy-meet-saas" || payload.aud === "mathsy-meet-sfu" || Boolean(payload.tenant_id);
+  } catch {
+    return false;
+  }
+}
+
+/** "<userId>-ab12c" -> "<userId>": peer ids carry a per-connection suffix, heartbeats use the bare id. */
+function stripPeerSuffix(v: string | undefined | null): string {
+  return String(v || "").replace(/-[a-z0-9]{5}$/i, "");
 }
 
 function sanitizeTransportData(data: any, signalingUrl: string) {
@@ -208,6 +229,17 @@ export class MathsyMediasoupEngine {
   private heartbeatInterval: any = null;
   private livenessWatchdogInterval: any = null;
   private handlePeerLeftFn: ((data: any) => void) | null = null;
+  private pendingPeerLeftTimers = new Map<string, any>();
+
+  /** Most recent time this participant was heard from (heartbeat, join, any control message). */
+  private getPeerLastSeen(part: { id: string; userId?: string; name?: string }): number {
+    let lastSeen = 0;
+    for (const k of [part.id, stripPeerSuffix(part.id), part.userId, part.userId ? stripPeerSuffix(part.userId) : undefined]) {
+      if (k) lastSeen = Math.max(lastSeen, this.peerLastSeen.get(k) || 0);
+    }
+    if (part.name) lastSeen = Math.max(lastSeen, this.peerLastSeen.get(part.name.trim().toLowerCase()) || 0);
+    return lastSeen;
+  }
 
   public serverRole: "tutor" | "student" = "student";
   public isServerOwner: boolean = false;
@@ -234,6 +266,10 @@ export class MathsyMediasoupEngine {
   public onClassEnded?: () => void;
   public onScreenShareEnded?: () => void;
   public onCameraPermissionChange?: (allowed: boolean) => void;
+  /** Called when the SFU refuses to accept a local track (source: "video" | "audio" | "screen" | ...). */
+  public onPublishRejected?: (source: string, reason: string) => void;
+  /** Called when the SFU accepted a local track (source: "video" | "audio" | "screen" | ...). */
+  public onPublished?: (source: string) => void;
   public onForceCameraOff?: () => void;
   public onPeerVideoPermission?: (peerId: string, allowed: boolean) => void;
   public isAudioOnlyMode: boolean = false;
@@ -277,6 +313,13 @@ export class MathsyMediasoupEngine {
   }
 
   private signalingUrl: string;
+  /**
+   * Incremented by every connect() and disconnect(). A connect() that is still awaiting (token fetch)
+   * when disconnect() runs sees a different generation and aborts instead of opening a socket. Without
+   * this, an unmounted MeetingRoom (React StrictMode double mount, fast navigation) still joined the
+   * room in the background, leaving a ghost copy of the user whose camera was shown as a screen share.
+   */
+  private connectGeneration = 0;
 
   constructor(customSignalingUrl?: string) {
     const envMediasoupUrl =
@@ -336,6 +379,7 @@ export class MathsyMediasoupEngine {
       throw new Error(errMsg);
     }
 
+    const generation = ++this.connectGeneration;
     this.onConnectionStateChange?.("connecting");
     this.roomId = (roomId || "").toLowerCase().trim();
     this.isHostUser = role === "host" || role === "tutor";
@@ -365,8 +409,13 @@ export class MathsyMediasoupEngine {
     if (!effectiveToken || !isSupabaseES256Token(effectiveToken)) {
       effectiveToken = getEffectiveToken(token, sanitizedUserId, role, userName);
     }
-    const isES256 = isSupabaseES256Token(effectiveToken);
+    const isES256 = isSupabaseES256Token(effectiveToken) || isParticipantToken(effectiveToken);
     this.activeToken = isES256 ? effectiveToken : "";
+
+    if (generation !== this.connectGeneration) {
+      // disconnect() (or a newer connect()) happened while we were fetching a token: don't join.
+      throw new Error("Connection cancelled");
+    }
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -402,10 +451,15 @@ export class MathsyMediasoupEngine {
             const now = Date.now();
             const TIMEOUT_MS = 14000;
             for (const [, part] of Array.from(this.participants.entries())) {
-              const lastSeenById = this.peerLastSeen.get(part.id);
-              const lastSeenByUserId = part.userId ? this.peerLastSeen.get(part.userId) : undefined;
-              const lastSeenByName = part.name ? this.peerLastSeen.get(part.name.trim().toLowerCase()) : undefined;
-              const lastSeen = Math.max(lastSeenById || 0, lastSeenByUserId || 0, lastSeenByName || 0);
+              // Peer IDs carry a per-connection suffix ("<userId>-ab12c") while heartbeats are sent
+              // with the bare userId, so also check the suffix-stripped form of each key.
+              const stripSuffix = (v?: string) => (v ? v.replace(/-[a-z0-9]{5}$/i, "") : undefined);
+              const keys = [part.id, stripSuffix(part.id), part.userId, stripSuffix(part.userId)];
+              let lastSeen = 0;
+              for (const k of keys) {
+                if (k) lastSeen = Math.max(lastSeen, this.peerLastSeen.get(k) || 0);
+              }
+              if (part.name) lastSeen = Math.max(lastSeen, this.peerLastSeen.get(part.name.trim().toLowerCase()) || 0);
 
               if (lastSeen > 0 && (now - lastSeen) > TIMEOUT_MS) {
                 console.log(`[MathsyMeet Engine] Liveness watchdog: participant ${part.name} (${part.id}) inactive for ${now - lastSeen}ms. Removing.`);
@@ -692,7 +746,7 @@ export class MathsyMediasoupEngine {
       });
 
       // Handle peer left events (peerLeft / peer-left / userLeft / participantLeft)
-      const handlePeerLeft = (data: any) => {
+      const finalizePeerLeft = (data: any) => {
         if (!data) return;
         const targetId = typeof data === "string" ? data : (data?.id || data?.peerId || data?.userId || data?.baseUserId || data?.studentId);
         const targetUserId = typeof data === "object" ? (data?.userId || data?.baseUserId || data?.id) : (typeof data === "string" ? data : undefined);
@@ -713,9 +767,11 @@ export class MathsyMediasoupEngine {
             (part as any).peerId === targetUserId ||
             (part as any).baseUserId === targetId ||
             (part as any).baseUserId === targetUserId ||
-            (targetId && (key.includes(targetId) || targetId.includes(key) || part.id.includes(targetId) || targetId.includes(part.id))) ||
-            (targetUserId && part.userId && (part.userId.includes(targetUserId) || targetUserId.includes(part.userId))) ||
-            (targetName && part.name && part.name.trim().toLowerCase() === targetName.trim().toLowerCase());
+            // Base-id match (id with/without the per-connection suffix). No substring or display-name matching
+            // when an id is known: those removed other people who merely shared a name or an id fragment.
+            (Boolean(targetId) && stripPeerSuffix(key) === stripPeerSuffix(targetId)) ||
+            (!targetId && !targetUserId && Boolean(targetName) && Boolean(part.name) &&
+              part.name.trim().toLowerCase() === String(targetName).trim().toLowerCase());
 
           if (isMatch) {
             keysToDelete.push(key);
@@ -752,6 +808,44 @@ export class MathsyMediasoupEngine {
 
         this.notifyParticipants();
         this.onPeerLeft?.(targetId || targetUserId || "", targetUserId, targetName);
+      };
+
+      /**
+       * Peer-left signals can be stale. The SFU reuses the same peer id when a browser tab reconnects
+       * (refresh, network blip, a remounted meeting page), and the *old* connection's "left" is broadcast
+       * up to 10s later, after the person is already back. Acting on it immediately removed live
+       * participants for good (their heartbeats kept arriving, but nothing re-adds a peer).
+       * So: if the person was heard from in the last few seconds, wait briefly and only remove them if no
+       * heartbeat arrives after the "left" signal. Silent peers are removed immediately, as before.
+       */
+      const handlePeerLeft = (data: any) => {
+        if (!data) return;
+        const ids = [typeof data === "string" ? data : data?.id, data?.peerId, data?.userId, data?.baseUserId]
+          .filter((v): v is string => typeof v === "string" && v.length > 0);
+        const matches = Array.from(this.participants.values()).filter((part) =>
+          ids.some((id) => stripPeerSuffix(id) === stripPeerSuffix(part.id) || (part.userId && stripPeerSuffix(id) === stripPeerSuffix(part.userId)))
+        );
+        const leftAt = Date.now();
+        const recentlyAlive = matches.some((part) => leftAt - this.getPeerLastSeen(part) < 4500);
+        if (!recentlyAlive) {
+          finalizePeerLeft(data);
+          return;
+        }
+        const key = stripPeerSuffix(ids[0] || "");
+        const existing = this.pendingPeerLeftTimers.get(key);
+        if (existing) clearTimeout(existing);
+        this.pendingPeerLeftTimers.set(
+          key,
+          setTimeout(() => {
+            this.pendingPeerLeftTimers.delete(key);
+            const stillAlive = matches.some((part) => this.getPeerLastSeen(part) > leftAt);
+            if (stillAlive) {
+              console.log("[MathsyMeet Engine] Ignored stale peer-left signal (peer is still sending heartbeats):", key);
+              return;
+            }
+            finalizePeerLeft(data);
+          }, 5000)
+        );
       };
 
       this.handlePeerLeftFn = handlePeerLeft;
@@ -1241,8 +1335,10 @@ export class MathsyMediasoupEngine {
       if (sendTransportData && sendTransportData.id) {
         this.sendTransport = this.device.createSendTransport(sendTransportData);
 
+        const sendTransportRef = this.sendTransport;
         this.sendTransport.on("connectionstatechange", (state: string) => {
           console.log(`[MathsyMeet Engine] Send transport connection state: ${state}`);
+          this.handleTransportState(sendTransportRef, state, "send");
         });
 
         this.sendTransport.on("connect", async ({ dtlsParameters }: any, callback: any, errback: any) => {
@@ -1266,7 +1362,19 @@ export class MathsyMediasoupEngine {
               rtpParameters,
               appData,
             });
-            callback({ id: res?.id || res });
+            // The SFU answers { id } on success and { error } when it refuses (e.g. a student whose camera
+            // the tutor hasn't approved). Treating the error object as an id made the app believe it was
+            // publishing while nothing was sent.
+            const producerId = typeof res === "string" ? res : res?.id;
+            if (!producerId || res?.error) {
+              const reason = res?.error || "SFU did not accept the media track";
+              const source = appData?.source || appData?.mediaType || kind;
+              this.onPublishRejected?.(source, reason);
+              errback(new Error(reason));
+              return;
+            }
+            callback({ id: producerId });
+            this.onPublished?.(appData?.source || appData?.mediaType || kind);
           } catch (e) {
             console.error("[MathsyMeet Engine] sendTransport produce error:", e);
             errback(e);
@@ -1282,6 +1390,9 @@ export class MathsyMediasoupEngine {
               { scaleResolutionDownBy: 1, maxBitrate: 800000, maxFramerate: 30 }
             ];
             const prod = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
               track: this.localVideoTrack,
               encodings: videoEncodings,
               appData: { mediaType: "video" }
@@ -1291,12 +1402,16 @@ export class MathsyMediasoupEngine {
             this.broadcastMuteState(undefined, false);
           } catch (e: any) {
             console.warn("[MathsyMeet Engine] Auto-produce video note:", e.message);
+            this.releaseRejectedTrack("video");
           }
         }
 
         if (this.localAudioTrack && !this.producers.has("audio")) {
           try {
             const prod = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
               track: this.localAudioTrack,
               appData: { mediaType: "audio" }
             });
@@ -1305,6 +1420,7 @@ export class MathsyMediasoupEngine {
             this.broadcastMuteState(false, undefined);
           } catch (e: any) {
             console.warn("[MathsyMeet Engine] Auto-produce audio note:", e.message);
+            this.releaseRejectedTrack("audio");
           }
         }
 
@@ -1312,11 +1428,16 @@ export class MathsyMediasoupEngine {
           try {
             const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
             const prod = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
               track: this.localScreenTrack,
               streamId: syncStreamId,
               encodings: [
                 { scaleResolutionDownBy: 2, maxBitrate: 400000, maxFramerate: 10 },
-                { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20, priority: "high", networkPriority: "high" },
+                // No per-layer priority/networkPriority: Chrome throws "unimplemented parameter" for priority on
+                // simulcast encodings, which made every screen share fail to publish.
+                { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20 },
               ],
               appData: { mediaType: "screen", source: "screen", syncStreamId }
             });
@@ -1331,6 +1452,9 @@ export class MathsyMediasoupEngine {
           try {
             const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
             const prod = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
               track: this.localScreenAudioTrack,
               streamId: syncStreamId,
               appData: { mediaType: "screenAudio", source: "screenAudio", syncStreamId }
@@ -1349,8 +1473,10 @@ export class MathsyMediasoupEngine {
       if (recvTransportData && recvTransportData.id) {
         this.recvTransport = this.device.createRecvTransport(recvTransportData);
 
+        const recvTransportRef = this.recvTransport;
         this.recvTransport.on("connectionstatechange", (state: string) => {
           console.log(`[MathsyMeet Engine] Recv transport connection state: ${state}`);
+          this.handleTransportState(recvTransportRef, state, "recv");
         });
 
         this.recvTransport.on("connect", async ({ dtlsParameters }: any, callback: any, errback: any) => {
@@ -1371,7 +1497,7 @@ export class MathsyMediasoupEngine {
     }
   }
 
-  private async consumeTrack(producerId: string, peerId: string, kind: "audio" | "video", source?: string) {
+  private async consumeTrack(producerId: string, peerId: string, kind: "audio" | "video", source?: string, attempt = 0) {
     // Wait briefly if receive transport is currently being initialized
     if (!this.recvTransport || !this.device) {
       let retries = 0;
@@ -1380,9 +1506,22 @@ export class MathsyMediasoupEngine {
         retries++;
       }
       if (!this.recvTransport || !this.device) {
-        console.warn("[MathsyMeet Engine] consumeTrack dropped: recvTransport not initialized in time");
+        // Don't lose the track: retry later while still connected (e.g. transport recreated after reconnect)
+        if (this.socket && attempt < 5) {
+          console.warn(`[MathsyMeet Engine] recvTransport not ready; retrying consume (${attempt + 1}/5)`);
+          setTimeout(() => {
+            void this.consumeTrack(producerId, peerId, kind, source, attempt + 1);
+          }, 2000);
+        } else {
+          console.warn("[MathsyMeet Engine] consumeTrack dropped: recvTransport not initialized in time");
+        }
         return;
       }
+    }
+
+    // Skip if this producer is already consumed (a delayed retry may race a fresh activeProducers sync)
+    if (Array.from(this.consumers.values()).some((c) => c.producerId === producerId && !c.closed)) {
+      return;
     }
 
     try {
@@ -1582,12 +1721,18 @@ export class MathsyMediasoupEngine {
 
       if (this.sendTransport) {
         try {
-          const producer = await this.sendTransport.produce({ track, appData: { mediaType: "audio" } });
+          const producer = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false, track, appData: { mediaType: "audio" } });
           this.producers.set("audio", producer);
           console.log("[MathsyMeet Engine] Audio producer created:", producer.id);
           this.broadcastMuteState(false, undefined);
         } catch (prodErr: any) {
           console.warn("[MathsyMeet Engine] Produce audio error:", prodErr.message);
+          // Don't keep the microphone open when the SFU refused it.
+          this.releaseRejectedTrack("audio");
+          return null;
         }
       }
       return track;
@@ -1635,6 +1780,9 @@ export class MathsyMediasoupEngine {
             { scaleResolutionDownBy: 1, maxBitrate: 800000, maxFramerate: 30 }
           ];
           const producer = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
             track,
             encodings: videoEncodings,
             appData: { mediaType: "video" }
@@ -1644,12 +1792,81 @@ export class MathsyMediasoupEngine {
           this.broadcastMuteState(undefined, false);
         } catch (prodErr: any) {
           console.warn("[MathsyMeet Engine] Produce video error:", prodErr.message);
+          // Don't keep the camera light on when the SFU refused it.
+          this.releaseRejectedTrack("video");
+          return null;
         }
       }
       return track;
     } catch (e: any) {
       console.error("[MathsyMeet] enableVideo error:", e.message);
       return null;
+    }
+  }
+
+  /**
+   * Media-path recovery. If the network changes (Wi-Fi to mobile data, router blip) while the signalling
+   * socket stays up, the WebRTC transport goes "disconnected"/"failed" and media would stay frozen.
+   * Ask the SFU for fresh ICE parameters and restart ICE on the same transport. "disconnected" often
+   * heals on its own, so wait 3s first; retry a few times with growing gaps.
+   */
+  private iceRestartTimers = new Map<string, any>();
+  private iceRestartAttempts = new Map<string, number>();
+
+  private handleTransportState(transport: any, state: string, label: "send" | "recv") {
+    if (!transport || transport.closed) return;
+    const id = transport.id;
+    const clearTimer = () => {
+      const t = this.iceRestartTimers.get(id);
+      if (t) clearTimeout(t);
+      this.iceRestartTimers.delete(id);
+    };
+    if (state === "connected" || state === "completed") {
+      clearTimer();
+      this.iceRestartAttempts.delete(id);
+      return;
+    }
+    if (state !== "disconnected" && state !== "failed") return;
+    if (this.iceRestartTimers.has(id)) return;
+    const attempt = this.iceRestartAttempts.get(id) || 0;
+    if (attempt >= 5) {
+      console.warn(`[MathsyMeet Engine] ${label} transport still ${state} after ${attempt} ICE restarts; waiting for socket reconnect.`);
+      return;
+    }
+    const delay = state === "failed" ? 500 * (attempt + 1) : 3000;
+    this.iceRestartTimers.set(
+      id,
+      setTimeout(async () => {
+        this.iceRestartTimers.delete(id);
+        const current = transport.connectionState;
+        if (transport.closed || !this.socket?.connected || (current !== "disconnected" && current !== "failed")) return;
+        this.iceRestartAttempts.set(id, attempt + 1);
+        try {
+          const res = await this.request("restartIce", { transportId: id });
+          const iceParameters = res?.iceParameters || res?.params?.iceParameters;
+          if (!iceParameters || res?.error) throw new Error(res?.error || "No ICE parameters returned");
+          await transport.restartIce({ iceParameters });
+          console.log(`[MathsyMeet Engine] ${label} transport ICE restarted (attempt ${attempt + 1})`);
+        } catch (err: any) {
+          console.warn(`[MathsyMeet Engine] ${label} transport ICE restart failed:`, err?.message || err);
+          // Try again if it's still down.
+          this.handleTransportState(transport, transport.connectionState, label);
+        }
+      }, delay)
+    );
+  }
+
+  /** Stops a local camera/mic track that the SFU refused, so the device isn't left running unseen. */
+  private releaseRejectedTrack(kind: "audio" | "video") {
+    if (kind === "video" && this.localVideoTrack && !this.producers.has("video")) {
+      this.localVideoTrack.stop();
+      this.localVideoTrack = null;
+      this.broadcastMuteState(undefined, true);
+    }
+    if (kind === "audio" && this.localAudioTrack && !this.producers.has("audio")) {
+      this.localAudioTrack.stop();
+      this.localAudioTrack = null;
+      this.broadcastMuteState(true, undefined);
     }
   }
 
@@ -1728,20 +1945,38 @@ export class MathsyMediasoupEngine {
       const syncStreamId = `screen-sync-${this.currentUserId || "shared"}`;
 
       if (this.sendTransport) {
-        const producer = await this.sendTransport.produce({
+        let producer: any;
+        try {
+          producer = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
           track,
           streamId: syncStreamId,
           encodings: [
             { scaleResolutionDownBy: 2, maxBitrate: 400000, maxFramerate: 10 },
-            { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20, priority: "high", networkPriority: "high" },
+            // No per-layer priority/networkPriority: Chrome throws "unimplemented parameter" for priority on
+                // simulcast encodings, which made every screen share fail to publish.
+                { scaleResolutionDownBy: 1, maxBitrate: 1500000, maxFramerate: 20 },
           ],
           appData: { mediaType: "screen", source: "screen", syncStreamId }
-        });
+          });
+        } catch (prodErr: any) {
+          // Stop the capture too, otherwise the browser keeps showing "sharing" while nobody receives it.
+          console.warn("[MathsyMeet Engine] Produce screen error:", prodErr.message);
+          stream.getTracks().forEach((t) => t.stop());
+          this.localScreenTrack = null;
+          this.localScreenAudioTrack = null;
+          return null;
+        }
         this.producers.set("screen", producer);
 
         if (this.localScreenAudioTrack) {
           try {
             const audioProducer = await this.sendTransport.produce({
+              // Keep the device running when the connection is torn down (socket drop / reconnect): the
+              // engine stops tracks itself when the user turns a device off, and re-publishes on rejoin.
+              stopTracks: false,
               track: this.localScreenAudioTrack,
               streamId: syncStreamId,
               appData: { mediaType: "screenAudio", source: "screenAudio", syncStreamId }
@@ -2194,6 +2429,12 @@ export class MathsyMediasoupEngine {
   }
 
   public disconnect() {
+    this.connectGeneration++;
+    for (const t of this.iceRestartTimers.values()) clearTimeout(t);
+    for (const t of this.pendingPeerLeftTimers.values()) clearTimeout(t);
+    this.pendingPeerLeftTimers.clear();
+    this.iceRestartTimers.clear();
+    this.iceRestartAttempts.clear();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;

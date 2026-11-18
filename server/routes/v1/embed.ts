@@ -13,6 +13,27 @@ export const embedRouter = Router();
  * GET /embed/:roomCode
  * Serves the embed HTML document with dynamic room/tenant-specific Content-Security-Policy: frame-ancestors.
  */
+/**
+ * Outside production, lets a page served from this machine (localhost / 127.0.0.1 / [::1]) embed rooms
+ * for local development. Matches the parsed hostname exactly, so look-alikes such as
+ * "https://localhost.attacker.example" or "https://evil.example/?localhost" are not trusted.
+ * Returns the normalized origin, or null when the origin is not a local dev origin.
+ */
+export function getLocalDevOrigin(rawOrigin: string): string | null {
+  if (process.env.NODE_ENV === "production") return null;
+  try {
+    const url = new URL(rawOrigin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const host = url.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") {
+      return url.origin;
+    }
+  } catch {
+    // Not a parseable URL
+  }
+  return null;
+}
+
 export async function handleEmbedHtmlDocument(req: Request, res: Response) {
   try {
     const rawCode = req.params.roomCode;
@@ -171,67 +192,31 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
       return res.status(400).json({ valid: false, error: "MISSING_ROOM_CODE" });
     }
 
-    // 1. Query room, tenant status, and customer app / SSO allowed domains (flexible match for hyphens/underscores)
-    let roomRes = await query(
-      `SELECT lc.id, lc.room_code, lc.organization_id, lc.is_active, org.status as org_status,
-              ca.allowed_domains, ca.branding,
-              sod.domain as sso_domain
-       FROM live_classes lc
-       JOIN organizations org ON org.id = lc.organization_id
-       LEFT JOIN customer_apps ca ON ca.organization_id = lc.organization_id
-       LEFT JOIN organization_sso_domains sod ON sod.organization_id = lc.organization_id AND sod.is_verified = TRUE
-       WHERE lc.room_code = $1
-          OR replace(lc.room_code, '_', '-') = replace($1, '_', '-')
-          OR replace(replace(lower(lc.room_code), '_', ''), '-', '') = replace(replace(lower($1), '_', ''), '-', '')
-       ORDER BY lc.created_at DESC;`,
-      [roomCode]
-    );
+    // 1. Query room, tenant status, and customer app / SSO allowed domains.
+    // Exact room code first; a hyphen/underscore spelling variant is accepted as a fallback only.
+    // This endpoint is public, so it must never create or reactivate rooms, and it must never merge
+    // rows from different rooms (each room can belong to a different organization).
+    const embedConfigSql = (whereClause: string) => `
+      SELECT lc.id, lc.room_code, lc.organization_id, lc.is_active, org.status as org_status,
+             ca.allowed_domains, ca.branding,
+             sod.domain as sso_domain
+      FROM live_classes lc
+      JOIN organizations org ON org.id = lc.organization_id
+      LEFT JOIN customer_apps ca ON ca.organization_id = lc.organization_id
+      LEFT JOIN organization_sso_domains sod ON sod.organization_id = lc.organization_id AND sod.is_verified = TRUE
+      WHERE ${whereClause}
+      ORDER BY lc.created_at DESC;`;
 
-    // Resilient auto-provisioning for live classes if room does not exist yet
+    let roomRes = await query(embedConfigSql("lc.room_code = $1"), [roomCode]);
     if (roomRes.rows.length === 0) {
-      try {
-        const fallbackOrg = await query(
-          `SELECT org.id, org.status
-           FROM organizations org
-           LEFT JOIN customer_apps ca ON ca.organization_id = org.id
-           WHERE org.status = 'active'
-           ORDER BY (ca.allowed_domains IS NOT NULL) DESC, org.created_at ASC
-           LIMIT 1;`
-        );
-        if (fallbackOrg.rows.length > 0) {
-          const orgId = fallbackOrg.rows[0].id;
-          const sessionId = crypto.randomUUID();
-          await query(
-            `INSERT INTO live_classes (
-              organization_id, room_code, title, tutor_name, is_active, metadata, started_at
-            ) VALUES ($1, $2, $3, $4, TRUE, $5::jsonb, NOW())
-            ON CONFLICT (room_code) DO UPDATE SET is_active = TRUE;`,
-            [
-              orgId,
-              roomCode,
-              `Live Masterclass ${roomCode}`,
-              'Faculty Mentor',
-              JSON.stringify({ session_id: sessionId, created_via: 'embed_auto_provision', environment: 'live' }),
-            ]
-          );
-          roomRes = await query(
-            `SELECT lc.id, lc.room_code, lc.organization_id, lc.is_active, org.status as org_status,
-                    ca.allowed_domains, ca.branding,
-                    sod.domain as sso_domain
-             FROM live_classes lc
-             JOIN organizations org ON org.id = lc.organization_id
-             LEFT JOIN customer_apps ca ON ca.organization_id = lc.organization_id
-             LEFT JOIN organization_sso_domains sod ON sod.organization_id = lc.organization_id AND sod.is_verified = TRUE
-             WHERE lc.room_code = $1
-                OR replace(lc.room_code, '_', '-') = replace($1, '_', '-')
-                OR replace(replace(lower(lc.room_code), '_', ''), '-', '') = replace(replace(lower($1), '_', ''), '-', '')
-             ORDER BY lc.created_at DESC;`,
-            [roomCode]
-          );
-        }
-      } catch (provisionErr: any) {
-        console.warn('[Embed Config] Auto-provision notice:', provisionErr?.message);
-      }
+      roomRes = await query(
+        embedConfigSql("replace(lc.room_code, '_', '-') = replace($1, '_', '-')"),
+        [roomCode]
+      );
+    }
+    if (roomRes.rows.length > 0) {
+      const matchedRoomId = roomRes.rows[0].id;
+      roomRes = { ...roomRes, rows: roomRes.rows.filter((r: any) => r.id === matchedRoomId) };
     }
 
     if (roomRes.rows.length === 0 || !roomRes.rows[0].is_active) {
@@ -286,10 +271,11 @@ embedRouter.get("/config/:roomCode", async (req: Request, res: Response) => {
 
     let isOriginAllowed = true;
     if (rawOrigin) {
-      if (rawOrigin.includes("localhost") || rawOrigin.includes("127.0.0.1")) {
+      const localDevOrigin = getLocalDevOrigin(rawOrigin);
+      if (localDevOrigin) {
         isOriginAllowed = true;
-        if (!allowedOrigins.includes(rawOrigin)) {
-          allowedOrigins.push(rawOrigin);
+        if (!allowedOrigins.includes(localDevOrigin)) {
+          allowedOrigins.push(localDevOrigin);
         }
       } else {
         isOriginAllowed = isDomainAllowed(rawOrigin, allowedOrigins);

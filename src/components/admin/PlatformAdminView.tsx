@@ -442,49 +442,52 @@ export const PlatformAdminView: React.FC<PlatformAdminViewProps> = ({ onBackToHo
   return (
     <div className="min-h-screen bg-[#0e0d0b] text-[#f3eee6] flex flex-col selection:bg-[#f59e0b]/30">
       {/* Platform Superadmin Header */}
-      <header className="border-b border-[#f3eee6]/10 bg-[#14120e] px-6 py-4 flex items-center justify-between sticky top-0 z-40">
-        <div className="flex items-center gap-4">
+      <header className="border-b border-[#f3eee6]/10 bg-[#14120e] px-4 sm:px-6 py-4 flex items-center justify-between gap-2 sticky top-0 z-40">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
           <button
             onClick={onBackToHome}
-            className="flex items-center gap-1.5 text-xs text-[#a39e94] hover:text-[#f3eee6] bg-[#1a1814] px-3 py-1.5 rounded-xl border border-[#f3eee6]/10 transition cursor-pointer"
+            aria-label="Back to meetings"
+            className="flex items-center gap-1.5 shrink-0 text-xs text-[#a39e94] hover:text-[#f3eee6] bg-[#1a1814] px-2.5 sm:px-3 py-1.5 rounded-xl border border-[#f3eee6]/10 transition cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>Meetings</span>
+            <span className="hidden sm:inline">Meetings</span>
           </button>
 
-          <div className="h-4 w-px bg-[#f3eee6]/15" />
+          <div className="hidden sm:block h-4 w-px bg-[#f3eee6]/15" />
 
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center font-bold shadow-lg shadow-[#f59e0b]/20">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 shrink-0 rounded-xl bg-gradient-to-br from-[#f59e0b] to-[#d97706] text-[#0e0d0b] flex items-center justify-center font-bold shadow-lg shadow-[#f59e0b]/20">
               <ShieldCheck className="w-4 h-4" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-bold text-sm tracking-tight text-[#f3eee6]">
+                <span className="font-bold text-sm tracking-tight text-[#f3eee6] truncate">
                   Platform<span className="text-[#f59e0b]">Superadmin</span>
                 </span>
-                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#f59e0b] border border-[#f59e0b]/25 font-semibold">
+                <span className="hidden md:inline text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#f59e0b] border border-[#f59e0b]/25 font-semibold whitespace-nowrap">
                   Cross-Tenant Console
                 </span>
               </div>
-              <p className="text-[10px] text-[#a39e94]">B2B Customer Onboarding & API Credential Lifecycle</p>
+              <p className="hidden sm:block text-[10px] text-[#a39e94] truncate">B2B Customer Onboarding & API Credential Lifecycle</p>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={() => setShowCreateOrgModal(true)}
-            className="px-3.5 py-2 rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold transition flex items-center gap-2 cursor-pointer shadow-md shadow-[#f59e0b]/20"
+            aria-label="Onboard customer"
+            className="px-3 sm:px-3.5 py-2 whitespace-nowrap rounded-xl bg-[#f59e0b] hover:bg-[#d97706] text-[#0e0d0b] text-xs font-bold transition flex items-center gap-2 cursor-pointer shadow-md shadow-[#f59e0b]/20"
           >
             <Plus className="w-4 h-4" />
-            <span>Onboard Customer</span>
+            <span className="sm:hidden">Onboard</span>
+            <span className="hidden sm:inline">Onboard Customer</span>
           </button>
         </div>
       </header>
 
       {/* Main Workspace Layout */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 lg:p-8 flex flex-col md:flex-row gap-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col md:flex-row gap-6">
         {/* Left Column: Organization Directory & Search */}
         <div className="w-full md:w-80 shrink-0 space-y-4">
           <div className="flex items-center justify-between">

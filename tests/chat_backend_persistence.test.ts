@@ -7,6 +7,33 @@ import { generateToken } from "../server/routes/auth";
 
 const API_BASE = process.env.API_BASE || "http://localhost:5001/api";
 
+/**
+ * Chat is limited to people who joined the current class session, so the student goes through the real
+ * join flow: knock, host admits, student records attendance. The host records attendance too.
+ */
+async function joinClass(roomCode: string, hostToken: string, studentToken: string) {
+  const post = (path: string, token: string, body?: unknown) =>
+    fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
+  const hostJoin = await post(`/rooms/${roomCode}/participants`, hostToken);
+  assert.equal(hostJoin.status, 200, "host must join the class");
+
+  const knockRes = await post(`/rooms/${roomCode}/knock`, studentToken);
+  assert.equal(knockRes.status, 200, "student knock must succeed");
+  const knock = await knockRes.json();
+  if (knock.status !== "admitted") {
+    const admit = await post(`/rooms/${roomCode}/knock/${knock.knock.id}/respond`, hostToken, { action: "admit" });
+    assert.equal(admit.status, 200, "host must admit the student");
+  }
+
+  const studentJoin = await post(`/rooms/${roomCode}/participants`, studentToken);
+  assert.equal(studentJoin.status, 200, "admitted student must join the class");
+}
+
 describe("Temporary MongoDB Chat Backend & Security Verification", () => {
   const roomCode = "room-test-" + Math.random().toString(36).substring(2, 7);
   const tutorId = "11111111-1111-4111-8111-111111111111";
@@ -66,6 +93,8 @@ describe("Temporary MongoDB Chat Backend & Security Verification", () => {
     const createJson = await createRes.json();
     sessionId = createJson.room?.sessionId || createJson.sessionId;
     assert.ok(sessionId, "Room creation must return unique sessionId");
+
+    await joinClass(roomCode, tutorToken, studentToken);
   });
 
 
@@ -366,6 +395,9 @@ describe("Temporary MongoDB Chat Backend & Security Verification", () => {
     const newSessionId = newClassJson.room?.sessionId || newClassJson.sessionId;
     assert.ok(newSessionId, "New class must have a sessionId");
     assert.notEqual(newSessionId, sessionId, "New class must have a DIFFERENT sessionId than the ended class");
+
+    // A new class session requires joining again; attendance from the ended class does not carry over.
+    await joinClass(roomCode, tutorToken, studentToken);
 
     // Fetch chat history for the newly created class
     const newHistoryRes = await fetch(`${API_BASE}/rooms/${roomCode}/chat`, {

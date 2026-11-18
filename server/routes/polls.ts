@@ -1,7 +1,8 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
-import { authorizeRoomAccess } from "../middleware/roomAuth";
+import { authorizeRoomAccess, isCurrentSessionParticipant } from "../middleware/roomAuth";
 import { requireAuth } from "./auth";
+import { isUuid, parseNonNegativeInt } from "../services/validation";
 
 export const pollsRouter = Router();
 
@@ -16,6 +17,7 @@ pollsRouter.get(
   async (req: Request, res: Response) => {
     try {
       const room = (req as any).room;
+      const isHost = Boolean((req as any).isHost);
       const roomCode = room.room_code;
 
       const pollsRes = await query(
@@ -70,7 +72,8 @@ pollsRouter.get(
           pollType: p.poll_type,
           options: opts.map((o) => o.option_text),
           optionsDetailed: opts,
-          correctOptionIndex: p.correct_option_index,
+          // Students only learn the answer once the poll has ended; the host always sees it.
+          correctOptionIndex: isHost || !p.is_active ? p.correct_option_index : null,
           timerSeconds: p.timer_seconds,
           isActive: p.is_active,
           votes: votesMap,
@@ -102,7 +105,7 @@ pollsRouter.post(
       const roomCode = room.room_code;
       const { question, options, poll_type = "mcq", correct_option_index = null, timer_seconds = null } = req.body;
 
-      if (!question || !options || !Array.isArray(options) || options.length === 0) {
+      if (typeof question !== "string" || question.trim().length === 0 || !Array.isArray(options) || options.length === 0) {
         return res.status(400).json({ error: "Question and non-empty options array are required" });
       }
 
@@ -167,11 +170,20 @@ pollsRouter.post(
 pollsRouter.post("/:pollId/vote", requireAuth, async (req: Request, res: Response) => {
   try {
     const { pollId } = req.params;
-    const { option_index, duration_ms } = req.body;
+    const { option_index: rawOptionIndex, duration_ms } = req.body;
     const user = (req as any).user;
 
-    if (option_index === undefined || option_index === null) {
+    if (rawOptionIndex === undefined || rawOptionIndex === null) {
       return res.status(400).json({ error: "option_index is required" });
+    }
+
+    const option_index = parseNonNegativeInt(rawOptionIndex);
+    if (option_index === null) {
+      return res.status(400).json({ error: "option_index must be a non-negative integer" });
+    }
+
+    if (!isUuid(pollId)) {
+      return res.status(404).json({ error: "Active poll not found" });
     }
 
     // Verify poll exists and fetch room_code
@@ -192,13 +204,9 @@ pollsRouter.post("/:pollId/vote", requireAuth, async (req: Request, res: Respons
         return res.status(403).json({ error: "Participant token is not valid for this poll's room" });
       }
     } else {
-      const partRes = await query(
-        `SELECT 1 FROM room_participants 
-         WHERE room_code = $1 AND (user_id = $2 OR display_name = $3)
-         LIMIT 1;`,
-        [poll.room_code, user.id, user.full_name || ""]
-      );
-      if (partRes.rows.length === 0) {
+      const roomRes = await query("SELECT started_at FROM live_classes WHERE room_code = $1;", [poll.room_code]);
+      const isParticipant = await isCurrentSessionParticipant(poll.room_code, user.id, roomRes.rows[0]?.started_at);
+      if (!isParticipant) {
         return res.status(403).json({ error: "Must be a participant in this meeting room to vote on polls" });
       }
     }
@@ -214,8 +222,17 @@ pollsRouter.post("/:pollId/vote", requireAuth, async (req: Request, res: Respons
     }
 
     const optionId = optRes.rows[0].id;
-    const isUserUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id));
+    const isUserUUID = isUuid(String(user.id));
     const validUserId = isUserUUID ? user.id : null;
+    // Stable per-voter identity so participant-token voters (no users row) also get exactly one vote.
+    const voterKey = isUserUUID
+      ? String(user.id)
+      : user.isParticipantToken && user.id
+      ? `pt:${user.tenant_id || ""}:${user.id}`
+      : null;
+    if (!voterKey) {
+      return res.status(403).json({ error: "A verified participant identity is required to vote" });
+    }
 
     const isCorrect =
       poll.correct_option_index !== null
@@ -224,9 +241,9 @@ pollsRouter.post("/:pollId/vote", requireAuth, async (req: Request, res: Respons
 
     // Insert or update vote
     const voteSql = `
-      INSERT INTO poll_votes (poll_id, option_id, user_id, is_correct, duration_ms)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (poll_id, user_id) DO UPDATE SET
+      INSERT INTO poll_votes (poll_id, option_id, user_id, is_correct, duration_ms, voter_key)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (poll_id, voter_key) DO UPDATE SET
         option_id = EXCLUDED.option_id,
         is_correct = EXCLUDED.is_correct,
         duration_ms = EXCLUDED.duration_ms,
@@ -234,7 +251,7 @@ pollsRouter.post("/:pollId/vote", requireAuth, async (req: Request, res: Respons
       RETURNING *;
     `;
 
-    const voteRes = await query(voteSql, [pollId, optionId, validUserId, isCorrect, duration_ms || null]);
+    const voteRes = await query(voteSql, [pollId, optionId, validUserId, isCorrect, duration_ms || null, voterKey]);
 
     return res.json({ success: true, vote: voteRes.rows[0] });
   } catch (err: any) {
@@ -252,6 +269,10 @@ pollsRouter.post("/:pollId/end", requireAuth, async (req: Request, res: Response
   try {
     const { pollId } = req.params;
     const user = (req as any).user;
+
+    if (!isUuid(pollId)) {
+      return res.status(404).json({ error: "Poll not found" });
+    }
 
     const pollRes = await query("SELECT id, room_code, is_active FROM polls WHERE id = $1;", [pollId]);
     if (pollRes.rows.length === 0) {

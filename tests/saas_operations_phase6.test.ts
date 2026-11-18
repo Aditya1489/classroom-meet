@@ -22,7 +22,7 @@ import {
 import { redactString, redactObject } from "../server/services/logger";
 import { MathsyMeetServerClient } from "../sdk/dist/server.mjs";
 
-const API_BASE = "http://localhost:5001";
+const API_BASE = (process.env.API_BASE || "http://localhost:5001/api").replace(/\/api\/?$/, "");
 
 describe("Phase 6: SaaS Operations Test Suite", () => {
   let orgAId: string;
