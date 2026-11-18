@@ -316,13 +316,42 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
     };
   }, []);
 
-  const handleLeaveMeeting = () => {
+  const handleLeaveMeeting = (reason?: string) => {
     setHasLeft(true);
-    postEventToParent("meeting.left", { reason: "participant_left" });
+    const leaveReason = reason || "participant_left";
+    postEventToParent("meeting.left", { reason: leaveReason });
+
+    // Floating-popup tab (opened from the class frame inside the host site): hand the result back to
+    // that frame, which reports it to the host site, then close this tab so the tutor is back there.
+    if (typeof window !== "undefined" && window.parent === window && window.opener) {
+      try {
+        window.opener.postMessage({ source: "mathsy-meet-popup", type: "left", reason: leaveReason }, window.location.origin);
+      } catch {}
+      window.close();
+      // If the browser refuses to close the tab, go back to the host site instead of the Meet home page.
+      if (parentOriginRef.current) {
+        window.location.href = parentOriginRef.current;
+        return;
+      }
+    }
     if (onBackToHome) {
       onBackToHome();
     }
   };
+
+  // The class continued in a popup tab: relay its leave/end to the host site through this frame.
+  useEffect(() => {
+    const onPopupMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data?.source !== "mathsy-meet-popup") return;
+      if (event.data.type === "left") {
+        setHasLeft(true);
+        postEventToParent("meeting.left", { reason: event.data.reason || "participant_left" });
+      }
+    };
+    window.addEventListener("message", onPopupMessage);
+    return () => window.removeEventListener("message", onPopupMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRejoin = () => {
     setHasLeft(false);

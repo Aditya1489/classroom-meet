@@ -102,7 +102,7 @@ interface MeetingRoomProps {
     token?: string;
     isHost?: boolean;
   };
-  onLeaveMeeting: () => void;
+  onLeaveMeeting: (reason?: string) => void;
 }
 
 const RemoteAudioElement: React.FC<{
@@ -712,6 +712,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   // ── Local recording (saved to this computer) ──
   const localRecorderRef = useRef<LocalMeetingRecorder | null>(null);
+  // The main view (whiteboard / shared screen / grid): recordings are cropped to it, not the whole tab.
+  const stageRef = useRef<HTMLElement | null>(null);
   // Finished recording waiting for the tutor to upload, download or share it.
   const [pendingRecording, setPendingRecording] = useState<{ blob: Blob; fileName: string } | null>(null);
   const getRecordingAudio = () => ({
@@ -747,7 +749,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       onError: (message) => toast.error(message, { id: "rec-error" }),
     });
     // Called directly from the click so the browser's capture picker is allowed to open.
-    const started = await recorder.start(getRecordingAudio());
+    const started = await recorder.start(getRecordingAudio(), stageRef.current);
     if (!started) return;
     localRecorderRef.current = recorder;
     setIsRecordingActive(true);
@@ -1116,6 +1118,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       setHasSpeakingPermission(false);
       setUnmuteRequestStatus("none");
       toast.info("The class has ended. Chat history has been cleared.", { id: "class-ended" });
+      // Students leave automatically so the host site can show the class page (and its recording).
+      if (!isHostRef.current) {
+        setTimeout(() => {
+          try {
+            engineRef.current?.leaveRoom();
+          } catch {}
+          onLeaveMeeting("host_ended");
+        }, 1500);
+      }
     };
 
     engine.onReaction = (r: ReactionEvent) => {
@@ -2207,7 +2218,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     } catch {}
     // Allow 150ms buffer flush so outbound PEER_LEFT socket packets traverse network
     setTimeout(() => {
-      onLeaveMeeting();
+      onLeaveMeeting(classEndedByHostRef.current ? "host_ended" : undefined);
     }, 150);
   };
 
@@ -2260,7 +2271,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   }, [meetingCode, remoteParticipants.length]);
 
   // End Meeting Handler
+  const classEndedByHostRef = useRef(false);
   const handleEndClassClick = async () => {
+    classEndedByHostRef.current = true;
+    // Ending class while recording: stop it and open the save box (Drive / download / link) right away.
+    if (localRecorderRef.current) void stopLocalRecording();
+    // Tell students before leaving: once this socket leaves the room the broadcast can't reach them.
+    if (isHost) {
+      try {
+        engineRef.current?.broadcastClassEnded();
+      } catch {}
+    }
     try {
       engineRef.current?.leaveRoom();
     } catch {}
@@ -2272,7 +2293,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     if (isHost) {
       try {
         await dbClient.endMeeting(meetingCode);
-        engineRef.current?.broadcastClassEnded();
       } catch (err) {
         console.warn("[MeetingRoom] Error ending meeting on backend:", err);
       }
@@ -2920,7 +2940,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           </div>
         )}
 
-        <section className={`flex-1 min-w-0 h-full relative ${isFocusMode ? "p-0" : isMobileLandscapeSplit ? "p-1 sm:p-1.5" : isMobile ? "p-1" : "p-3"} flex flex-col justify-center items-center overflow-hidden`}>
+        <section ref={stageRef} className={`flex-1 min-w-0 h-full relative isolate ${isFocusMode ? "p-0" : isMobileLandscapeSplit ? "p-1 sm:p-1.5" : isMobile ? "p-1" : "p-3"} flex flex-col justify-center items-center overflow-hidden`}>
           {isMobileLandscapeSplit ? (
             /* ── MOBILE HORIZONTAL 75% / 25% SPLIT PRESENTATION STAGE ── */
             <div className="w-full h-full flex flex-row gap-1.5 overflow-hidden relative select-none">

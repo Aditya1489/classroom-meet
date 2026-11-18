@@ -91,7 +91,10 @@ export class LocalMeetingRecorder {
    * Starts recording. Must be called directly from a click handler (getDisplayMedia needs the user gesture).
    * Resolves false if the user cancelled the picker or recording isn't supported.
    */
-  async start(audio: { localMic: MediaStreamTrack | null; remote: Array<MediaStreamTrack | null | undefined> }): Promise<boolean> {
+  async start(
+    audio: { localMic: MediaStreamTrack | null; remote: Array<MediaStreamTrack | null | undefined> },
+    focusElement?: HTMLElement | null
+  ): Promise<boolean> {
     if (this.isRecording) return true;
     if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getDisplayMedia) {
       this.callbacks.onError?.("Recording isn't supported in this browser. Please use desktop Chrome, Edge or Firefox.");
@@ -123,6 +126,7 @@ export class LocalMeetingRecorder {
       this.cleanup();
       return false;
     }
+    await limitCaptureToElement(videoTrack, focusElement);
     videoTrack.addEventListener("ended", () => {
       if (this.isRecording && !this.stopping) this.callbacks.onCaptureEnded?.();
     });
@@ -280,4 +284,32 @@ export function downloadRecording(blob: Blob, fileName: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/**
+ * When the user records this tab, keep only the main view (whiteboard / shared screen / grid) instead of
+ * the whole page. Element Capture (restrictTo) also drops anything floating over it; Region Capture
+ * (cropTo) is the fallback. Other browsers, or recording another tab/window, keep the full capture.
+ */
+async function limitCaptureToElement(track: MediaStreamTrack, element?: HTMLElement | null): Promise<void> {
+  if (!element) return;
+  const settings: any = track.getSettings?.() || {};
+  if (settings.displaySurface && settings.displaySurface !== "browser") return; // a screen/window was picked
+  const w = window as any;
+  try {
+    if (w.RestrictionTarget && typeof (track as any).restrictTo === "function") {
+      await (track as any).restrictTo(await w.RestrictionTarget.fromElement(element));
+      return;
+    }
+  } catch (err) {
+    console.warn("[Recorder] Element Capture unavailable, trying Region Capture:", err);
+  }
+  try {
+    if (w.CropTarget && typeof (track as any).cropTo === "function") {
+      await (track as any).cropTo(await w.CropTarget.fromElement(element));
+    }
+  } catch (err) {
+    // A different tab was chosen, or cropping isn't supported: record the full capture.
+    console.warn("[Recorder] Region Capture unavailable, recording the full tab:", err);
+  }
 }
