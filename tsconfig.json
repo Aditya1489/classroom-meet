@@ -17,8 +17,12 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@mathsy/meet-sdk/server": ["sdk/src/server.ts"],
+      "@mathsy/meet-sdk/browser": ["sdk/src/browser.ts"],
+      "@mathsy/meet-sdk/react": ["sdk/src/react.tsx"],
+      "@mathsy/meet-sdk": ["sdk/src/index.ts"]
     }
   },
-  "include": ["src", "sdk", "demo"]
+  "include": ["src"]
 }
