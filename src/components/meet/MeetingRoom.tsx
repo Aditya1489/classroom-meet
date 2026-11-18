@@ -2420,7 +2420,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
     : (tutorPeer?.videoTrack || null);
 
   const pipName = isHost
-    ? "Host (You)"
+    ? (myName ? `${myName} (You)` : "You")
     : tutorPeer
     ? (tutorPeer.name ? `${tutorPeer.name} (Tutor)` : "Tutor")
     : "Tutor";
@@ -3629,7 +3629,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                   : (tutorPeer?.videoTrack || null);
 
                 const pipName = isHost
-                  ? "Host (You)"
+                  ? (myName ? `${myName} (You)` : "You")
                   : tutorPeer
                   ? (tutorPeer.name ? `${tutorPeer.name} (Tutor)` : "Tutor")
                   : "Tutor";
