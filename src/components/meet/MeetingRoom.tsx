@@ -1679,7 +1679,25 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         }
       }
 
-      const track = await engine.startScreenShare(controller);
+      // Start the capture first (getDisplayMedia checks the click's user activation but doesn't use it up),
+      // then open the Google Meet-style floating mini-view in the same click. Document PiP needs that
+      // activation, and by the time the user has picked a tab in Chrome's dialog it has expired, which is
+      // why the mini-view never appeared when it was opened after sharing started.
+      const sharePromise = engine.startScreenShare(controller);
+      let pipOpenedForShare = false;
+      if (!pipWindow || pipWindow.closed) {
+        openPiP({ width: 340, height: 480, allowPopupFallback: false })
+          .then((win) => {
+            pipOpenedForShare = Boolean(win);
+          })
+          .catch((pipErr) => console.warn("[MeetingRoom] Error launching Document PiP window:", pipErr));
+      }
+
+      const track = await sharePromise;
+      if (!track && pipOpenedForShare) {
+        // Picker cancelled or sharing failed: don't leave the mini-view behind.
+        closePiP();
+      }
       if (track) {
         setLocalScreenTrack(track);
         setLocalScreenAudioTrack(engine.localScreenAudioTrack || null);
@@ -1693,17 +1711,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           toast("Sharing screen (Tip: select 'Also share tab audio' to play video sound)", { icon: "ℹ️", id: "screen-audio-hint" });
         }
 
-        // Open the floating mini-view now only if the click that started sharing still counts as a user
-        // gesture (choosing a screen in the browser picker usually takes longer). Otherwise Chrome opens
-        // it automatically when this tab is hidden (see the enterpictureinpicture handler above).
-        const hasUserActivation = Boolean((navigator as any).userActivation?.isActive);
-        if (hasUserActivation && document.visibilityState === "visible") {
-          try {
-            const win = await openPiP({ width: 340, height: 480, allowPopupFallback: false });
-            if (win) toast.success("Floating mini-view opened (Always on top)", { id: "pip-launched" });
-          } catch (pipErr) {
-            console.warn("[MeetingRoom] Error launching Document PiP window:", pipErr);
-          }
+        if (!pipOpenedForShare && (!pipWindow || pipWindow.closed)) {
+          // Browser without Document PiP (or it was refused): the tutor can still open it from the
+          // "floating view" button, and Chrome may auto-open it on tab switch.
+          console.info("[MeetingRoom] Floating mini-view not opened automatically for this share.");
         }
       }
     }
