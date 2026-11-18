@@ -2324,7 +2324,16 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       isHandRaised: isHandRaised,
     },
     ...remoteParticipants
-      .filter((p) => p.id !== myUserId && (p as any).peerId !== myUserId)
+      // Hide my own other connections too (peer ids differ only by a 5-char connection suffix)
+      .filter((p) => {
+        const base = (v: unknown) => String(v || "").replace(/-[a-z0-9]{5}$/i, "");
+        return (
+          p.id !== myUserId &&
+          (p as any).peerId !== myUserId &&
+          base(p.id) !== base(myUserId) &&
+          base((p as any).userId) !== base(myUserId)
+        );
+      })
       .map((p) => {
         const isPeerHost = p.role === "host" || p.role === "tutor" || (p as any).isHost === true;
         return {

@@ -614,7 +614,15 @@ export class MathsyMediasoupEngine {
           data.peers.forEach((peer: any) => {
             const pId = peer.id || peer.baseUserId;
             const pUserId = peer.baseUserId || peer.userId || peer.id;
-            if (pId && pId !== sanitizedUserId && pId !== userId) {
+            // Skip my own other connections too (e.g. the CRM frame I just moved out of to a new tab)
+            const sameAsMe = (v: string) => v.replace(/-[a-z0-9]{5}$/i, "");
+            if (
+              pId &&
+              pId !== sanitizedUserId &&
+              pId !== userId &&
+              sameAsMe(pId) !== sameAsMe(sanitizedUserId) &&
+              sameAsMe(pId) !== sameAsMe(String(userId))
+            ) {
               this.peerLastSeen.set(pId, Date.now());
               if (pUserId) this.peerLastSeen.set(pUserId, Date.now());
               if (peer.name) this.peerLastSeen.set(peer.name.trim().toLowerCase(), Date.now());
@@ -656,6 +664,11 @@ export class MathsyMediasoupEngine {
         const pId = peer.id || peer.baseUserId;
         const pUserId = peer.baseUserId || peer.userId || peer.id;
         if (!pId || pId === sanitizedUserId || pId === userId) return;
+        // My own other connection (same person, different tab/frame): never show myself twice
+        {
+          const base = (v: string) => v.replace(/-[a-z0-9]{5}$/i, "");
+          if (base(pId) === base(sanitizedUserId) || base(pId) === base(String(userId))) return;
+        }
         console.log("[MathsyMeet Engine] Peer joined room:", peer);
         this.peerLastSeen.set(pId, Date.now());
         if (pUserId) this.peerLastSeen.set(pUserId, Date.now());
