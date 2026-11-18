@@ -319,13 +319,19 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
   const handleLeaveMeeting = (reason?: string) => {
     setHasLeft(true);
     const leaveReason = reason || "participant_left";
-    postEventToParent("meeting.left", { reason: leaveReason });
+    // The class recording link (saved by the host just before leaving) rides along, so the host site
+    // can attach it to its own class record even when the Meet backend could not store it.
+    let recordingUrl: string | undefined;
+    try {
+      recordingUrl = window.sessionStorage.getItem(`mathsy_meet_recording_${roomCode}`) || undefined;
+    } catch {}
+    postEventToParent("meeting.left", { reason: leaveReason, recordingUrl });
 
     // Floating-popup tab (opened from the class frame inside the host site): hand the result back to
     // that frame, which reports it to the host site, then close this tab so the tutor is back there.
     if (typeof window !== "undefined" && window.parent === window && window.opener) {
       try {
-        window.opener.postMessage({ source: "mathsy-meet-popup", type: "left", reason: leaveReason }, window.location.origin);
+        window.opener.postMessage({ source: "mathsy-meet-popup", type: "left", reason: leaveReason, recordingUrl }, window.location.origin);
       } catch {}
       window.close();
       // If the browser refuses to close the tab, go back to the host site instead of the Meet home page.
@@ -345,7 +351,10 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
       if (event.origin !== window.location.origin || event.data?.source !== "mathsy-meet-popup") return;
       if (event.data.type === "left") {
         setHasLeft(true);
-        postEventToParent("meeting.left", { reason: event.data.reason || "participant_left" });
+        postEventToParent("meeting.left", {
+          reason: event.data.reason || "participant_left",
+          recordingUrl: typeof event.data.recordingUrl === "string" ? event.data.recordingUrl : undefined,
+        });
       }
     };
     window.addEventListener("message", onPopupMessage);

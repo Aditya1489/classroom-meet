@@ -24,8 +24,13 @@ export function SaveRecordingDialog({ meetingCode, file, onClose }: Props) {
   const sizeMb = (file.blob.size / (1024 * 1024)).toFixed(1);
 
   const publish = async (url: string, source: "drive" | "link") => {
+    // Remember it for the host site: it is sent along when the class is left (see EmbedMeetingView).
+    try {
+      window.sessionStorage.setItem(`mathsy_meet_recording_${meetingCode}`, url);
+    } catch {}
+    const embedded = window.parent !== window || Boolean(window.opener);
     const ok = await dbClient.saveRecording(meetingCode, { url, source, title: file.fileName });
-    if (ok) {
+    if (ok || embedded) {
       setSavedUrl(url);
       toast.success("Recording shared with your students.", { id: "rec-share" });
     } else {
