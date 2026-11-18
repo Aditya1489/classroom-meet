@@ -145,6 +145,39 @@ export interface RunMigrationsOptions {
   client?: pg.PoolClient;
   migrationsDir?: string;
   skipLock?: boolean;
+  /** Max time to wait for the migration lock (ms). Defaults to MIGRATION_LOCK_TIMEOUT_MS or 30000. */
+  lockTimeoutMs?: number;
+}
+
+/**
+ * Tries to take the migration advisory lock for up to `timeoutMs` (default 30s, MIGRATION_LOCK_TIMEOUT_MS).
+ * Never waits forever: behind a transaction-mode pooler (Supabase Supavisor / pgbouncer, port 6543) a
+ * session advisory lock can leak onto a shared server connection when a process dies or its unlock runs
+ * on a different pooled connection. A blocking pg_advisory_lock() then hung every later startup.
+ */
+export async function tryAcquireMigrationLock(
+  client: pg.PoolClient | pg.Client,
+  timeoutMs = Number(process.env.MIGRATION_LOCK_TIMEOUT_MS || 30000)
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    const res = await client.query("SELECT pg_try_advisory_lock($1) AS locked;", [MIGRATION_ADVISORY_LOCK_ID]);
+    if (res.rows[0]?.locked) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/** Names of migration files not yet recorded in schema_migrations (empty if the table doesn't exist yet). */
+export async function getPendingMigrations(client: pg.PoolClient | pg.Client, migrationsDir?: string): Promise<string[]> {
+  const files = fs.readdirSync(resolveMigrationsDir(migrationsDir)).filter((f) => f.endsWith(".sql")).sort();
+  try {
+    const applied = await client.query("SELECT name FROM schema_migrations;");
+    const done = new Set(applied.rows.map((r: any) => r.name));
+    return files.filter((f) => !done.has(f));
+  } catch {
+    return files;
+  }
 }
 
 /**
@@ -163,10 +196,18 @@ export async function runMigrations(options: RunMigrationsOptions = {}): Promise
   const results: MigrationResult[] = [];
 
   try {
-    // 1. Acquire PostgreSQL session advisory lock unless already held by caller
+    // 1. Acquire PostgreSQL session advisory lock unless already held by caller (bounded wait)
     if (!options.skipLock) {
-      await client.query("SELECT pg_advisory_lock($1);", [MIGRATION_ADVISORY_LOCK_ID]);
-      lockAcquired = true;
+      lockAcquired = await tryAcquireMigrationLock(client, options.lockTimeoutMs);
+      if (!lockAcquired) {
+        const pending = await getPendingMigrations(client, options.migrationsDir);
+        if (pending.length > 0) {
+          throw new Error(
+            `Timed out waiting for the migration lock (${MIGRATION_ADVISORY_LOCK_ID}) with pending migrations: ${pending.join(", ")}. Another process holds it, or it leaked on a pooled connection.`
+          );
+        }
+        console.warn("[PostgreSQL] Migration lock busy, but no migrations are pending; continuing without it.");
+      }
     }
 
     // 2. Ensure schema_migrations table exists
@@ -272,9 +313,20 @@ export async function initDb(options: InitDbOptions = {}): Promise<boolean> {
     console.log(`[PostgreSQL] Connecting to database: ${connectionString.replace(/:[^:@]+@/, ":****@")}`);
     client = await pool.connect();
 
-    // 1. Acquire PostgreSQL session advisory lock BEFORE any DDL or initialization runs
-    await client.query("SELECT pg_advisory_lock($1);", [MIGRATION_ADVISORY_LOCK_ID]);
-    lockAcquired = true;
+    // 1. Acquire PostgreSQL session advisory lock BEFORE any DDL or initialization runs (bounded wait).
+    //    If it stays busy (e.g. leaked on a pooled connection) and nothing is pending, start anyway:
+    //    the baseline schema is idempotent (CREATE ... IF NOT EXISTS). With pending migrations, fail
+    //    loudly instead of hanging so the process manager restarts and the logs show why.
+    lockAcquired = await tryAcquireMigrationLock(client);
+    if (!lockAcquired) {
+      const pending = await getPendingMigrations(client, options.migrationsDir);
+      if (pending.length > 0) {
+        throw new Error(
+          `Timed out waiting for the migration lock (${MIGRATION_ADVISORY_LOCK_ID}) with pending migrations: ${pending.join(", ")}. failed: lock unavailable`
+        );
+      }
+      console.warn("[PostgreSQL] Migration lock busy (possibly leaked on a pooled connection) and no migrations pending; starting without it.");
+    }
 
     // 2. Resolve and apply baseline schema under advisory lock
     const schemaFile = resolveSchemaPath(options.schemaPath);
