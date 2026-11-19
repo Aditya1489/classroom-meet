@@ -1,4 +1,4 @@
-import { Editor } from "tldraw";
+import { Box, Editor, TLShapeId } from "tldraw";
 import { jsPDF } from "jspdf";
 
 // Store the latest active editor instance or snapshot for post-class export
@@ -73,10 +73,71 @@ export async function exportWhiteboardToPdf(
   }
 }
 
+// Pages of an imported PDF / slide deck on the whiteboard (page coordinates), set by the Whiteboard.
+let currentSlides: { x: number; y: number; w: number; h: number }[] = [];
+export function registerWhiteboardSlides(slides?: { bounds?: { x: number; y: number; w: number; h: number } }[] | null) {
+  currentSlides = (slides || []).map((s) => s.bounds!).filter((b) => b && b.w > 0 && b.h > 0);
+}
+
+function loadSvgImage(svg: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load SVG into image for PDF rendering"));
+    };
+    img.src = url;
+  });
+}
+
+/** One PDF page per imported page/slide, with everything written on it (all pages as one image is too big to draw). */
+async function renderSlidesPdf(editor: Editor, shapeIds: TLShapeId[]): Promise<jsPDF | null> {
+  let pdf: jsPDF | null = null;
+  for (const b of currentSlides) {
+    const onSlide = shapeIds.filter((id) => {
+      const sb = editor.getShapePageBounds(id);
+      return !!sb && sb.maxX > b.x && sb.x < b.x + b.w && sb.maxY > b.y && sb.y < b.y + b.h;
+    });
+    if (onSlide.length === 0) continue;
+    const svgResult = await editor.getSvgString(onSlide, {
+      bounds: new Box(b.x, b.y, b.w, b.h),
+      padding: 0,
+      background: true,
+      scale: Math.min(1, 1600 / b.w),
+    });
+    if (!svgResult?.svg) continue;
+    const img = await loadSvgImage(svgResult.svg);
+    const w = Math.max(1, Math.round(svgResult.width));
+    const h = Math.max(1, Math.round(svgResult.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Failed to acquire 2D canvas context");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const orientation = w >= h ? "landscape" : "portrait";
+    if (!pdf) pdf = new jsPDF({ orientation, unit: "px", format: [w, h] });
+    else pdf.addPage([w, h], orientation);
+    pdf.addImage(canvas.toDataURL("image/jpeg", 0.85), "JPEG", 0, 0, w, h);
+  }
+  return pdf;
+}
+
 /** Draws the current whiteboard page into a PDF; null when the page is blank. */
 async function renderWhiteboardPdf(editor: Editor): Promise<jsPDF | null> {
   const shapeIds = Array.from(editor.getCurrentPageShapeIds());
   if (shapeIds.length === 0) return null;
+  if (currentSlides.length > 0) {
+    const slidesPdf = await renderSlidesPdf(editor, shapeIds);
+    if (slidesPdf) return slidesPdf;
+  }
   const svgResult = await editor.getSvgString(shapeIds);
   if (!svgResult || !svgResult.svg) {
     throw new Error("Could not render whiteboard SVG content");

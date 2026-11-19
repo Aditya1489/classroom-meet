@@ -58,6 +58,7 @@ import { toast } from "sonner";
 import { importFileToWhiteboard, PresentationSlide } from "./importers/whiteboardImporter";
 import {
   registerWhiteboardEditor,
+  registerWhiteboardSlides,
   setLatestWhiteboardSnapshot,
   exportWhiteboardToPdf,
 } from "../../utils/whiteboardPdf";
@@ -181,6 +182,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   });
   const slidesRef = useRef<PresentationSlide[]>(presentationSlides);
   slidesRef.current = presentationSlides;
+  // The class-notes PDF exports an imported PDF / deck page by page, so it needs the page positions.
+  useEffect(() => {
+    registerWhiteboardSlides(presentationSlides);
+  }, [presentationSlides]);
 
   // Host Viewport Synchronization State (Ensures participants on any device see full host view)
   const lastHostViewportRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
