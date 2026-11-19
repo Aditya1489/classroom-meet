@@ -17,6 +17,7 @@ import { RulerShapeUtil } from "./shapes/RulerShapeUtil";
 import { SetSquareShapeUtil } from "./shapes/SetSquareShapeUtil";
 import { MathsyMediasoupEngine } from "../../engine/mediasoupClient";
 import { dbClient } from "../../lib/dbClient";
+import { emptyDiff, isEmptyDiff, mergeDiff } from "../../utils/whiteboardDiffBatch";
 import {
   Ruler,
   Compass,
@@ -64,7 +65,10 @@ import {
 } from "../../utils/whiteboardPdf";
 
 /** How often the full whiteboard snapshot is re-sent to peers; live strokes go out immediately as diffs. */
-const SNAPSHOT_SYNC_INTERVAL_MS = 1500;
+// Peers ignore it (they draw from live diffs); the media server keeps it for people who join late.
+const SNAPSHOT_SYNC_INTERVAL_MS = 5000;
+/** Live stroke changes are merged and sent this often (~25 per second), instead of once per frame. */
+const DIFF_BATCH_INTERVAL_MS = 40;
 
 const customShapeUtils = [
   CompassShapeUtil,
@@ -910,7 +914,26 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   useEffect(() => {
     if (!editor) return;
 
-    // 1. Listen for local user changes (document scope only)
+    // 1. Listen for local user changes (document scope only). Changes are merged and sent every
+    //    DIFF_BATCH_INTERVAL_MS, each batch with an id so peers can drop copies that arrive twice.
+    let pendingDiff = emptyDiff();
+    let batchTimer: ReturnType<typeof setTimeout> | null = null;
+    let batchSeq = 0;
+    const flushDiff = () => {
+      batchTimer = null;
+      if (isEmptyDiff(pendingDiff) || !engine || !roomCode) return;
+      const changes = pendingDiff;
+      pendingDiff = emptyDiff();
+      batchSeq += 1;
+      engine.broadcastWhiteboard({
+        type: "diff",
+        wbId: `${myUserId || "local"}:${Date.now().toString(36)}:${batchSeq}`,
+        roomCode,
+        senderId: myUserId || "local",
+        changes,
+        timestamp: Date.now(),
+      });
+    };
     const unlisten = editor.store.listen(
       (entry) => {
         // Strictly filter to local user actions to prevent echo loops
@@ -924,15 +947,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
         if (!hasChanges) return;
 
-        // Transmit incremental diff to room participants
+        // Queue the change; the batch goes out within DIFF_BATCH_INTERVAL_MS
         if (engine && roomCode) {
-          engine.broadcastWhiteboard({
-            type: "diff",
-            roomCode,
-            senderId: myUserId || "local",
-            changes: { added, updated, removed },
-            timestamp: Date.now(),
-          });
+          mergeDiff(pendingDiff, { added, updated, removed } as any);
+          if (!batchTimer) batchTimer = setTimeout(flushDiff, DIFF_BATCH_INTERVAL_MS);
         }
 
         // Debounced snapshot persistence to PostgreSQL (Host authoritative)
@@ -1080,6 +1098,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
     return () => {
       unlisten();
+      if (batchTimer) {
+        clearTimeout(batchTimer);
+        flushDiff(); // send the last strokes rather than dropping them
+      }
       if (engine && engine.onWhiteboardData === handleRemoteWhiteboardData) {
         engine.onWhiteboardData = undefined;
       }

@@ -1152,7 +1152,7 @@ export class MathsyMediasoupEngine {
               if (msg.whiteboardData.snapshot) {
                 this.whiteboardSnapshot = msg.whiteboardData.snapshot;
               }
-              this.onWhiteboardData?.(msg.whiteboardData);
+              if (!this.isDuplicateWhiteboardUpdate(msg.whiteboardData)) this.onWhiteboardData?.(msg.whiteboardData);
             }
           } else if (msg.controlAction === "HAND_RAISE") {
             const targetId = msg.peerId || msg.userId || msg.senderId;
@@ -1276,6 +1276,7 @@ export class MathsyMediasoupEngine {
 
       // In-meeting signaling: Whiteboard
       const handleWhiteboard = (data: any) => {
+        if (this.isDuplicateWhiteboardUpdate(data)) return;
         this.onWhiteboardData?.(data);
       };
       this.socket.on("whiteboardDraw", handleWhiteboard);
@@ -2262,21 +2263,26 @@ export class MathsyMediasoupEngine {
     if (data?.snapshot) {
       this.whiteboardSnapshot = data.snapshot;
     }
-    // 1. Wrap in chatMessage control channel to guarantee room-wide broadcast via Mediasoup socket relay
-    const payload = {
-      isControl: true,
-      controlAction: "WHITEBOARD_DIFF",
-      roomCode: this.roomId,
-      senderId: this.currentUserId,
-      whiteboardData: data,
-      timestamp: Date.now(),
-    };
-    this.socket?.emit("chatMessage", payload);
+    // Sent once on the whiteboard channel; the media server relays it to the room. (It used to go out on
+    // four channels, and the server relayed most of them twice, so peers got ~6 copies of every update.)
+    const wbId = data?.wbId || `${this.currentUserId || "local"}:${Date.now().toString(36)}:${++this.whiteboardSeq}`;
+    this.socket?.emit("whiteboardDraw", { ...data, wbId });
+  }
 
-    // 2. Also emit to dedicated whiteboard channels
-    this.socket?.emit("whiteboardDraw", data);
-    this.socket?.emit("whiteboard:sync", data);
-    this.socket?.emit("whiteboard:broadcast", data);
+  private whiteboardSeq = 0;
+  private recentWhiteboardIds = new Set<string>();
+
+  /** True when this update was already delivered (the server can relay one update on two events). */
+  private isDuplicateWhiteboardUpdate(data: any): boolean {
+    const id = data?.wbId;
+    if (!id) return false;
+    if (this.recentWhiteboardIds.has(id)) return true;
+    this.recentWhiteboardIds.add(id);
+    if (this.recentWhiteboardIds.size > 500) {
+      const oldest = this.recentWhiteboardIds.values().next().value;
+      if (oldest !== undefined) this.recentWhiteboardIds.delete(oldest);
+    }
+    return false;
   }
 
   public broadcastWhiteboardState(roomCode: string, isOpen: boolean, isHost: boolean = true) {
