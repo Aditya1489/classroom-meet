@@ -63,6 +63,9 @@ import {
   exportWhiteboardToPdf,
 } from "../../utils/whiteboardPdf";
 
+/** How often the full whiteboard snapshot is re-sent to peers; live strokes go out immediately as diffs. */
+const SNAPSHOT_SYNC_INTERVAL_MS = 1500;
+
 const customShapeUtils = [
   CompassShapeUtil,
   ProtractorShapeUtil,
@@ -760,8 +763,12 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     const unlisten = ed.store.listen(
       (entry) => {
         if (entry.source === "user") {
-          if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
+          // Live strokes reach peers as small diffs (see the sync effect below). This full snapshot only keeps
+          // peers reconciled, and with imported PDF/slide images it can be megabytes, so sending it on every
+          // stroke queued the diffs behind it on the same connection. Send it at most once per interval.
+          if (throttleTimerRef.current) return;
           throttleTimerRef.current = setTimeout(() => {
+            throttleTimerRef.current = null;
             try {
               const snapshot = getSnapshot(ed.store);
               setLatestWhiteboardSnapshot(snapshot);
@@ -780,13 +787,11 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                   );
                 } catch {}
               }
-              if (isHost && roomCode) {
-                dbClient.saveWhiteboardSnapshot(roomCode, snapshot);
-              }
+              // Saving to the database is done by the sync effect's debounced save, not on every snapshot.
             } catch (err) {
               console.warn("[Whiteboard] Failed to capture store snapshot:", err);
             }
-          }, 60);
+          }, SNAPSHOT_SYNC_INTERVAL_MS);
         }
       },
       { scope: "document", source: "user" }

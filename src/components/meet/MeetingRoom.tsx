@@ -616,6 +616,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "polls" | "participants">("chat");
   const [unreadChatCount, setUnreadChatCount] = useState(0);
+  const countedChatIdsRef = useRef(new Set<string>());
 
   // Chat State
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
@@ -1088,9 +1089,15 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         return [...prev, normalized];
       });
 
-      // Never count current user's own messages as unread!
-      const isMyMessage = msg.senderId === myUserId;
-      if (!isMyMessage && (!isSideDrawerOpen || activeSideTab !== "chat")) {
+      // Count each message once (it can arrive more than once) and never count the current user's own.
+      // Sender ids have no per-connection suffix, while myUserId may ("MTH-2026-7738" vs "MTH-2026-7738-bm3dl").
+      const sender = String(msg.senderId || "");
+      const me = String(myUserId || "");
+      const isMyMessage = Boolean(sender) && (sender === me || me.startsWith(`${sender}-`));
+      const countKey = String(msgId || clientMsgId || "");
+      const alreadyCounted = countKey !== "" && countedChatIdsRef.current.has(countKey);
+      if (countKey) countedChatIdsRef.current.add(countKey);
+      if (!isMyMessage && !alreadyCounted && (!isSideDrawerOpen || activeSideTab !== "chat")) {
         setUnreadChatCount((c) => c + 1);
       }
     };
