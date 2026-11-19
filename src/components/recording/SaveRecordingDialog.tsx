@@ -28,6 +28,9 @@ export function SaveRecordingDialog({ meetingCode, file, onClose }: Props) {
     try {
       window.sessionStorage.setItem(`mathsy_meet_recording_${meetingCode}`, url);
     } catch {}
+    // Tell the host site right away (EmbedMeetingView relays it), so the class gets its recording link
+    // without waiting for the tutor to leave the meeting.
+    window.dispatchEvent(new CustomEvent("mathsy:recording-shared", { detail: { url } }));
     const embedded = window.parent !== window || Boolean(window.opener);
     const ok = await dbClient.saveRecording(meetingCode, { url, source, title: file.fileName });
     if (ok || embedded) {

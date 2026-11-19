@@ -37,7 +37,9 @@ export type EmbedEventType =
   | "participant.joined"
   | "participant.left"
   | "media.state_changed"
-  | "meeting.error";
+  | "meeting.error"
+  /** The host saved the class recording (e.g. uploaded to Google Drive); payload: { recordingUrl }. */
+  | "recording.shared";
 
 export interface EmbedEventMessage {
   type: EmbedEventType;

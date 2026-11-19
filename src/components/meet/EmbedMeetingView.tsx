@@ -351,6 +351,10 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
   useEffect(() => {
     const onPopupMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin || event.data?.source !== "mathsy-meet-popup") return;
+      if (event.data.type === "recording" && typeof event.data.recordingUrl === "string") {
+        postEventToParent("recording.shared", { recordingUrl: event.data.recordingUrl });
+        return;
+      }
       if (event.data.type === "left") {
         setHasLeft(true);
         postEventToParent("meeting.left", {
@@ -362,6 +366,24 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
     };
     window.addEventListener("message", onPopupMessage);
     return () => window.removeEventListener("message", onPopupMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The host saved the class recording: hand the link to the host site now (from a popup tab, via this
+  // tab's opener frame, which relays it above).
+  useEffect(() => {
+    const onShared = (event: Event) => {
+      const recordingUrl = (event as CustomEvent<{ url?: string }>).detail?.url;
+      if (!recordingUrl) return;
+      if (window.parent !== window) postEventToParent("recording.shared", { recordingUrl });
+      else if (window.opener) {
+        try {
+          window.opener.postMessage({ source: "mathsy-meet-popup", type: "recording", recordingUrl }, window.location.origin);
+        } catch {}
+      }
+    };
+    window.addEventListener("mathsy:recording-shared", onShared);
+    return () => window.removeEventListener("mathsy:recording-shared", onShared);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
