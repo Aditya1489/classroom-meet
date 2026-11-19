@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { takeClassNotesPdf } from "../../utils/whiteboardPdf";
 import { MeetingRoom } from "./MeetingRoom";
 import {
   sanitizeUrlToken,
@@ -325,13 +326,14 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
     try {
       recordingUrl = window.sessionStorage.getItem(`mathsy_meet_recording_${roomCode}`) || undefined;
     } catch {}
-    postEventToParent("meeting.left", { reason: leaveReason, recordingUrl });
+    const notesPdf = takeClassNotesPdf(roomCode); // host's whiteboard notes (PDF), so students get them
+    postEventToParent("meeting.left", { reason: leaveReason, recordingUrl, notesPdf });
 
     // Floating-popup tab (opened from the class frame inside the host site): hand the result back to
     // that frame, which reports it to the host site, then close this tab so the tutor is back there.
     if (typeof window !== "undefined" && window.parent === window && window.opener) {
       try {
-        window.opener.postMessage({ source: "mathsy-meet-popup", type: "left", reason: leaveReason, recordingUrl }, window.location.origin);
+        window.opener.postMessage({ source: "mathsy-meet-popup", type: "left", reason: leaveReason, recordingUrl, notesPdf }, window.location.origin);
       } catch {}
       window.close();
       // If the browser refuses to close the tab, go back to the host site instead of the Meet home page.
@@ -354,6 +356,7 @@ export const EmbedMeetingView: React.FC<EmbedMeetingViewProps> = ({
         postEventToParent("meeting.left", {
           reason: event.data.reason || "participant_left",
           recordingUrl: typeof event.data.recordingUrl === "string" ? event.data.recordingUrl : undefined,
+          notesPdf: event.data.notesPdf instanceof Blob ? event.data.notesPdf : undefined,
         });
       }
     };

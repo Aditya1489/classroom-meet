@@ -64,65 +64,89 @@ export async function exportWhiteboardToPdf(
       return true;
     }
 
-    const svgResult = await targetEditor.getSvgString(shapeIds);
-    if (!svgResult || !svgResult.svg) {
-      throw new Error("Could not render whiteboard SVG content");
-    }
-
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const svgBlob = new Blob([svgResult.svg], { type: "image/svg+xml;charset=utf-8" });
-      const url = URL.createObjectURL(svgBlob);
-
-      img.onload = () => {
-        try {
-          const width = Math.max(svgResult.width || 1280, 800);
-          const height = Math.max(svgResult.height || 720, 600);
-          const canvas = document.createElement("canvas");
-          const pad = 40;
-          canvas.width = Math.round(width + pad * 2);
-          canvas.height = Math.round(height + pad * 2);
-          const ctx = canvas.getContext("2d");
-          if (!ctx) throw new Error("Failed to acquire 2D canvas context");
-
-          // Clean white page background
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-          // Draw exported drawing
-          ctx.drawImage(img, pad, pad, width, height);
-
-          // Footer
-          ctx.fillStyle = "#888888";
-          ctx.font = "13px sans-serif";
-          ctx.fillText(`Mathsy Live Class Notes • Exported ${new Date().toLocaleString()}`, pad, canvas.height - 15);
-
-          const imgData = canvas.toDataURL("image/png");
-          const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
-          const pdf = new jsPDF({
-            orientation,
-            unit: "px",
-            format: [canvas.width, canvas.height],
-          });
-          pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
-          pdf.save(fileName);
-          URL.revokeObjectURL(url);
-          resolve(true);
-        } catch (err) {
-          URL.revokeObjectURL(url);
-          reject(err);
-        }
-      };
-
-      img.onerror = (e) => {
-        URL.revokeObjectURL(url);
-        reject(new Error("Failed to load SVG into image for PDF rendering"));
-      };
-
-      img.src = url;
-    });
+    const pdf = await renderWhiteboardPdf(targetEditor);
+    if (pdf) pdf.save(fileName);
+    return true;
   } catch (err: any) {
     console.error("[WhiteboardPDF] Export error:", err);
     throw err;
   }
+}
+
+/** Draws the current whiteboard page into a PDF; null when the page is blank. */
+async function renderWhiteboardPdf(editor: Editor): Promise<jsPDF | null> {
+  const shapeIds = Array.from(editor.getCurrentPageShapeIds());
+  if (shapeIds.length === 0) return null;
+  const svgResult = await editor.getSvgString(shapeIds);
+  if (!svgResult || !svgResult.svg) {
+    throw new Error("Could not render whiteboard SVG content");
+  }
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const svgBlob = new Blob([svgResult.svg], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(svgBlob);
+
+    img.onload = () => {
+      try {
+        const width = Math.max(svgResult.width || 1280, 800);
+        const height = Math.max(svgResult.height || 720, 600);
+        const canvas = document.createElement("canvas");
+        const pad = 40;
+        canvas.width = Math.round(width + pad * 2);
+        canvas.height = Math.round(height + pad * 2);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Failed to acquire 2D canvas context");
+
+        // Clean white page background
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw exported drawing
+        ctx.drawImage(img, pad, pad, width, height);
+
+        // Footer
+        ctx.fillStyle = "#888888";
+        ctx.font = "13px sans-serif";
+        ctx.fillText(`Mathsy Live Class Notes • Exported ${new Date().toLocaleString()}`, pad, canvas.height - 15);
+
+        const imgData = canvas.toDataURL("image/png");
+        const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+        const pdf = new jsPDF({
+          orientation,
+          unit: "px",
+          format: [canvas.width, canvas.height],
+        });
+        pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(pdf);
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load SVG into image for PDF rendering"));
+    };
+
+    img.src = url;
+  });
+}
+
+// The host's whiteboard notes, made when they end the class and handed to the host site on leave.
+let pendingClassNotes: { room: string; pdf: Blob } | null = null;
+
+export async function prepareClassNotesForHandOff(room: string): Promise<void> {
+  pendingClassNotes = null;
+  if (!currentActiveEditor) return;
+  const pdf = await renderWhiteboardPdf(currentActiveEditor);
+  if (pdf) pendingClassNotes = { room, pdf: pdf.output("blob") };
+}
+
+export function takeClassNotesPdf(room: string): Blob | undefined {
+  const notes = pendingClassNotes;
+  pendingClassNotes = null;
+  return notes && notes.room === room ? notes.pdf : undefined;
 }

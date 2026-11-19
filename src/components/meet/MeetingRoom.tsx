@@ -22,6 +22,7 @@ import { LocalMeetingRecorder } from "../../services/localRecorder";
 import { useDocumentPiP } from "../../hooks/useDocumentPiP";
 import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
 import { generateTabletCode } from "../../utils/tabletCode";
+import { prepareClassNotesForHandOff } from "../../utils/whiteboardPdf";
 import { useAuth } from "../../auth/authContext";
 import { dbClient, DbRoomKnock, API_BASE } from "../../lib/dbClient";
 import { Button } from "../ui/button";
@@ -2274,6 +2275,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const classEndedByHostRef = useRef(false);
   const handleEndClassClick = async () => {
     classEndedByHostRef.current = true;
+    // Snapshot the host's whiteboard notes now; they go to the host site with the leave event for students.
+    if (isHost) void prepareClassNotesForHandOff(meetingCode).catch((err) => console.warn("[MeetingRoom] Class notes PDF failed:", err));
     // Ending class while recording: stop it and open the save box (Drive / download / link) right away.
     if (localRecorderRef.current) void stopLocalRecording();
     // Tell students before leaving: once this socket leaves the room the broadcast can't reach them.
