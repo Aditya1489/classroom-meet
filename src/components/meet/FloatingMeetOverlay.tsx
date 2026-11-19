@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { scrollToBottomWithin } from "@/utils/scrollWithin";
 import { createPortal } from "react-dom";
 import {
   Mic,
@@ -175,7 +176,7 @@ export const FloatingMeetOverlay: React.FC<FloatingMeetOverlayProps> = ({
   // Auto-scroll chat to bottom
   useEffect(() => {
     if (activeTab === "chat") {
-      chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollToBottomWithin(chatBottomRef.current);
     }
   }, [chatMessages, activeTab]);
 

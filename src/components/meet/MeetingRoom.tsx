@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { scrollToBottomWithin } from "@/utils/scrollWithin";
 import {
   MathsyMediasoupEngine,
   RemoteParticipant,
@@ -630,7 +631,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
   useEffect(() => {
     if (mobileSidebarTab === "chat") {
-      mobileChatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollToBottomWithin(mobileChatBottomRef.current);
     }
   }, [chatMessages, mobileSidebarTab]);
 

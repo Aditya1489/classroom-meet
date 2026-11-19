@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { scrollToBottomWithin } from "@/utils/scrollWithin";
 import {
   MessageSquare,
   BarChart2,
@@ -186,7 +187,7 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
       const lastMsg = chatMessages[chatMessages.length - 1];
       const isMyMsg = lastMsg && lastMsg.senderId === currentUserId;
       if (isNearBottomRef.current || isMyMsg) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        scrollToBottomWithin(messagesEndRef.current);
       }
     }
   }, [chatMessages, activeTab, currentUserId]);

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { scrollToBottomWithin } from "@/utils/scrollWithin";
 import { ChatMessage } from "../../engine/mediasoupClient";
 import { MessageSquare, Send, X, ShieldCheck } from "lucide-react";
 
@@ -19,7 +20,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollToBottomWithin(messagesEndRef.current);
   }, [messages]);
 
   const handleSubmit = (e: React.FormEvent) => {
