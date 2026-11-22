@@ -12,7 +12,8 @@ import {
 } from "tldraw";
 import "tldraw/tldraw.css";
 import { AddSlideDialog } from "./slides/AddSlideDialog";
-import { insertBlankSlide, resolveInsertIndex, type SlidePosition } from "./slides/slideOps";
+import { clearSlideInk, deleteSlide, duplicateSlide, readSlidesFromBoard, removeAllSlides, reshapeBlankSlides, insertBlankSlide, moveSlide, recolorSlide, resolveInsertIndex, type SlidePosition } from "./slides/slideOps";
+import { SlideStrip, type SlideAction } from "./slides/SlideStrip";
 import { CompassShapeUtil } from "./shapes/CompassShapeUtil";
 import { ProtractorShapeUtil } from "./shapes/ProtractorShapeUtil";
 import { RulerShapeUtil } from "./shapes/RulerShapeUtil";
@@ -369,22 +370,106 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     try {
       const at = resolveInsertIndex(position, currentSlideIndex, slidesRef.current.length);
       const result = insertBlankSlide(editor, slidesRef.current, at, color);
-      setPresentationSlides(result.slides);
-      slidesRef.current = result.slides;
-      if (engine && roomCode) {
-        engine.broadcastWhiteboard({
-          type: "presentation-init",
-          roomCode,
-          senderId: myUserId || "local",
-          slides: result.slides,
-          slideIndex: result.index,
-          timestamp: Date.now(),
-        });
-      }
-      goToSlide(result.index);
+      publishSlides(result.slides, result.index);
     } catch (err) {
       console.error("[Whiteboard] Could not add slide:", err);
       toast.error("Could not add the slide. Please try again.");
+    }
+  };
+
+  /** Saves the new slide list, sends it to students and shows slide `index`. */
+  const publishSlides = (slides: PresentationSlide[], index: number) => {
+    setPresentationSlides(slides);
+    slidesRef.current = slides;
+    const at = Math.max(0, Math.min(index, slides.length - 1));
+    if (engine && roomCode) {
+      engine.broadcastWhiteboard({
+        type: "presentation-init",
+        roomCode,
+        senderId: myUserId || "local",
+        slides,
+        slideIndex: at,
+        timestamp: Date.now(),
+      });
+    }
+    if (slides.length) goToSlide(at);
+    else setCurrentSlideIndex(0);
+  };
+
+  // When the tutor's board changes shape (chat panel, window size, rotation, zen mode), "+ Slide" slides take the
+  // new shape once resizing stops. Students get the new slide sizes through the board sync, then the updated list.
+  const reshapeSlidesRef = useRef<() => void>(() => {});
+  reshapeSlidesRef.current = () => {
+    if (!editor || !isHost || slidesRef.current.length === 0) return;
+    const view = editor.getViewportScreenBounds();
+    if (view.w < 50 || view.h < 50) return;
+    if (!reshapeBlankSlides(editor, view.h / view.w)) return;
+    const slides = readSlidesFromBoard(editor);
+    const index = Math.min(currentSlideIndex, slides.length - 1);
+    setPresentationSlides(slides);
+    slidesRef.current = slides;
+    // Wait for the shape changes to reach students before telling them to refit.
+    window.setTimeout(() => {
+      if (!engine || !roomCode) return;
+      engine.broadcastWhiteboard({
+        type: "presentation-init",
+        roomCode,
+        senderId: myUserId || "local",
+        slides,
+        slideIndex: index,
+        timestamp: Date.now(),
+      });
+    }, 300);
+  };
+  useEffect(() => {
+    if (!editor || !isHost || typeof ResizeObserver === "undefined") return;
+    const container = editor.getContainer();
+    if (!container) return;
+    let timer = 0;
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        try {
+          reshapeSlidesRef.current();
+        } catch (err) {
+          console.warn("[Whiteboard] Could not reshape slides:", err);
+        }
+      }, 700);
+    });
+    observer.observe(container);
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [editor, isHost]);
+
+  // Tutor's slide strip (jump, reorder, duplicate, delete, recolour).
+  const [isSlideStripOpen, setIsSlideStripOpen] = useState(false);
+  const handleSlideAction = (a: SlideAction) => {
+    if (!editor || !isHost) return;
+    const slides = slidesRef.current;
+    try {
+      switch (a.type) {
+        case "go":
+          return goToSlide(a.index);
+        case "add-after":
+          setCurrentSlideIndex(a.index);
+          return setIsAddSlideOpen(true);
+        case "move":
+          return publishSlides(moveSlide(editor, slides, a.from, a.to), a.to);
+        case "duplicate": {
+          const r = duplicateSlide(editor, slides, a.index);
+          return publishSlides(r.slides, r.index);
+        }
+        case "delete":
+          return publishSlides(deleteSlide(editor, slides, a.index), Math.min(a.index, slides.length - 2));
+        case "color":
+          if (!recolorSlide(editor, slides[a.index], a.color)) toast.error("Only added slides can change colour.");
+          return;
+      }
+    } catch (err) {
+      console.error("[Whiteboard] Slide action failed:", err);
+      toast.error("Could not change the slides. Please try again.");
     }
   };
 
@@ -1191,25 +1276,22 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     });
   };
 
+  // Tutor only. With slides open it clears just the current slide's writing; otherwise the whole board. Asks first.
   const clearCanvas = () => {
-    if (!editor || !canDraw) return;
-    const shapes = editor.getCurrentPageShapes();
-    if (shapes.length === 0) return;
-
-    // If an imported PDF document or presentation slides exist on the canvas, protect them
-    // and clear only ink drawings/annotations until the host explicitly ends the class
-    const hasSlides = presentationSlides.length > 0 || shapes.some((s) => s.type === "image" && s.isLocked);
-    const toDelete = hasSlides
-      ? shapes.filter((s) => !s.isLocked || s.type !== "image").map((s) => s.id)
-      : shapes.map((s) => s.id);
-
-    if (toDelete.length === 0) {
-      toast.info("Document preserved. No ink annotations to clear.", { id: "clear-canvas" });
+    if (!editor || !isHost) return;
+    const slides = slidesRef.current;
+    if (slides.length > 0) {
+      const n = currentSlideIndex + 1;
+      if (!window.confirm(`Clear the writing on slide ${n}? The slide itself stays.`)) return;
+      const removed = clearSlideInk(editor, slides, currentSlideIndex);
+      toast.info(removed ? `Slide ${n} cleared` : `Nothing written on slide ${n}`, { id: "clear-canvas" });
       return;
     }
-
-    editor.deleteShapes(toDelete);
-    toast.info(hasSlides ? "Ink annotations cleared (document preserved)" : "Whiteboard canvas cleared", { id: "clear-canvas" });
+    const shapes = editor.getCurrentPageShapes();
+    if (shapes.length === 0) return;
+    if (!window.confirm("Clear the whole board for everyone?")) return;
+    editor.deleteShapes(shapes.map((s) => s.id));
+    toast.info("Whiteboard canvas cleared", { id: "clear-canvas" });
   };
 
   const WhiteboardCanvasBoundary = track(() => {
@@ -1458,12 +1540,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                       {isHost && presentationSlides.length > 0 && (
                         <button
                           onClick={() => {
-                            const slideShapeIds = presentationSlides.map((s) => s.shapeId).filter(Boolean);
-                            if (slideShapeIds.length > 0 && editor) {
-                              editor.deleteShapes(slideShapeIds);
-                            }
-                            setPresentationSlides([]);
-                            slidesRef.current = [];
+                            if (!window.confirm("Close the document? Its pages and the writing on them will be removed for everyone.")) return;
+                            // Slides are locked, so they are removed with the lock overridden; students are told the list is empty.
+                            if (editor) removeAllSlides(editor);
+                            publishSlides([], 0);
                             setIsOptionsMenuOpen(false);
                             setIsZenMode(false);
                             if (editor) {
@@ -1595,6 +1675,16 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                 className="min-h-8 shrink-0 rounded-xl border border-[#f59e0b]/40 bg-[#1a1814] px-2.5 text-xs font-bold text-[#f59e0b] hover:bg-white/10"
               >
                 + Slide
+              </button>
+            )}
+            {isHost && editor && presentationSlides.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsSlideStripOpen((v) => !v)}
+                title="All slides"
+                className={`min-h-8 shrink-0 rounded-xl border border-[#f59e0b]/40 px-2.5 text-xs font-bold hover:bg-white/10 ${isSlideStripOpen ? "bg-[#f59e0b] text-black" : "bg-[#1a1814] text-[#f59e0b]"}`}
+              >
+                Slides
               </button>
             )}
             <AddSlideDialog
@@ -2000,9 +2090,23 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
       {/* TLDraw Interactive Surface */}
       <div
-        className="flex-1 min-h-0 w-full relative bg-[#0e0d0b] overflow-hidden"
+        className={`flex-1 min-h-0 w-full relative bg-[#0e0d0b] overflow-hidden ${
+          // With slides open, the space around the fitted slide is dark (letterbox), so a slide that doesn't
+          // match the screen's shape still looks like one clean slide on any screen size.
+          presentationSlides.length > 0 ? "[&_.tl-background]:bg-[#0e0d0b]" : ""
+        }`}
         onMouseMove={resetControlsTimeout}
       >
+        {/* Tutor slide strip: sits at the top of the board, over the canvas */}
+        {isHost && editor && isSlideStripOpen && presentationSlides.length > 0 && (
+          <SlideStrip
+            editor={editor}
+            slides={presentationSlides}
+            currentIndex={currentSlideIndex}
+            onAction={handleSlideAction}
+            onClose={() => setIsSlideStripOpen(false)}
+          />
+        )}
         {/* Zen Mode Exit Indicator */}
         {isZenMode && (
           <button

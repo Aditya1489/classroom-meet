@@ -1,4 +1,4 @@
-import { AssetRecordType, createShapeId, type Editor, type TLAssetId, type TLShapeId } from "tldraw";
+import { AssetRecordType, createShapeId, type Editor, type TLAssetId, type TLShapeId, type TLShapePartial } from "tldraw";
 import type { PresentationSlide } from "../importers/whiteboardImporter";
 
 /**
@@ -186,4 +186,196 @@ export function insertBlankSlide(
   const next = readSlidesFromBoard(editor);
   const index = Math.max(0, next.findIndex((s) => s.shapeId === shapeId));
   return { slides: next, index, shapeId };
+}
+
+/** Gap between slides on this board (measured, or the default). */
+function slideGap(boxes: Box[]): number {
+  return boxes.length >= 2 ? Math.max(boxes[1].x - (boxes[0].x + boxes[0].w), 0) : DEFAULT_SLIDE_GAP;
+}
+
+/**
+ * Which top-level shapes belong to each slide: the slide itself plus anything whose centre is in its column
+ * (from the middle of the gap before it to the middle of the gap after it).
+ */
+function slideGroups(editor: Editor, slides: PresentationSlide[]) {
+  const boxes = slides.map((s) => editor.getShapePageBounds(s.shapeId) ?? s.bounds);
+  const gap = slideGap(boxes);
+  const pageId = editor.getCurrentPageId();
+  const top = editor.getCurrentPageShapes().filter((s) => s.parentId === pageId);
+  const groups = slides.map(() => [] as TLShapeId[]);
+  for (const shape of top) {
+    const b = editor.getShapePageBounds(shape.id);
+    if (!b) continue;
+    const i = boxes.findIndex((box) => b.center.x >= box.x - gap / 2 && b.center.x < box.x + box.w + gap / 2);
+    if (i >= 0) groups[i].push(shape.id);
+  }
+  return { boxes, gap, groups };
+}
+
+/** Lays slides out left to right in the given order (old indexes); each slide's drawings move with it. */
+function layoutInOrder(editor: Editor, slides: PresentationSlide[], order: number[], drop: number[] = []) {
+  const { boxes, gap, groups } = slideGroups(editor, slides);
+  let cursor = Math.min(...boxes.map((b) => b.x));
+  const updates: TLShapePartial[] = [];
+  for (const old of order) {
+    const dx = cursor - boxes[old].x;
+    if (dx) {
+      for (const id of groups[old]) {
+        const s = editor.getShape(id)!;
+        updates.push({ id, type: s.type, x: s.x + dx });
+      }
+    }
+    cursor += boxes[old].w + gap;
+  }
+  editor.run(
+    () => {
+      const toDelete = drop.flatMap((i) => groups[i]);
+      if (toDelete.length) editor.deleteShapes(toDelete);
+      if (updates.length) editor.updateShapes(updates);
+    },
+    { ignoreShapeLock: true }
+  );
+}
+
+/** Moves slide `from` to position `to`; returns the new slide list. */
+export function moveSlide(editor: Editor, slides: PresentationSlide[], from: number, to: number): PresentationSlide[] {
+  const order = slides.map((_, i) => i);
+  const [item] = order.splice(from, 1);
+  order.splice(Math.max(0, Math.min(to, order.length)), 0, item);
+  layoutInOrder(editor, slides, order);
+  return readSlidesFromBoard(editor);
+}
+
+/** Deletes a slide and what is drawn on it; later slides close the gap. */
+export function deleteSlide(editor: Editor, slides: PresentationSlide[], index: number): PresentationSlide[] {
+  layoutInOrder(editor, slides, slides.map((_, i) => i).filter((i) => i !== index), [index]);
+  return readSlidesFromBoard(editor);
+}
+
+/** Copies a slide (with its drawings) right after it. Returns the new list and the copy's index. */
+export function duplicateSlide(editor: Editor, slides: PresentationSlide[], index: number): { slides: PresentationSlide[]; index: number } {
+  const { boxes, gap, groups } = slideGroups(editor, slides);
+  const step = boxes[index].w + gap;
+  const fromX = boxes[index].x + boxes[index].w + gap / 2;
+  const pageId = editor.getCurrentPageId();
+  editor.run(
+    () => {
+      const later = editor
+        .getCurrentPageShapes()
+        .filter((s) => s.parentId === pageId)
+        .filter((s) => (editor.getShapePageBounds(s.id)?.center.x ?? -Infinity) >= fromX);
+      if (later.length) editor.updateShapes(later.map((s) => ({ id: s.id, type: s.type, x: s.x + step })));
+      editor.duplicateShapes(groups[index], { x: step, y: 0 });
+    },
+    { ignoreShapeLock: true }
+  );
+  const next = readSlidesFromBoard(editor);
+  return { slides: next, index: Math.min(index + 1, next.length - 1) };
+}
+
+/** Changes the background colour of a slide added with "+ Slide" (imported pages keep their picture). */
+export function recolorSlide(editor: Editor, slide: PresentationSlide, color: string): boolean {
+  const shape = editor.getShape(slide.shapeId);
+  if (!shape || !(shape.meta as { mathsySlide?: boolean })?.mathsySlide) return false;
+  const { w, h } = shape.props as { w: number; h: number };
+  const assetId = AssetRecordType.createId() as TLAssetId;
+  editor.run(
+    () => {
+      editor.createAssets([
+        {
+          id: assetId,
+          typeName: "asset",
+          type: "image",
+          props: { name: "Blank slide", src: solidColorDataUrl(color, w, h), w, h, mimeType: "image/svg+xml", isAnimated: false },
+          meta: { mathsySlide: true, color },
+        },
+      ]);
+      editor.updateShapes([{ id: shape.id, type: "image", props: { assetId }, meta: { ...shape.meta, color } }]);
+    },
+    { ignoreShapeLock: true }
+  );
+  return true;
+}
+
+/** Picture for a slide's thumbnail (its background image). */
+export function slideThumbSrc(editor: Editor, slide: PresentationSlide): string | null {
+  const asset = slide.assetId ? editor.getAsset(slide.assetId as TLAssetId) : undefined;
+  const src = (asset?.props as { src?: string | null } | undefined)?.src;
+  return src || null;
+}
+
+/** Closes the imported document: removes every slide, what is written on them and their images. */
+export function removeAllSlides(editor: Editor): void {
+  const slides = readSlidesFromBoard(editor);
+  if (!slides.length) return;
+  const { groups } = slideGroups(editor, slides);
+  const ids = Array.from(new Set([...groups.flat(), ...slides.map((s) => s.shapeId)]));
+  const assetIds = slides.map((s) => s.assetId).filter(Boolean) as TLAssetId[];
+  editor.run(
+    () => {
+      editor.deleteShapes(ids);
+      if (assetIds.length) editor.deleteAssets(assetIds);
+    },
+    { ignoreShapeLock: true }
+  );
+}
+
+/** Wipes the writing on one slide; the slide itself stays. Returns how many items were removed. */
+export function clearSlideInk(editor: Editor, slides: PresentationSlide[], index: number): number {
+  if (!slides[index]) return 0;
+  const { groups } = slideGroups(editor, slides);
+  const slideIds = new Set(slides.map((s) => s.shapeId));
+  const ids = groups[index].filter((id) => !slideIds.has(id));
+  if (ids.length) editor.run(() => editor.deleteShapes(ids), { ignoreShapeLock: true });
+  return ids.length;
+}
+
+/**
+ * Reshapes "+ Slide" slides to the tutor's board shape (height / width). Width stays the same so slides keep
+ * their place; only the height changes, and never below the writing on the slide (writing keeps its size and
+ * position). Imported pages keep their own shape. Not added to undo. Returns true if any slide changed.
+ */
+export function reshapeBlankSlides(editor: Editor, ratio: number): boolean {
+  if (!(ratio > 0) || !Number.isFinite(ratio)) return false;
+  const slides = readSlidesFromBoard(editor);
+  if (!slides.length) return false;
+  const { groups } = slideGroups(editor, slides);
+  const slideIds = new Set(slides.map((s) => s.shapeId));
+  const oldAssets: TLAssetId[] = [];
+  const changes: { shapeId: TLShapeId; assetId: TLAssetId; color: string; w: number; h: number }[] = [];
+  slides.forEach((slide, i) => {
+    const shape = editor.getShape(slide.shapeId);
+    const meta = shape?.meta as { mathsySlide?: boolean; color?: string } | undefined;
+    if (!shape || !meta?.mathsySlide) return;
+    const { w, h } = shape.props as { w: number; h: number };
+    let writingBottom = 0;
+    for (const id of groups[i]) {
+      if (slideIds.has(id)) continue;
+      const b = editor.getShapePageBounds(id);
+      if (b) writingBottom = Math.max(writingBottom, b.maxY - shape.y);
+    }
+    const target = Math.round(w * Math.min(Math.max(ratio, 0.3), 3));
+    const newH = Math.max(target, Math.ceil(writingBottom + 24));
+    if (Math.abs(newH - h) <= 2) return;
+    oldAssets.push((shape.props as { assetId: TLAssetId }).assetId);
+    changes.push({ shapeId: shape.id, assetId: AssetRecordType.createId() as TLAssetId, color: meta.color || "#ffffff", w, h: newH });
+  });
+  if (!changes.length) return false;
+  editor.run(
+    () => {
+      editor.createAssets(
+        changes.map((c) => ({
+          id: c.assetId,
+          typeName: "asset" as const,
+          type: "image" as const,
+          props: { name: "Blank slide", src: solidColorDataUrl(c.color, c.w, c.h), w: c.w, h: c.h, mimeType: "image/svg+xml", isAnimated: false },
+          meta: { mathsySlide: true, color: c.color },
+        }))
+      );
+      editor.updateShapes(changes.map((c) => ({ id: c.shapeId, type: "image", props: { assetId: c.assetId, h: c.h } })));
+      editor.deleteAssets(oldAssets.filter(Boolean));
+    },
+    { ignoreShapeLock: true, history: "ignore" }
+  );
+  return true;
 }
