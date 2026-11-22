@@ -415,6 +415,8 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
       avatarUrl: user.avatar_url || "",
       role: user.role,
       isHost: user.role === "tutor",
+      // Lets the role dialog grey out Tutor for accounts that have never been a tutor.
+      canTeach: user.role === "tutor" || user.role === "admin" || Boolean(user.can_teach),
       isPlatformSuperadmin: isSuperadmin,
       needsRoleSelection,
       onboarding_completed: user.onboarding_completed !== false,
@@ -450,12 +452,16 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
     }
 
     try {
+      // can_teach gets its own boolean parameter: reusing $1 for both the role and a text comparison made
+      // Postgres reject the statement ("inconsistent types deduced for parameter $1").
       await query(
-        "UPDATE users SET role = $1, can_teach = (can_teach OR $1 = 'tutor'), onboarding_completed = TRUE, updated_at = NOW() WHERE id = $2",
-        [role, user.id]
+        "UPDATE users SET role = $1, can_teach = (can_teach OR $3), onboarding_completed = TRUE, updated_at = NOW() WHERE id = $2",
+        [role, user.id, role === "tutor"]
       );
     } catch (dbErr: any) {
+      // Don't report success (and hand out a token for the new role) when the role was not saved.
       console.warn("[Auth /role DB Warning]:", dbErr.message);
+      return res.status(500).json({ error: "Could not save your role. Please try again." });
     }
 
     const token = generateToken({
