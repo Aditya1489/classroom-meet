@@ -6,7 +6,9 @@ interface AuthRoleModalProps {
   onClose: () => void;
   onContinueWithGoogle?: (role: "tutor" | "student") => void;
   onDirectSignIn?: () => void;
-  onUpdateRole?: (role: "tutor" | "student") => void;
+  onUpdateRole?: (role: "tutor" | "student") => void | Promise<void>;
+  /** False when this account has never been a tutor: the Tutor option is shown but can't be picked. */
+  canTeach?: boolean;
   isLoggedIn?: boolean;
   isOnboarding?: boolean;
   defaultRole?: "tutor" | "student";
@@ -23,6 +25,7 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
   isLoggedIn = false,
   isOnboarding = false,
   defaultRole = "tutor",
+  canTeach = true,
   title,
   subtitle,
 }) => {
@@ -123,8 +126,10 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
           <div className="space-y-3">
             {/* Tutor Option */}
             <div
-              onClick={() => setSelectedRole("tutor")}
-              className={`p-4 rounded-xl border transition-all cursor-pointer flex items-start gap-3.5 ${
+              onClick={() => canTeach && setSelectedRole("tutor")}
+              aria-disabled={!canTeach}
+              title={canTeach ? undefined : "Tutor access isn't enabled for this account. Please ask an admin."}
+              className={`p-4 rounded-xl border transition-all flex items-start gap-3.5 ${canTeach ? "cursor-pointer" : "cursor-not-allowed opacity-50"} ${
                 selectedRole === "tutor"
                   ? "bg-[#f59e0b]/15 border-[#f59e0b] ring-1 ring-[#f59e0b] shadow-lg shadow-[#f59e0b]/15"
                   : "bg-[#0e0d0b] border-[#f3eee6]/10 hover:border-[#f3eee6]/25 text-[#a39e94]"
@@ -151,6 +156,9 @@ export const AuthRoleModal: React.FC<AuthRoleModalProps> = ({
                   <span className="px-1.5 py-0.5 rounded bg-[#f59e0b]/20">Host Meetings</span>
                   <span className="px-1.5 py-0.5 rounded bg-[#f59e0b]/20">Whiteboard Master</span>
                 </div>
+                {!canTeach && (
+                  <p className="mt-2 text-[11px] font-semibold text-rose-300">Tutor access isn't enabled for this account. Ask an admin.</p>
+                )}
               </div>
             </div>
 

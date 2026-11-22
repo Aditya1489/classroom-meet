@@ -79,7 +79,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (isUUID) {
       try {
         const userRes = await query(
-          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed FROM users WHERE id = $1",
+          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed, can_teach FROM users WHERE id = $1",
           [decoded.id]
         );
         if (userRes.rows.length > 0) {
@@ -106,7 +106,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (decoded.email) {
       try {
         const userByEmailRes = await query(
-          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed FROM users WHERE LOWER(email) = LOWER($1)",
+          "SELECT id, email, full_name, avatar_url, role, is_platform_superadmin, is_active, onboarding_completed, can_teach FROM users WHERE LOWER(email) = LOWER($1)",
           [decoded.email]
         );
         if (userByEmailRes.rows.length > 0) {
@@ -441,7 +441,8 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
 
     // P0-4: Prevent self-service tutor privilege escalation for established accounts.
     // Allow role selection when the user is completing initial onboarding.
-    if (!isInitialOnboarding && role === "tutor" && user.role !== "tutor" && user.role !== "admin") {
+    // A tutor who switched to Student (can_teach) may switch back.
+    if (!isInitialOnboarding && role === "tutor" && user.role !== "tutor" && user.role !== "admin" && !user.can_teach) {
       return res.status(403).json({
         error: "Forbidden: Self-service role elevation to tutor is prohibited. Contact an administrator.",
         code: "FORBIDDEN_ROLE_ELEVATION",
@@ -449,7 +450,10 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
     }
 
     try {
-      await query("UPDATE users SET role = $1, onboarding_completed = TRUE, updated_at = NOW() WHERE id = $2", [role, user.id]);
+      await query(
+        "UPDATE users SET role = $1, can_teach = (can_teach OR $1 = 'tutor'), onboarding_completed = TRUE, updated_at = NOW() WHERE id = $2",
+        [role, user.id]
+      );
     } catch (dbErr: any) {
       console.warn("[Auth /role DB Warning]:", dbErr.message);
     }
@@ -472,6 +476,7 @@ authRouter.patch("/role", requireAuth, async (req: Request, res: Response) => {
         avatarUrl: user.avatar_url,
         role,
         isHost: role === "tutor",
+        canTeach: role === "tutor" || Boolean(user.can_teach) || user.role === "tutor" || user.role === "admin",
         needsRoleSelection: false,
         onboarding_completed: true,
       },

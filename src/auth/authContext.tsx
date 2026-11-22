@@ -10,6 +10,8 @@ export interface UserProfile {
   role?: "tutor" | "student";
   isPlatformSuperadmin?: boolean;
   needsRoleSelection?: boolean;
+  /** Has been a tutor, so may switch back to Tutor after switching to Student. */
+  canTeach?: boolean;
 }
 
 export interface PendingAuthAction {
@@ -32,7 +34,8 @@ interface AuthContextType {
   clearPendingAction: () => void;
   signInWithGoogle: (action?: PendingAuthAction) => Promise<void>;
   signUpWithGoogle: (role: "tutor" | "student", action?: PendingAuthAction) => Promise<void>;
-  updateRole: (role: "tutor" | "student") => Promise<void>;
+  /** Resolves true when the server saved the new role. */
+  updateRole: (role: "tutor" | "student") => Promise<boolean>;
   dismissOnboardingRole: () => void;
   joinAsGuest: (guestName: string, role?: "tutor" | "student") => Promise<void>;
   signOut: () => Promise<void>;
@@ -372,8 +375,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setNeedsOnboardingRole(false);
   };
 
-  const updateRole = async (newRole: "tutor" | "student") => {
-    if (!profile) return;
+  const updateRole = async (newRole: "tutor" | "student"): Promise<boolean> => {
+    if (!profile) {
+      toast.error("Please sign in again to change your role.");
+      return false;
+    }
     let token = localStorage.getItem("mathsy_meet_token");
     if (!token) {
       // If user selected role before async auth fetch finished, wait up to 3 seconds for token
@@ -383,7 +389,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (token) break;
       }
     }
-    if (!token) return;
+    if (!token) {
+      toast.error("Your sign-in has expired. Please sign in again to change your role.");
+      return false;
+    }
+    const wasOnboarding = Boolean(profile.needsRoleSelection) || needsOnboardingRole;
 
     try {
       const res = await fetch(`${API_BASE}/auth/role`, {
@@ -402,16 +412,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           isHost: newRole === "tutor",
           needsRoleSelection: false,
         };
-        saveSession(data.user || updated, data.token || token);
+        saveSession({ ...updated, ...(data.user || {}) }, data.token || token);
         setNeedsOnboardingRole(false);
-        toast.success(`Welcome to Mathsy Meet! Account setup as ${newRole === "tutor" ? "Tutor" : "Student"}.`);
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        toast.error(errData.error || "Failed to update role on server");
+        const label = newRole === "tutor" ? "Tutor" : "Student";
+        toast.success(wasOnboarding ? `Welcome to Mathsy Meet! Account setup as ${label}.` : `You're now using Mathsy Meet as a ${label}.`);
+        return true;
       }
+      const errData = await res.json().catch(() => ({}));
+      toast.error(
+        errData.code === "FORBIDDEN_ROLE_ELEVATION"
+          ? "Tutor access isn't enabled for this account. Please ask an admin."
+          : errData.error || "Could not change your role. Please try again."
+      );
+      return false;
     } catch (err) {
       console.warn("[Auth] Failed to update role on backend:", err);
-      toast.error("Failed to update role. Please try again.");
+      toast.error("Could not change your role. Check your internet and try again.");
+      return false;
     }
   };
 
