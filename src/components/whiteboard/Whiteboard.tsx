@@ -118,6 +118,15 @@ interface WhiteboardProps {
   onStateChange?: (snapshot: any, slides?: PresentationSlide[], slideIndex?: number) => void;
   letStudentsDraw?: boolean;
   onToggleStudentDrawing?: (allowed: boolean) => void;
+  /** Whole-class switch state (tutor's Options menu). Defaults to letStudentsDraw. */
+  classDrawingAllowed?: boolean;
+  /** Students the tutor allowed to draw one by one. */
+  drawAllowedStudents?: { id: string; name: string }[];
+  onSetStudentDrawing?: (peerId: string, allowed: boolean) => void;
+  /** Student asks the tutor for permission to draw. */
+  onRequestDrawing?: () => void;
+  /** Goes up by one each time the class reconnects after a drop; the board then catches up. */
+  reconnectCount?: number;
   remoteSnapshot?: any;
   onToggleVirtualLandscape?: () => void;
   isVirtualLandscape?: boolean;
@@ -143,6 +152,11 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   onStateChange,
   letStudentsDraw = false,
   onToggleStudentDrawing,
+  classDrawingAllowed,
+  drawAllowedStudents = [],
+  onSetStudentDrawing,
+  onRequestDrawing,
+  reconnectCount = 0,
   remoteSnapshot,
   onToggleVirtualLandscape,
   isVirtualLandscape = false,
@@ -315,6 +329,50 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
   }, [isZenMode, presentationSlides.length, currentSlideIndex]);
 
   const canDraw = Boolean(isHost || letStudentsDraw);
+  const classDrawOn = classDrawingAllowed ?? letStudentsDraw;
+  // After a reconnect the board catches up: the tutor re-sends it, a student asks the tutor for it.
+  const lastSnapshotReplyRef = useRef(0);
+  useEffect(() => {
+    if (!reconnectCount || !editor) return;
+    const t = window.setTimeout(() => {
+      try {
+        if (isHost) {
+          onBroadcast?.({ snapshot: getSnapshot(editor.store), slides: slidesRef.current, slideIndex: currentSlideIndex });
+        } else if (engine && roomCode) {
+          const base = { roomCode, senderId: myUserId || "local", timestamp: Date.now() };
+          engine.broadcastWhiteboard({ type: "request-snapshot", ...base });
+          engine.broadcastWhiteboard({ type: "request-viewport", ...base });
+        }
+      } catch (err) {
+        console.warn("[Whiteboard] Board catch-up after reconnect failed:", err);
+      }
+    }, 1500); // let the server finish re-joining us to the room first
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconnectCount]);
+  // The toolbar adapts to the board's own width (a side panel, split screen or rotation narrows it),
+  // not just the screen width: under 1000px labels give way to icons, under 640px the brand badge goes.
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const [toolbarWidth, setToolbarWidth] = useState(Infinity);
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setToolbarWidth(entry.contentRect.width));
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+  const compactBar = toolbarWidth < 1000;
+  const tightBar = toolbarWidth < 640;
+  // Student "Ask to draw": wait a little before allowing another request.
+  const [drawRequestSent, setDrawRequestSent] = useState(false);
+  useEffect(() => {
+    if (!drawRequestSent) return;
+    const t = window.setTimeout(() => setDrawRequestSent(false), 15000);
+    return () => window.clearTimeout(t);
+  }, [drawRequestSent]);
+  useEffect(() => {
+    if (canDraw) setDrawRequestSent(false);
+  }, [canDraw]);
 
   const goToSlide = (index: number) => {
     if (!editor || slidesRef.current.length === 0) return;
@@ -1129,6 +1187,17 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             console.warn("[Whiteboard] Error aligning to host viewport:", err);
           }
         }
+      } else if (data.type === "request-snapshot") {
+        // A student came back after a drop: send the whole board once (at most every 3s for many students).
+        const ed = editorRef.current || editor;
+        if (isHost && ed && Date.now() - lastSnapshotReplyRef.current > 3000) {
+          lastSnapshotReplyRef.current = Date.now();
+          try {
+            onBroadcast?.({ snapshot: getSnapshot(ed.store), slides: slidesRef.current, slideIndex: currentSlideIndex });
+          } catch (err) {
+            console.warn("[Whiteboard] Could not send board after reconnect:", err);
+          }
+        }
       } else if (data.type === "request-viewport") {
         if (isHost && (editorRef.current || editor)) {
           broadcastViewport(true);
@@ -1411,7 +1480,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
       {/* Top Header / Geometry Tool Bar (Auto-hides in Zen Presentation Mode when idle) */}
       {!hideTopBar && (!isZenMode || isControlsVisible) && (
-        <div className="flex items-center justify-between px-2 sm:px-4 py-1.5 sm:py-2 bg-[#16130f] border-b border-[#f3eee6]/[0.08] shrink-0 gap-2 relative z-50 overflow-visible">
+        <div ref={toolbarRef} className="flex items-center justify-between px-2 sm:px-4 py-1.5 sm:py-2 bg-[#16130f] border-b border-[#f3eee6]/[0.08] shrink-0 gap-2 relative z-50 overflow-visible">
           {/* Left: Options Hamburger + Math Canvas */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 overflow-visible">
             {/* Whiteboard Options Hamburger Dropdown */}
@@ -1422,7 +1491,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-[#f3eee6] bg-[#1a1814] hover:bg-[#221f1a] border border-[#f3eee6]/15 hover:border-[#f59e0b]/40 rounded-lg transition shrink-0 cursor-pointer shadow-sm active:scale-95"
               >
                 <Menu className="w-3.5 h-3.5 text-[#f59e0b]" />
-                <span className="font-mono text-[11px] hidden sm:inline">Options</span>
+                <span className={`font-mono text-[11px] ${compactBar ? "hidden" : "hidden sm:inline"}`}>Options</span>
                 <ChevronDown className={`w-3 h-3 text-zinc-400 transition-transform ${isOptionsMenuOpen ? "rotate-180" : ""}`} />
               </button>
 
@@ -1625,13 +1694,13 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                       {isHost && (
                         <button
                           onClick={() => {
-                            onToggleStudentDrawing?.(!letStudentsDraw);
+                            onToggleStudentDrawing?.(!classDrawOn);
                             setIsOptionsMenuOpen(false);
                           }}
                           className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-[#f3eee6] hover:text-white bg-[#221f1a] hover:bg-[#2c2822] border border-[#f3eee6]/15 hover:border-[#f59e0b]/50 rounded-xl transition cursor-pointer active:scale-95 shadow-sm"
                         >
                           <span className="flex items-center gap-2">
-                            {letStudentsDraw ? (
+                            {classDrawOn ? (
                               <Unlock className="w-3.5 h-3.5 text-emerald-400" />
                             ) : (
                               <Lock className="w-3.5 h-3.5 text-amber-400" />
@@ -1640,14 +1709,33 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                           </span>
                           <span
                             className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                              letStudentsDraw
+                              classDrawOn
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                                 : "bg-zinc-800 text-zinc-300 border border-zinc-700"
                             }`}
                           >
-                            {letStudentsDraw ? "Allowed" : "Locked"}
+                            {classDrawOn ? "Allowed" : "Locked"}
                           </span>
                         </button>
+                      )}
+
+                      {/* Students allowed to draw one by one (Host Only) */}
+                      {isHost && drawAllowedStudents.length > 0 && (
+                        <div className="rounded-xl border border-[#f3eee6]/15 bg-[#221f1a] p-2">
+                          <p className="px-1 pb-1 text-[10px] font-bold uppercase tracking-wide text-zinc-400">Can draw</p>
+                          {drawAllowedStudents.map((st) => (
+                            <div key={st.id} className="flex items-center justify-between gap-2 px-1 py-0.5">
+                              <span className="truncate text-xs text-zinc-100">{st.name}</span>
+                              <button
+                                type="button"
+                                onClick={() => onSetStudentDrawing?.(st.id, false)}
+                                className="min-h-8 shrink-0 rounded-lg px-2 text-[11px] font-semibold text-rose-300 hover:bg-rose-500/15"
+                              >
+                                Stop
+                              </button>
+                            </div>
+                          ))}
+                        </div>
                       )}
 
                       {/* Focus Mode Toggle */}
@@ -1674,15 +1762,30 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               )}
             </div>
 
-            {/* Math Canvas Brand Badge */}
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#f59e0b]/10 border border-[#f59e0b]/20 text-[#f59e0b] text-xs font-semibold shrink-0">
+            {/* Math Canvas Brand Badge (icon only when the bar is narrow, hidden when very narrow) */}
+            <div title="Math Canvas" className={`${tightBar ? "hidden" : "flex"} items-center gap-1.5 px-2 py-1 rounded-lg bg-[#f59e0b]/10 border border-[#f59e0b]/20 text-[#f59e0b] text-xs font-semibold shrink-0`}>
               <Sparkles className="w-3.5 h-3.5" />
-              <span className="font-mono text-[11px] whitespace-nowrap">Math Canvas</span>
+              {!compactBar && <span className="font-mono text-[11px] whitespace-nowrap">Math Canvas</span>}
             </div>
           </div>
 
           {/* Center Cluster: Slide Controls + Annotation Tools Bar (Directly between Math Canvas & Fit, off the whiteboard screen) */}
-          <div className="flex items-center gap-1 sm:gap-2 shrink-0 overflow-x-auto no-scrollbar max-w-[65vw]">
+          <div className="flex min-w-0 flex-1 items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar [&>*:first-child]:ml-auto [&>*:last-child]:mr-auto">
+            {!isHost && !canDraw && onRequestDrawing && (
+              <button
+                type="button"
+                disabled={drawRequestSent}
+                onClick={() => {
+                  onRequestDrawing();
+                  setDrawRequestSent(true);
+                  toast.info("Asked the tutor. You can draw once they allow it.", { id: "draw-request" });
+                }}
+                title="Ask the tutor to let you draw"
+                className="min-h-8 max-sm:min-h-11 shrink-0 rounded-xl border border-[#f59e0b]/40 bg-[#1a1814] px-2.5 text-xs font-bold text-[#f59e0b] hover:bg-white/10 disabled:opacity-60"
+              >
+                {compactBar ? (drawRequestSent ? "✓ Sent" : "✋ Ask") : drawRequestSent ? "Request sent" : "✋ Ask to draw"}
+              </button>
+            )}
             {isHost && editor && (
               <button
                 type="button"
@@ -2064,7 +2167,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#f3eee6] bg-[#221f1a] hover:bg-[#2a2721] border border-[#f3eee6]/15 hover:border-amber-400/40 rounded-lg transition shrink-0 cursor-pointer active:scale-95"
             >
               <ZoomIn className="w-3.5 h-3.5 text-[#f59e0b]" />
-              <span className="font-mono text-[11px]">Fit</span>
+              {!compactBar && <span className="font-mono text-[11px]">Fit</span>}
             </button>
 
             {/* Quick Action Pill 2: Full (Fullscreen Toggle) */}
@@ -2084,7 +2187,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               ) : (
                 <Maximize2 className="w-3.5 h-3.5 text-[#f59e0b]" />
               )}
-              <span className="font-mono text-[11px] hidden sm:inline">Full</span>
+              {!compactBar && <span className="font-mono text-[11px] hidden sm:inline">Full</span>}
             </button>
 
             {/* Close Button (Host only) */}

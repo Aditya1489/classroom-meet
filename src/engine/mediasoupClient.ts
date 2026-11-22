@@ -14,7 +14,12 @@ export interface RemoteParticipant {
   screenAudioTrack?: MediaStreamTrack;
   isSpeaking?: boolean;
   isHandRaised?: boolean;
+  /** This person's own internet quality, as they report it in their heartbeat. */
+  netQuality?: NetQuality;
 }
+
+/** Connection quality from round-trip time and packet loss; "offline" while the server connection is down. */
+export type NetQuality = "good" | "fair" | "poor" | "offline";
 
 export interface ChatMessage {
   id: string;
@@ -259,6 +264,19 @@ export class MathsyMediasoupEngine {
   public onReaction?: (reaction: ReactionEvent) => void;
   public onWhiteboardData?: (data: any) => void;
   public onConnectionStateChange?: (state: "connecting" | "connected" | "disconnected" | "failed", errorMessage?: string) => void;
+  /** Auto-reconnect: fired on each retry after a drop, and once the class is joined again. */
+  public onReconnecting?: (attempt: number) => void;
+  public onReconnected?: () => void;
+  /** This device's own connection quality (checked every 4s). */
+  public netQuality: NetQuality = "good";
+  public onNetQualityChange?: (quality: NetQuality) => void;
+  private hasConnectedOnce = false;
+  private netStatsInterval: any = null;
+  private lastInbound = { lost: 0, received: 0 };
+  private onBrowserOnline = () => {
+    // Back on the network: retry straight away instead of waiting for the next backoff step.
+    if (this.socket && !this.socket.connected) this.socket.connect();
+  };
   public onUnmuteRequest?: (request: MicRequestEvent) => void;
   public onControlMessage?: (msg: ControlMessageEvent) => void;
   public onChatLockChange?: (locked: boolean) => void;
@@ -287,6 +305,12 @@ export class MathsyMediasoupEngine {
   public onHandLowerAll?: () => void;
   public onChatPinChange?: (pinnedMessage: any) => void;
   public onDrawingPermissionChange?: (allowed: boolean) => void;
+  /** Per-student drawing: this student's own permission, requests (tutor) and the allowed list (tutor). */
+  public canDrawSelf: boolean = false;
+  public drawAllowedPeers: { id: string; name: string }[] = [];
+  public onMyDrawPermissionChange?: (allowed: boolean) => void;
+  public onDrawRequest?: (peerId: string, name: string) => void;
+  public onDrawAllowedListChange?: (peers: { id: string; name: string }[]) => void;
   public onCameraOffRequest?: (data: { studentId: string; studentName: string; reason?: string }) => void;
   public onCameraOffResponse?: (data: { studentId: string; approved: boolean; reason?: string }) => void;
 
@@ -438,10 +462,15 @@ export class MathsyMediasoupEngine {
                 userId: this.currentUserId,
                 name: this.myName,
                 roomCode: this.roomId,
+                netQuality: this.netQuality,
                 timestamp: Date.now(),
               });
             }
           }, 4000);
+
+          // Own connection quality, checked every 4 seconds.
+          if (this.netStatsInterval) clearInterval(this.netStatsInterval);
+          this.netStatsInterval = setInterval(() => void this.measureNetQuality(), 4000);
 
           // Start peer liveness watchdog (every 4 seconds)
           if (this.livenessWatchdogInterval) clearInterval(this.livenessWatchdogInterval);
@@ -518,7 +547,8 @@ export class MathsyMediasoupEngine {
         query: queryPayload,
         transports: ["websocket", "polling"],
         reconnection: true,
-        reconnectionAttempts: 10,
+        // Keep trying for as long as the class page is open (network drops, phone sleep, switching Wi-Fi/4G).
+        reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
       });
@@ -556,9 +586,21 @@ export class MathsyMediasoupEngine {
 
       this.socket.on("connect", () => {
         console.log("[MathsyMeet Engine] Socket connected to Mediasoup server:", this.signalingUrl);
+        const isReconnect = this.hasConnectedOnce;
+        this.hasConnectedOnce = true;
         this.onConnectionStateChange?.("connected");
         finishConnect();
+        if (isReconnect) {
+          // The server re-runs the join (roomJoined), which recreates transports and re-publishes camera/mic.
+          this.setNetQuality("good");
+          this.onReconnected?.();
+        }
       });
+      this.socket.io.on("reconnect_attempt", (attempt: number) => this.onReconnecting?.(attempt));
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", this.onBrowserOnline);
+        window.addEventListener("online", this.onBrowserOnline);
+      }
 
       this.socket.on("connect_error", (err) => {
         console.error("[MathsyMeet Engine] Socket connection error:", err.message);
@@ -568,6 +610,7 @@ export class MathsyMediasoupEngine {
       this.socket.on("disconnect", (reason) => {
         console.log("[MathsyMeet Engine] Socket disconnected:", reason);
         this.onConnectionStateChange?.("disconnected", reason);
+        this.setNetQuality("offline");
         try { this.sendTransport?.close(); } catch {}
         try { this.recvTransport?.close(); } catch {}
         this.sendTransport = null;
@@ -588,6 +631,8 @@ export class MathsyMediasoupEngine {
           this.demoRemainingSec = typeof data.remainingSec === "number" ? data.remainingSec : null;
           if (data.whiteboardSnapshot) this.whiteboardSnapshot = data.whiteboardSnapshot;
           if (typeof data.letStudentsDraw === "boolean") this.letStudentsDraw = data.letStudentsDraw;
+          this.canDrawSelf = Boolean(data.canDrawSelf);
+          if (Array.isArray(data.drawAllowedPeers)) this.drawAllowedPeers = data.drawAllowedPeers;
           if (data.pinnedMessage) this.pinnedMessage = data.pinnedMessage;
           if (typeof data.isChatLocked === "boolean") this.isChatLocked = data.isChatLocked;
           console.log(`[MathsyMeet Engine] Server confirmed role: ${this.serverRole}, isOwner: ${this.isServerOwner}, isDemo: ${this.isDemo}`);
@@ -750,6 +795,20 @@ export class MathsyMediasoupEngine {
         this.letStudentsDraw = Boolean(payload?.allowed);
         console.log("[MathsyMeet Engine] Received whiteboard:drawingPermission:", this.letStudentsDraw);
         this.onDrawingPermissionChange?.(this.letStudentsDraw);
+      });
+
+      this.socket.on("whiteboard:myDrawPermission", (payload: any) => {
+        this.canDrawSelf = Boolean(payload?.allowed);
+        this.onMyDrawPermissionChange?.(this.canDrawSelf);
+      });
+
+      this.socket.on("whiteboard:drawRequest", (payload: any) => {
+        if (payload?.peerId) this.onDrawRequest?.(String(payload.peerId), String(payload.name || "A student"));
+      });
+
+      this.socket.on("whiteboard:drawAllowedList", (payload: any) => {
+        this.drawAllowedPeers = Array.isArray(payload?.peers) ? payload.peers : [];
+        this.onDrawAllowedListChange?.(this.drawAllowedPeers);
       });
 
       this.socket.on("cameraOffRequest", (payload: any) => {
@@ -1085,6 +1144,19 @@ export class MathsyMediasoupEngine {
           if (msg.name) this.peerLastSeen.set(msg.name.trim().toLowerCase(), now);
 
           if (msg.controlAction === "PEER_HEARTBEAT") {
+            const q = msg.netQuality;
+            if (sender && (q === "good" || q === "fair" || q === "poor" || q === "offline")) {
+              let changed = false;
+              for (const [key, part] of Array.from(this.participants.entries())) {
+                if (key === sender || stripPeerSuffix(key) === sender || part.userId === sender) {
+                  if (part.netQuality !== q) {
+                    part.netQuality = q;
+                    changed = true;
+                  }
+                }
+              }
+              if (changed) this.notifyParticipants();
+            }
             return;
           }
 
@@ -2305,6 +2377,16 @@ export class MathsyMediasoupEngine {
     this.socket?.emit("whiteboard:toggleDrawing", { allowed });
   }
 
+  /** Student asks the tutor for permission to draw. */
+  public requestDrawing() {
+    this.socket?.emit("whiteboard:requestDraw");
+  }
+
+  /** Tutor allows or stops one student's drawing. */
+  public setStudentDrawing(peerId: string, allowed: boolean) {
+    this.socket?.emit("whiteboard:setStudentDraw", { peerId, allowed });
+  }
+
   public forceMuteStudent(studentId: string) {
     this.socket?.emit("forceMute", { studentId });
   }
@@ -2462,6 +2544,11 @@ export class MathsyMediasoupEngine {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
+    if (this.netStatsInterval) {
+      clearInterval(this.netStatsInterval);
+      this.netStatsInterval = null;
+    }
+    if (typeof window !== "undefined") window.removeEventListener("online", this.onBrowserOnline);
     if (this.livenessWatchdogInterval) {
       clearInterval(this.livenessWatchdogInterval);
       this.livenessWatchdogInterval = null;
@@ -2492,6 +2579,45 @@ export class MathsyMediasoupEngine {
 
   private notifyParticipants() {
     this.onParticipantsChange?.(Array.from(this.participants.values()));
+  }
+
+  private setNetQuality(q: NetQuality) {
+    if (this.netQuality === q) return;
+    this.netQuality = q;
+    this.onNetQualityChange?.(q);
+  }
+
+  /** Reads round-trip time and packet loss from the media connections and grades them. */
+  private async measureNetQuality() {
+    if (!this.socket?.connected || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+      return this.setNetQuality("offline");
+    }
+    let rtt = 0;
+    let lost = 0;
+    let received = 0;
+    let remoteLossFraction = 0;
+    for (const transport of [this.recvTransport, this.sendTransport]) {
+      if (!transport || transport.closed) continue;
+      try {
+        const stats: RTCStatsReport = await transport.getStats();
+        stats.forEach((r: any) => {
+          if (r.type === "candidate-pair" && r.nominated && typeof r.currentRoundTripTime === "number") {
+            rtt = Math.max(rtt, r.currentRoundTripTime);
+          } else if (r.type === "inbound-rtp") {
+            lost += r.packetsLost || 0;
+            received += r.packetsReceived || 0;
+          } else if (r.type === "remote-inbound-rtp" && typeof r.fractionLost === "number") {
+            remoteLossFraction = Math.max(remoteLossFraction, r.fractionLost);
+          }
+        });
+      } catch {}
+    }
+    // Loss over the last interval only.
+    const dLost = Math.max(0, lost - this.lastInbound.lost);
+    const dRecv = Math.max(0, received - this.lastInbound.received);
+    this.lastInbound = { lost, received };
+    const loss = Math.max(dLost + dRecv > 0 ? dLost / (dLost + dRecv) : 0, remoteLossFraction);
+    this.setNetQuality(rtt > 0.4 || loss > 0.08 ? "poor" : rtt > 0.2 || loss > 0.03 ? "fair" : "good");
   }
 
   public async pauseConsumer(consumerId: string) {

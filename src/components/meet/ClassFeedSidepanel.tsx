@@ -1,3 +1,5 @@
+import { NetBars } from "./NetBars";
+import type { NetQuality } from "@/engine/mediasoupClient";
 import React, { useState, useRef, useEffect } from "react";
 import { scrollToBottomWithin } from "@/utils/scrollWithin";
 import {
@@ -923,6 +925,7 @@ export const ClassFeedSidepanel: React.FC<ClassFeedSidepanelProps> = ({
                     <p className="text-[10px] font-bold text-[#f3eee6] truncate flex items-center gap-1 font-mono">
                       {p.name} {isMe && "(You)"}
                       {isTutorRole && <Shield className="w-2.5 h-2.5 text-[#f59e0b] fill-[#f59e0b]/20 shrink-0" />}
+                      {!isMe && <NetBars quality={(p as { netQuality?: NetQuality }).netQuality} />}
                     </p>
                   </div>
 

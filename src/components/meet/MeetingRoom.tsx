@@ -22,6 +22,8 @@ import { SaveRecordingDialog } from "../recording/SaveRecordingDialog";
 import { LocalMeetingRecorder } from "../../services/localRecorder";
 import { useDocumentPiP } from "../../hooks/useDocumentPiP";
 import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
+import { NetBars } from "./NetBars";
+import type { NetQuality } from "@/engine/mediasoupClient";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { prepareClassNotesForHandOff } from "../../utils/whiteboardPdf";
 import { useAuth } from "../../auth/authContext";
@@ -386,6 +388,67 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [screenZoom, setScreenZoom] = useState(1);
   const [isPipMinimized, setIsPipMinimized] = useState(false);
+  // Auto-reconnect and this device's connection quality.
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [reconnectStartedAt, setReconnectStartedAt] = useState<number | null>(null);
+  const [reconnectCount, setReconnectCount] = useState(0);
+  const [myNetQuality, setMyNetQuality] = useState<NetQuality>("good");
+  const reconnectingRef = useRef(false);
+  const [, setReconnectTick] = useState(0);
+  useEffect(() => {
+    if (!isReconnecting) return;
+    const t = setInterval(() => setReconnectTick((n) => n + 1), 5000);
+    return () => clearInterval(t);
+  }, [isReconnecting]);
+  // Camera tile over the whiteboard: drag it to any corner so it never sits on what matters; remembered per device.
+  type PipCorner = "br" | "bl" | "tr" | "tl";
+  const [pipCorner, setPipCorner] = useState<PipCorner>(() => {
+    try {
+      const saved = localStorage.getItem("mathsy_pip_corner");
+      return saved === "bl" || saved === "tr" || saved === "tl" ? saved : "br";
+    } catch {
+      return "br";
+    }
+  });
+  const [pipDrag, setPipDrag] = useState<{ x: number; y: number } | null>(null);
+  const pipDragStart = useRef<{ x: number; y: number; id: number } | null>(null);
+  const pipCornerClass = {
+    br: "bottom-20 right-3 md:bottom-4 md:right-4",
+    bl: "bottom-20 left-3 md:bottom-4 md:left-4",
+    tr: "top-16 right-3 md:right-4",
+    tl: "top-16 left-3 md:left-4",
+  }[pipCorner];
+  const pipDragHandlers = {
+    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
+      if ((e.target as HTMLElement).closest("[data-pip-button]")) return;
+      pipDragStart.current = { x: e.clientX, y: e.clientY, id: e.pointerId };
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLElement>) => {
+      const start = pipDragStart.current;
+      if (!start || start.id !== e.pointerId) return;
+      setPipDrag({ x: e.clientX - start.x, y: e.clientY - start.y });
+    },
+    onPointerUp: (e: React.PointerEvent<HTMLElement>) => {
+      const start = pipDragStart.current;
+      pipDragStart.current = null;
+      setPipDrag(null);
+      if (!start || Math.hypot(e.clientX - start.x, e.clientY - start.y) < 8) return;
+      const parent = e.currentTarget.parentElement?.getBoundingClientRect();
+      if (!parent) return;
+      const right = e.clientX > parent.left + parent.width / 2;
+      const bottom = e.clientY > parent.top + parent.height / 2;
+      const corner: PipCorner = `${bottom ? "b" : "t"}${right ? "r" : "l"}` as PipCorner;
+      setPipCorner(corner);
+      try {
+        localStorage.setItem("mathsy_pip_corner", corner);
+      } catch {}
+    },
+    onPointerCancel: () => {
+      pipDragStart.current = null;
+      setPipDrag(null);
+    },
+  };
 
   useEffect(() => {
     const handleOrientationChange = () => {
@@ -469,6 +532,9 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [initialWhiteboardSnapshot, setInitialWhiteboardSnapshot] = useState<any>(null);
   const [remoteWhiteboardSnapshot, setRemoteWhiteboardSnapshot] = useState<any>(null);
   const [letStudentsDraw, setLetStudentsDraw] = useState(false);
+  // Per-student drawing: this student's own permission, and (tutor) the students allowed one by one.
+  const [myDrawAllowed, setMyDrawAllowed] = useState(false);
+  const [drawAllowedPeers, setDrawAllowedPeers] = useState<{ id: string; name: string }[]>([]);
 
   // Active Room-Wide Whiteboard & Slide Persistence (Preserved across view toggles until host ends meeting)
   const [roomWhiteboardSnapshot, setRoomWhiteboardSnapshot] = useState<any>(() => {
@@ -871,7 +937,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
 
     engine.onConnectionStateChange = (state, errMsg?: string) => {
       setConnectionState(state);
-      if (state === "connected") {
+      if (state === "disconnected") {
+        // A drop mid-class: the engine keeps retrying; show the banner instead of a frozen screen.
+        if (!reconnectingRef.current) {
+          reconnectingRef.current = true;
+          setIsReconnecting(true);
+          setReconnectStartedAt(Date.now());
+        }
+      } else if (state === "connected" && reconnectingRef.current) {
+        reconnectingRef.current = false;
+        setIsReconnecting(false);
+        setReconnectStartedAt(null);
+        setConnectionError(null);
+        setReconnectCount((n) => n + 1);
+        toast.success("Back online. Your class continues.", { id: "reconnected" });
+        loadChatHistory();
+      } else if (state === "connected") {
         setConnectionError(null);
         toast.success(`Joined room: ${meetingCode}`);
         loadChatHistory();
@@ -920,6 +1001,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       if (typeof roomData?.letStudentsDraw === "boolean") {
         setLetStudentsDraw(roomData.letStudentsDraw);
       }
+      setMyDrawAllowed(Boolean(engine.canDrawSelf));
+      setDrawAllowedPeers(engine.drawAllowedPeers || []);
       if (roomData?.pinnedMessage) {
         setPinnedMessage(roomData.pinnedMessage);
       }
@@ -934,6 +1017,25 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
         setShowCameraGateModal(false);
       }
     };
+
+    // Whole-class drawing switch (live, for tutor and students).
+    engine.onDrawingPermissionChange = (allowed: boolean) => setLetStudentsDraw(allowed);
+    engine.onMyDrawPermissionChange = (allowed: boolean) => {
+      setMyDrawAllowed(allowed);
+      toast[allowed ? "success" : "info"](allowed ? "The tutor allowed you to draw on the board." : "Drawing on the board is off for you now.", { id: "my-draw-permission" });
+    };
+    engine.onDrawAllowedListChange = (peers) => setDrawAllowedPeers(peers);
+    engine.onDrawRequest = (peerId: string, name: string) => {
+      if (!isHostRef.current) return;
+      toast(`${name} wants to draw on the board`, {
+        id: `draw-request-${peerId}`,
+        duration: 30000,
+        action: { label: "Allow", onClick: () => engineRef.current?.setStudentDrawing(peerId, true) },
+        cancel: { label: "Deny", onClick: () => engineRef.current?.setStudentDrawing(peerId, false) },
+      });
+    };
+
+    engine.onNetQualityChange = (q) => setMyNetQuality(q);
 
     engine.onDemoRoomEnded = () => {
       setIsDemoEnded(true);
@@ -2487,6 +2589,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
       ref={playerRef}
       className="flex flex-col h-[100dvh] w-full min-h-0 bg-[#0e0d0b] text-[#f3eee6] overflow-hidden select-none font-sans relative"
     >
+      {/* Auto-reconnect banner */}
+      {isReconnecting && (
+        <div role="status" aria-live="polite" className="fixed left-1/2 top-3 z-[6000] flex -translate-x-1/2 items-center gap-2 rounded-full border border-amber-500/40 bg-[#16130f]/95 px-4 py-2 text-xs font-semibold text-amber-200 shadow-2xl backdrop-blur">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+          <span>Reconnecting… your class will continue automatically</span>
+          {reconnectStartedAt && Date.now() - reconnectStartedAt > 30000 && (
+            <button type="button" onClick={() => window.location.reload()} className="ml-1 rounded-full bg-amber-500 px-3 py-1 text-[11px] font-bold text-black">
+              Reload
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Floating Exit Focus Mode Pill */}
       {isFocusMode && (
         <button
@@ -2543,6 +2658,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
           <div className="hidden sm:flex items-center gap-1.5 bg-[#1a1814] border border-[#f3eee6]/10 px-2.5 py-1 rounded-full text-xs font-mono text-[#a39e94]">
             <Clock className="w-3.5 h-3.5 text-[#a39e94]" />
             <span>{formatDuration(elapsedSeconds)}</span>
+            <NetBars quality={myNetQuality} className="ml-1" />
           </div>
 
           {/* Role Badge */}
@@ -3008,8 +3124,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     initialSlideIndex={roomSlideIndex}
                     onStateChange={handleWhiteboardStateChange}
                     remoteSnapshot={remoteWhiteboardSnapshot}
-                    letStudentsDraw={letStudentsDraw}
-                    onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
+                    letStudentsDraw={letStudentsDraw || myDrawAllowed}
+                    onToggleStudentDrawing={(allowed) => {
+                      // Show the change at once; the server's reply (and students) follow.
+                      setLetStudentsDraw(allowed);
+                      engineRef.current?.toggleWhiteboardDrawing(allowed);
+                    }}
+                    classDrawingAllowed={letStudentsDraw}
+                    drawAllowedStudents={drawAllowedPeers}
+                    onSetStudentDrawing={(peerId, allowed) => engineRef.current?.setStudentDrawing(peerId, allowed)}
+                    onRequestDrawing={() => engineRef.current?.requestDrawing()}
+                    reconnectCount={reconnectCount}
                     onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
                     onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
                     isFocusMode={isFocusMode}
@@ -3627,8 +3752,17 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 initialSlideIndex={roomSlideIndex}
                 onStateChange={handleWhiteboardStateChange}
                 remoteSnapshot={remoteWhiteboardSnapshot}
-                letStudentsDraw={letStudentsDraw}
-                onToggleStudentDrawing={(allowed) => engineRef.current?.toggleWhiteboardDrawing(allowed)}
+                letStudentsDraw={letStudentsDraw || myDrawAllowed}
+                onToggleStudentDrawing={(allowed) => {
+                      // Show the change at once; the server's reply (and students) follow.
+                      setLetStudentsDraw(allowed);
+                      engineRef.current?.toggleWhiteboardDrawing(allowed);
+                    }}
+                classDrawingAllowed={letStudentsDraw}
+                drawAllowedStudents={drawAllowedPeers}
+                onSetStudentDrawing={(peerId, allowed) => engineRef.current?.setStudentDrawing(peerId, allowed)}
+                onRequestDrawing={() => engineRef.current?.requestDrawing()}
+                    reconnectCount={reconnectCount}
                 onBroadcast={(data) => engineRef.current?.broadcastWhiteboard(data)}
                 onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
                 isFocusMode={isFocusMode}
@@ -3667,7 +3801,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                     <button
                       onClick={() => setIsPipMinimized(false)}
                       title="Expand Video"
-                      className="absolute bottom-20 right-3 md:bottom-4 md:right-4 z-30 p-2 rounded-full bg-zinc-900/95 border border-white/20 text-white shadow-2xl hover:bg-zinc-800 transition flex items-center gap-1 cursor-pointer pointer-events-auto"
+                      className={`absolute ${pipCornerClass} z-30 p-2 rounded-full bg-zinc-900/95 border border-white/20 text-white shadow-2xl hover:bg-zinc-800 transition flex items-center gap-1 cursor-pointer pointer-events-auto`}
                     >
                       <Video className="w-3.5 h-3.5 text-emerald-400" />
                       <span className="text-[10px] font-bold text-zinc-300 pr-0.5">Video</span>
@@ -3676,7 +3810,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                 }
 
                 return (
-                  <div className="absolute bottom-20 right-3 w-20 sm:w-28 md:bottom-4 md:right-4 md:w-44 aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group">
+                  <div
+                    {...pipDragHandlers}
+                    title="Drag to any corner"
+                    style={pipDrag ? { transform: `translate(${pipDrag.x}px, ${pipDrag.y}px)` } : undefined}
+                    // Sized to the board (not the screen), so it shrinks when a side panel narrows the board.
+                    className={`absolute ${pipCornerClass} w-[clamp(4.5rem,20%,11rem)] aspect-video rounded-xl overflow-hidden border border-white/20 bg-zinc-900 shadow-2xl z-30 pointer-events-auto group touch-none ${pipDrag ? "cursor-grabbing opacity-90" : "cursor-grab"}`}
+                  >
                     {pipTrack ? (
                       <VideoTrackPlayer
                         track={pipTrack}
@@ -3698,6 +3838,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
                         e.stopPropagation();
                         setIsPipMinimized(true);
                       }}
+                      data-pip-button
                       title="Minimize Video"
                       className="absolute top-1 right-1 p-0.5 bg-black/60 hover:bg-black/90 text-white/80 hover:text-white rounded transition cursor-pointer"
                     >
