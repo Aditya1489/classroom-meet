@@ -8,6 +8,9 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { AuthProvider } from "./auth/authContext";
 import "./index.css";
+import { initPwa } from "./pwa/pwa";
+
+initPwa();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -20,6 +20,7 @@ import {
   DoorClosed,
 } from "lucide-react";
 import { toast } from "sonner";
+import { InstallAppButton } from "../../pwa/InstallAppButton";
 import { useAuth } from "../../auth/authContext";
 import { AuthRoleModal } from "../auth/AuthRoleModal";
 import { SignOutConfirmModal } from "../auth/SignOutConfirmModal";
@@ -1246,6 +1247,8 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
                     )}
                   </button>
                 )}
+
+                <InstallAppButton className="pt-1" />
 
                 {!isAuthenticated && (
                   <div className="pt-2 text-center">
