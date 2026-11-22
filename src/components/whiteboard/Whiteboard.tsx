@@ -443,6 +443,22 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     };
   }, [editor, isHost]);
 
+  // Laptop shortcut: Shift+N opens "Add a slide" (plain N is tldraw's sticky-note tool).
+  useEffect(() => {
+    if (!isHost) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.key.toLowerCase() !== "n") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      if (editor?.getEditingShapeId()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setIsAddSlideOpen(true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [isHost, editor]);
+
   // Tutor's slide strip (jump, reorder, duplicate, delete, recolour).
   const [isSlideStripOpen, setIsSlideStripOpen] = useState(false);
   const handleSlideAction = (a: SlideAction) => {
@@ -1671,8 +1687,8 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               <button
                 type="button"
                 onClick={() => setIsAddSlideOpen(true)}
-                title="Add a slide"
-                className="min-h-8 shrink-0 rounded-xl border border-[#f59e0b]/40 bg-[#1a1814] px-2.5 text-xs font-bold text-[#f59e0b] hover:bg-white/10"
+                title="Add a slide (Shift+N)"
+                className="min-h-8 max-sm:min-h-11 shrink-0 rounded-xl border border-[#f59e0b]/40 bg-[#1a1814] px-2.5 text-xs font-bold text-[#f59e0b] hover:bg-white/10"
               >
                 + Slide
               </button>
@@ -1682,7 +1698,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                 type="button"
                 onClick={() => setIsSlideStripOpen((v) => !v)}
                 title="All slides"
-                className={`min-h-8 shrink-0 rounded-xl border border-[#f59e0b]/40 px-2.5 text-xs font-bold hover:bg-white/10 ${isSlideStripOpen ? "bg-[#f59e0b] text-black" : "bg-[#1a1814] text-[#f59e0b]"}`}
+                className={`min-h-8 max-sm:min-h-11 shrink-0 rounded-xl border border-[#f59e0b]/40 px-2.5 text-xs font-bold hover:bg-white/10 ${isSlideStripOpen ? "bg-[#f59e0b] text-black" : "bg-[#1a1814] text-[#f59e0b]"}`}
               >
                 Slides
               </button>

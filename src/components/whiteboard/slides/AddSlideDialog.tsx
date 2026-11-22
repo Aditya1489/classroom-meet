@@ -36,7 +36,10 @@ export function AddSlideDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm w-[calc(100%-1rem)] p-4 sm:p-5 gap-4">
+      <DialogContent
+        // Phones: a bottom sheet that is easy to reach with a thumb. Larger screens: a small centred popup.
+        className="max-w-sm w-[calc(100%-1rem)] p-4 sm:p-5 gap-4 max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:w-full max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:max-h-[85dvh] max-sm:overflow-y-auto max-sm:rounded-t-2xl max-sm:pb-[max(1rem,env(safe-area-inset-bottom))] max-sm:data-[state=open]:slide-in-from-bottom max-sm:data-[state=closed]:slide-out-to-bottom"
+      >
         <DialogHeader>
           <DialogTitle>Add a slide</DialogTitle>
         </DialogHeader>
