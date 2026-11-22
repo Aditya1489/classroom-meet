@@ -41,6 +41,7 @@ import { GoogleMeetLeftRail, WorkspaceTab } from "../navigation/GoogleMeetLeftRa
 import { ScheduleClassModal } from "../schedule/ScheduleClassModal";
 import { MyScheduleView } from "../schedule/MyScheduleView";
 import { ClassInviteView } from "../schedule/ClassInviteView";
+import { InstallAppButton } from "../../pwa/InstallAppButton";
 
 interface LandingViewProps {
   onStartMeeting: (code: string, role?: "tutor" | "student") => void;
@@ -442,6 +443,8 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
               </button>
             )}
           </div>
+          {/* Install app: beside Start Class on larger screens, icon only on phones */}
+          <InstallAppButton compact />
 
           {/* Desktop Auth & Help Cluster */}
           <div className="hidden md:flex items-center">
@@ -484,7 +487,7 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
 
             {/* Google Apps Floating Bento Dropdown (No Screen Blackout, Smooth Spring) */}
             {isAppsMenuOpen && (
-              <div className="absolute right-0 top-12 sm:top-14 z-50 w-[300px] sm:w-[350px] bg-[#161512]/95 backdrop-blur-2xl border border-[#f3eee6]/15 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.7)] p-4 text-[#f3eee6] animate-in fade-in zoom-in-95 slide-in-from-top-2 duration-150 origin-top-right">
+              <div className="fixed inset-x-3 top-16 sm:absolute sm:inset-x-auto sm:right-0 sm:top-14 z-50 w-auto sm:w-[350px] bg-[#161512]/95 backdrop-blur-2xl border border-[#f3eee6]/15 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.7)] p-4 text-[#f3eee6] animate-in fade-in zoom-in-95 slide-in-from-top-2 duration-150 origin-top-right">
                 <div className="flex items-center justify-between pb-3 mb-2 border-b border-[#f3eee6]/10">
                   <span className="text-xs font-mono font-bold uppercase tracking-wider text-[#a39e94]">Platform Menu</span>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#f59e0b] border border-[#f59e0b]/30">
@@ -1531,9 +1534,14 @@ export const LandingView: React.FC<LandingViewProps> = ({ onStartMeeting, onOpen
         onClose={() => setShowRoleSwitchModal(false)}
         isLoggedIn={true}
         defaultRole={profile?.role || "tutor"}
+        canTeach={profile?.role === "tutor" || profile?.canTeach !== false}
         onUpdateRole={async (newRole) => {
-          setShowRoleSwitchModal(false);
-          await updateRole(newRole);
+          if (newRole === profile?.role) {
+            setShowRoleSwitchModal(false);
+            return;
+          }
+          // Close only once the server has saved it; on an error the dialog stays open with the message.
+          if (await updateRole(newRole)) setShowRoleSwitchModal(false);
         }}
       />
 

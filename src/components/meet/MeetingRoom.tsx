@@ -23,6 +23,7 @@ import { LocalMeetingRecorder } from "../../services/localRecorder";
 import { useDocumentPiP } from "../../hooks/useDocumentPiP";
 import { FloatingMeetOverlay } from "./FloatingMeetOverlay";
 import { NetBars } from "./NetBars";
+import { useWakeLock } from "@/pwa/pwa";
 import type { NetQuality } from "@/engine/mediasoupClient";
 import { generateTabletCode } from "../../utils/tabletCode";
 import { prepareClassNotesForHandOff } from "../../utils/whiteboardPdf";
@@ -393,6 +394,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
   const [reconnectStartedAt, setReconnectStartedAt] = useState<number | null>(null);
   const [reconnectCount, setReconnectCount] = useState(0);
   const [myNetQuality, setMyNetQuality] = useState<NetQuality>("good");
+  // Keep the phone/laptop screen on for the whole class.
+  useWakeLock(true);
   const reconnectingRef = useRef(false);
   const [, setReconnectTick] = useState(0);
   useEffect(() => {
@@ -2653,12 +2656,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({
               {meetingCode}
             </span>
             <Info className="w-3.5 h-3.5 text-[#a39e94] group-hover:text-[#f59e0b] transition ml-0.5 shrink-0" />
+            {/* Own connection quality, visible on every screen size (phones need it most) */}
+            <NetBars quality={myNetQuality} className="ml-0.5 shrink-0" />
           </button>
 
           <div className="hidden sm:flex items-center gap-1.5 bg-[#1a1814] border border-[#f3eee6]/10 px-2.5 py-1 rounded-full text-xs font-mono text-[#a39e94]">
             <Clock className="w-3.5 h-3.5 text-[#a39e94]" />
             <span>{formatDuration(elapsedSeconds)}</span>
-            <NetBars quality={myNetQuality} className="ml-1" />
           </div>
 
           {/* Role Badge */}

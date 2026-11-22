@@ -2,6 +2,40 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import type { ServerResponse } from "http";
+import type { Plugin } from "vite";
+
+/**
+ * Search-engine files built from VITE_PUBLIC_SITE_URL (the live address, e.g. https://meet.example.com):
+ * canonical link, absolute og:url / og:image, robots.txt and sitemap.xml. Without it, only robots.txt is made.
+ * Private pages (classes, embeds, dashboards) are kept out of search by noindex headers in vercel.json.
+ */
+function seoFiles(siteUrl: string): Plugin {
+  const base = siteUrl.replace(/\/+$/, "");
+  return {
+    name: "mathsy-seo-files",
+    transformIndexHtml(html) {
+      if (!base) return html;
+      return html
+        .replace(/content="\/og-image\.png"/g, `content="${base}/og-image.png"`)
+        .replace("</title>", `</title>\n    <link rel="canonical" href="${base}/" />\n    <meta property="og:url" content="${base}/" />`);
+    },
+    generateBundle() {
+      // Private pages are NOT blocked here: a blocked page can't be crawled, so Google would never see its
+      // "noindex" header (vercel.json) and could still list the bare link. They stay crawlable and noindex.
+      const robots = ["User-agent: *", "Allow: /"];
+      if (base) robots.push("", `Sitemap: ${base}/sitemap.xml`);
+      this.emitFile({ type: "asset", fileName: "robots.txt", source: robots.join("\n") + "\n" });
+      if (base) {
+        const today = new Date().toISOString().slice(0, 10);
+        this.emitFile({
+          type: "asset",
+          fileName: "sitemap.xml",
+          source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>${base}/</loc><lastmod>${today}</lastmod><changefreq>weekly</changefreq><priority>1.0</priority></url>\n</urlset>\n`,
+        });
+      }
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => {
   // Read .env / .env.local so dev ports and proxy targets are configuration, not code.
@@ -31,7 +65,7 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    plugins: [react()],
+    plugins: [react(), seoFiles(env.VITE_PUBLIC_SITE_URL || "")],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),

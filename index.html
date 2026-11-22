@@ -8,10 +8,56 @@
       }
     </script>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%231a73e8'><path d='M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z'/></svg>" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Mathsy Meet — Premium Video Calls & Collaborative Classrooms</title>
-    <meta name="description" content="Secure, high-definition video meetings with collaborative math whiteboard, live interactive polls, and real-time screen sharing." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#16130f" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Mathsy Meet" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Mathsy Meet — Online Classroom for Teachers and Tutors</title>
+    <meta name="description" content="The online classroom for teachers and tutors of every subject. Live video classes, a teaching whiteboard with maths and science tools, teach on your PDFs and slides, class notes PDF, polls, recordings and student drawing permission. Works on phone, tablet and laptop." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="application-name" content="Mathsy Meet" />
+    <!-- Link previews (WhatsApp, Facebook, LinkedIn, X). Canonical URL and og:url are added at build time from VITE_PUBLIC_SITE_URL. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Mathsy Meet" />
+    <meta property="og:locale" content="en_IN" />
+    <meta property="og:title" content="Mathsy Meet — Online Classroom for Teachers and Tutors" />
+    <meta property="og:description" content="Live online classes for every subject: teaching whiteboard with maths and science tools, PDF and slide teaching, notes PDF and recordings — on any device." />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Mathsy Meet — online classroom for teachers and tutors" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Mathsy Meet — Online Classroom for Teachers and Tutors" />
+    <meta name="twitter:description" content="Live online classes for every subject, with a teaching whiteboard, PDF slides, notes PDF and recordings." />
+    <meta name="twitter:image" content="/og-image.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Mathsy Meet",
+        "applicationCategory": "EducationalApplication",
+        "applicationSubCategory": "Online classroom",
+        "operatingSystem": "Web, Android, iOS, iPadOS, Windows, macOS, Linux, ChromeOS",
+        "description": "Online classroom for teachers and tutors of every subject: live video, a teaching whiteboard with maths and science tools (ruler, compass, protractor, set square), PDF and slide teaching, class notes PDF, polls, recordings and per-student drawing permission.",
+        "featureList": [
+          "Live video classes",
+          "Teaching whiteboard for any subject",
+          "Maths and science tools: ruler, compass, protractor and set square",
+          "Teach on imported PDF and PowerPoint slides",
+          "Class notes PDF export",
+          "Polls, chat and raise hand",
+          "Per-student drawing permission",
+          "Class recordings",
+          "Installable app for phone, tablet and computer"
+        ],
+        "inLanguage": "en-IN"
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&family=Geist+Mono:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
@@ -19,6 +65,10 @@
   </head>
   <body class="bg-[#0e0d0b] text-[#f3eee6] selection:bg-[#f59e0b]/30 selection:text-[#f3eee6] antialiased overflow-x-hidden">
     <div id="root"></div>
+    <noscript>
+      <h1>Mathsy Meet — Online Classroom for Teachers and Tutors</h1>
+      <p>Live online classes for teachers, tutors and students of every subject, with a teaching whiteboard (including maths and science tools), PDF and slide teaching, class notes PDF, polls and recordings. Please turn on JavaScript to use Mathsy Meet.</p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
