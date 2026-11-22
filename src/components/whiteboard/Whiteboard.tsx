@@ -11,6 +11,8 @@ import {
   useEditor,
 } from "tldraw";
 import "tldraw/tldraw.css";
+import { AddSlideDialog } from "./slides/AddSlideDialog";
+import { insertBlankSlide, resolveInsertIndex, type SlidePosition } from "./slides/slideOps";
 import { CompassShapeUtil } from "./shapes/CompassShapeUtil";
 import { ProtractorShapeUtil } from "./shapes/ProtractorShapeUtil";
 import { RulerShapeUtil } from "./shapes/RulerShapeUtil";
@@ -357,6 +359,32 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         slideShapeId: targetSlide.shapeId,
         timestamp: Date.now(),
       });
+    }
+  };
+
+  // Tutor adds a blank slide (position + colour); students get it through the normal board sync.
+  const [isAddSlideOpen, setIsAddSlideOpen] = useState(false);
+  const handleAddSlide = (position: SlidePosition, color: string) => {
+    if (!editor || !isHost) return;
+    try {
+      const at = resolveInsertIndex(position, currentSlideIndex, slidesRef.current.length);
+      const result = insertBlankSlide(editor, slidesRef.current, at, color);
+      setPresentationSlides(result.slides);
+      slidesRef.current = result.slides;
+      if (engine && roomCode) {
+        engine.broadcastWhiteboard({
+          type: "presentation-init",
+          roomCode,
+          senderId: myUserId || "local",
+          slides: result.slides,
+          slideIndex: result.index,
+          timestamp: Date.now(),
+        });
+      }
+      goToSlide(result.index);
+    } catch (err) {
+      console.error("[Whiteboard] Could not add slide:", err);
+      toast.error("Could not add the slide. Please try again.");
     }
   };
 
@@ -1559,6 +1587,23 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
           {/* Center Cluster: Slide Controls + Annotation Tools Bar (Directly between Math Canvas & Fit, off the whiteboard screen) */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0 overflow-x-auto no-scrollbar max-w-[65vw]">
+            {isHost && editor && (
+              <button
+                type="button"
+                onClick={() => setIsAddSlideOpen(true)}
+                title="Add a slide"
+                className="min-h-8 shrink-0 rounded-xl border border-[#f59e0b]/40 bg-[#1a1814] px-2.5 text-xs font-bold text-[#f59e0b] hover:bg-white/10"
+              >
+                + Slide
+              </button>
+            )}
+            <AddSlideDialog
+              open={isAddSlideOpen}
+              onOpenChange={setIsAddSlideOpen}
+              slideCount={presentationSlides.length}
+              currentIndex={currentSlideIndex}
+              onAdd={handleAddSlide}
+            />
             {/* Slide Presentation Controls (When Slides are Active) */}
             {presentationSlides.length > 0 && (
               <div
